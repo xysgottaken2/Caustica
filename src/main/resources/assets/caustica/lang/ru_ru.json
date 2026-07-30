@@ -18,6 +18,9 @@
 	"caustica.options.rt.sunSize": "Размер солнца",
 	"caustica.options.rt.sunSize.tooltip": "Угловой радиус диска солнца и луны. Более крупные диски дают более мягкие полутени.",
 
+	"caustica.options.rt.nightBrightness": "Яркость ночи",
+	"caustica.options.rt.nightBrightness.tooltip": "Сколько света дает ночное небо вместе с луной. 0.00 — кромешная тьма, где светят только факелы; большие значения осветляют всю ночь.",
+
 	"caustica.options.rt.entities": "Трассируемые сущности",
 	"caustica.options.rt.entities.tooltip": "Включает сущности и блочные сущности в сцену с трассировкой лучей.",
 
@@ -63,9 +66,8 @@
 
 	"caustica.options.rt.lightsHeader": "Освещение RT",
 	"caustica.options.rt.tonemapHeader": "Тонмаппинг RT",
-	"caustica.options.rt.bloomHeader": "Блум и ночь",
 	"caustica.options.rt.blockEmissiveIntensity": "Яркость светящихся блоков",
-	"caustica.options.rt.blockEmissiveIntensity.tooltip": "Scales light emitted by blocks placed in the world, including torches, glowstone, lanterns, lava and other emissive surfaces.",
+	"caustica.options.rt.blockEmissiveIntensity.tooltip": "Масштабирует свет от блоков в мире: факелов, светокамня, фонарей, лавы и других светящихся поверхностей.",
 	"caustica.options.rt.tonemapOperator": "Тонмаппинг",
 	"caustica.options.rt.tonemapOperator.tooltip": "Кривая тонмаппинга HDR->SDR после экспозиции.",
 	"caustica.options.rt.tonemapOperator.agx": "AgX",
@@ -89,7 +91,5 @@
 	"caustica.options.rt.bloomThreshold": "Порог блума",
 	"caustica.options.rt.bloomThreshold.tooltip": "Минимальная яркость для блума.",
 	"caustica.options.rt.bloomRadius": "Радиус блума",
-	"caustica.options.rt.bloomRadius.tooltip": "Радиус размытия блума.",
-	"caustica.options.rt.moonIntensity": "Яркость луны",
-	"caustica.options.rt.moonIntensity.tooltip": "Яркость лунного света ночью: 0 = кромешная тьма, 0.25 = темно как просили."
+	"caustica.options.rt.bloomRadius.tooltip": "Радиус размытия блума."
 }
