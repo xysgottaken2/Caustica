@@ -38,7 +38,6 @@ public abstract class VideoSettingsScreenMixin {
     private static final Component CAUSTICA$RT_HEADER = Component.translatable("caustica.options.rt.header");
     private static final Component CAUSTICA$RT_LIGHTS_HEADER = Component.translatable("caustica.options.rt.lightsHeader");
     private static final Component CAUSTICA$RT_TONEMAP_HEADER = Component.translatable("caustica.options.rt.tonemapHeader");
-    private static final Component CAUSTICA$RT_BLOOM_HEADER = Component.translatable("caustica.options.rt.bloomHeader");
 
     @Redirect(
         method = "addOptions",
@@ -76,8 +75,6 @@ public abstract class VideoSettingsScreenMixin {
         list.addSmall(RtVideoOptions.lightOptions());
         list.addHeader(CAUSTICA$RT_TONEMAP_HEADER);
         list.addSmall(RtVideoOptions.tonemapOptions());
-        list.addHeader(CAUSTICA$RT_BLOOM_HEADER);
-        list.addSmall(RtVideoOptions.bloomOptions());
     }
 
     @Inject(method = "removed", at = @At("TAIL"))
