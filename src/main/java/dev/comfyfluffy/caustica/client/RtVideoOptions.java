@@ -73,6 +73,36 @@ public final class RtVideoOptions {
         };
     }
 
+    public static OptionInstance<?>[] bloomOptions() {
+        return new OptionInstance<?>[] {
+            bloomEnabled(),
+            bloomIntensity(),
+            bloomThreshold(),
+            bloomRadius(),
+            moonIntensity(),
+        };
+    }
+
+    private static OptionInstance<Boolean> bloomEnabled() {
+        return bool("caustica.options.rt.bloomEnabled", CausticaConfig.Rt.Bloom.ENABLED);
+    }
+
+    private static OptionInstance<Integer> bloomIntensity() {
+        return hundredths("caustica.options.rt.bloomIntensity", CausticaConfig.Rt.Bloom.INTENSITY, 0, 300);
+    }
+
+    private static OptionInstance<Integer> bloomThreshold() {
+        return hundredths("caustica.options.rt.bloomThreshold", CausticaConfig.Rt.Bloom.THRESHOLD, 10, 500);
+    }
+
+    private static OptionInstance<Integer> bloomRadius() {
+        return hundredths("caustica.options.rt.bloomRadius", CausticaConfig.Rt.Bloom.RADIUS, 20, 400);
+    }
+
+    private static OptionInstance<Integer> moonIntensity() {
+        return hundredths("caustica.options.rt.moonIntensity", CausticaConfig.Rt.DayNight.MOON_INTENSITY, 0, 200);
+    }
+
     private static OptionInstance<String> exposureMode() {
         StringSetting setting = CausticaConfig.Rt.Exposure.MODE;
         return new OptionInstance<>(

@@ -33,9 +33,9 @@ public final class RtDisplayPipeline {
     private static final String SHADER_DIR = "/caustica/rt/";
     /**
      * Push constants: int hdrEnabled, float paperWhiteNits/headroom, int tonemapOperator,
-     * float tonemapExposureEv/gamma/saturation/contrast.
+     * float tonemapExposureEv/gamma/saturation/contrast, bloom toggles.
      */
-    private static final int PUSH_BYTES = 8 * Integer.BYTES;
+    private static final int PUSH_BYTES = 12 * Integer.BYTES;
 
     private final RtContext ctx;
     private final long descriptorSetLayout;
@@ -150,11 +150,12 @@ public final class RtDisplayPipeline {
     /**
      * Run the display mapping. The SDR tonemapped output is always written (binding 0). When
      * {@code hdrEnabled}, the PQ-encoded HDR image (binding 3) is also written using the
-     * paper-white/headroom mapping.
+     * paper-white/headroom mapping. Bloom is applied in-scene before tonemapping.
      */
     public void dispatch(VkCommandBuffer cmd, int width, int height, boolean hdrEnabled, float paperWhiteNits,
                          float headroom, int tonemapOperator, float tonemapExposureEv, float tonemapGamma,
-                         float tonemapSaturation, float tonemapContrast) {
+                         float tonemapSaturation, float tonemapContrast,
+                         boolean bloomEnabled, float bloomIntensity, float bloomThreshold, float bloomRadius) {
         try (MemoryStack stack = MemoryStack.stackPush(); RtDebugLabels.Scope ignored = RtDebugLabels.scope(ctx, cmd, "display compute")) {
             VK10.vkCmdBindPipeline(cmd, VK10.VK_PIPELINE_BIND_POINT_COMPUTE, pipeline);
             VK10.vkCmdBindDescriptorSets(cmd, VK10.VK_PIPELINE_BIND_POINT_COMPUTE, pipelineLayout, 0, stack.longs(descriptorSet), null);
@@ -167,9 +168,21 @@ public final class RtDisplayPipeline {
             push.putFloat(20, tonemapGamma);
             push.putFloat(24, tonemapSaturation);
             push.putFloat(28, tonemapContrast);
+            push.putInt(32, bloomEnabled ? 1 : 0);
+            push.putFloat(36, bloomIntensity);
+            push.putFloat(40, bloomThreshold);
+            push.putFloat(44, bloomRadius);
             VK10.vkCmdPushConstants(cmd, pipelineLayout, VK10.VK_SHADER_STAGE_COMPUTE_BIT, 0, push);
             VK10.vkCmdDispatch(cmd, (width + 15) / 16, (height + 15) / 16, 1);
         }
+    }
+
+    /** Legacy overload without bloom (kept for compatibility, bloom off). */
+    public void dispatch(VkCommandBuffer cmd, int width, int height, boolean hdrEnabled, float paperWhiteNits,
+                         float headroom, int tonemapOperator, float tonemapExposureEv, float tonemapGamma,
+                         float tonemapSaturation, float tonemapContrast) {
+        dispatch(cmd, width, height, hdrEnabled, paperWhiteNits, headroom, tonemapOperator, tonemapExposureEv,
+                 tonemapGamma, tonemapSaturation, tonemapContrast, false, 0f, 1f, 1f);
     }
 
     public void destroy() {

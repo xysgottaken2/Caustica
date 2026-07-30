@@ -55,6 +55,8 @@ public final class RtEntityCapture implements VertexConsumer {
     // Decal-stacking rank for the current submission (0 = no offset). Set by the collector from
     // SubmitNodeCollector#order(int) — see emitQuad's coincident-layer push.
     int currentOrder;
+    // Per-submission emissive override for custom geometry (e.g. end portal). 0 = none, >0 = forced emission strength.
+    float currentEmission;
     // When a model textures from an atlas sprite (block entities: chests/signs/beds via a Material),
     // its ModelPart UVs are 0..1 in a virtual texture and must be remapped into the sprite's atlas
     // region — the work vanilla's sprite-coordinate-expander VertexConsumer does, which we bypass.
@@ -90,6 +92,7 @@ public final class RtEntityCapture implements VertexConsumer {
         currentAlphaBucket = RtAccel.ENTITY_BUCKET_ANY_HIT;
         currentOpacity = 1.0f;
         currentOrder = 0;
+        currentEmission = 0f;
         uvRemap = false;
     }
 
@@ -144,6 +147,7 @@ public final class RtEntityCapture implements VertexConsumer {
         target.currentAlphaBucket = currentAlphaBucket;
         target.currentOpacity = currentOpacity;
         target.currentOrder = currentOrder;
+        target.currentEmission = currentEmission;
         target.uvRemap = uvRemap;
         target.uvU0 = uvU0;
         target.uvV0 = uvV0;
@@ -317,7 +321,7 @@ public final class RtEntityCapture implements VertexConsumer {
     }
 
     private void emitQuad() {
-        appendQuad(qx, qy, qz, null, qu, qv, qnx[0], qny[0], qnz[0], qcol[0], false, 0f);
+        appendQuad(qx, qy, qz, null, qu, qv, qnx[0], qny[0], qnz[0], qcol[0], false, currentEmission);
     }
 
     /**
@@ -407,11 +411,12 @@ public final class RtEntityCapture implements VertexConsumer {
         float tb = (c & 0xFF) * (1f / 255f);
         float ta = ((c >>> 24) & 0xFF) * (1f / 255f);
         float opacity = Math.max(0.0f, Math.min(1.0f, ta * currentOpacity));
+        float finalEmission = Math.max(emission, currentEmission);
         for (int t = 0; t < 2; t++) { // one {normal+emission, tint, mat} record per triangle
             prim.add(nx);
             prim.add(ny);
             prim.add(nz);
-            prim.add(emission);
+            prim.add(finalEmission);
             prim.add(tr);
             prim.add(tg);
             prim.add(tb);

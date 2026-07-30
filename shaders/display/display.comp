@@ -18,6 +18,10 @@ layout(push_constant) uniform Push {
     float tonemapGamma;
     float tonemapSaturation;
     float tonemapContrast;
+    int bloomEnabled;
+    float bloomIntensity;
+    float bloomThreshold;
+    float bloomRadius;
 } pc;
 
 // Tonemap seam: map HDR RT radiance to displayable LDR before copying back to the main target.
@@ -121,6 +125,23 @@ vec3 tonemap(vec3 hdr, float exposure) {
     return applyLook(mapped);
 }
 
+vec3 tonemapExposed(vec3 exposed) {
+    // exposed already includes exposure * exp2(ev)
+    vec3 mapped;
+    if (pc.tonemapOperator == 1) {
+        mapped = pbrNeutral(exposed);
+    } else if (pc.tonemapOperator == 2) {
+        mapped = acesFitted(exposed);
+    } else if (pc.tonemapOperator == 3) {
+        mapped = filmic(exposed);
+    } else if (pc.tonemapOperator == 4) {
+        mapped = clamp(max(exposed, vec3(0.0)), 0.0, 1.0);
+    } else {
+        mapped = agx(exposed);
+    }
+    return applyLook(mapped);
+}
+
 const float PQ_M1 = 0.1593017578125;
 const float PQ_M2 = 78.84375;
 const float PQ_C1 = 0.8359375;
@@ -159,6 +180,18 @@ vec3 tonemapHdr(vec3 hdr, float exposure) {
     return vec3(pqEncode(nits2020.r), pqEncode(nits2020.g), pqEncode(nits2020.b));
 }
 
+vec3 tonemapHdrExposed(vec3 exposed) {
+    vec3 c = max(exposed, vec3(0.0));
+    vec3 lo = min(c, vec3(1.0));
+    vec3 hi = max(c - vec3(1.0), vec3(0.0));
+    float k = max(pc.headroom - 1.0, 0.0);
+    vec3 rolled = (k > 0.0) ? (k * hi) / (k + hi) : vec3(0.0);
+    vec3 paperReferred = lo + rolled;
+    vec3 nits709 = paperReferred * pc.paperWhiteNits;
+    vec3 nits2020 = BT709_TO_BT2020 * nits709;
+    return vec3(pqEncode(nits2020.r), pqEncode(nits2020.g), pqEncode(nits2020.b));
+}
+
 void main() {
     ivec2 pix = ivec2(gl_GlobalInvocationID.xy);
     ivec2 size = imageSize(outputImage);
@@ -168,10 +201,52 @@ void main() {
 
     vec4 rt = imageLoad(rtImage, pix);
     float exposure = max(imageLoad(exposureImage, ivec2(0)).r, 0.0);
-    vec3 ldr = tonemap(rt.rgb, exposure);
+    float evScale = exp2(pc.tonemapExposureEv);
+    float totalExposure = exposure * evScale;
+
+    vec3 baseHdr = rt.rgb;
+
+    // Bloom: sample bright areas in a small radius around pixel
+    vec3 bloomAccum = vec3(0.0);
+    if (pc.bloomEnabled != 0 && pc.bloomIntensity > 0.0) {
+        // tunable kernel: 5x5 by default, radius scales step
+        float threshold = max(pc.bloomThreshold, 0.0);
+        float radius = max(pc.bloomRadius, 0.2);
+        int r = 4; // kernel half-size in taps
+        float sigma = radius * 1.2 + 0.8;
+        float twoSigma2 = 2.0 * sigma * sigma;
+        float wSum = 0.0;
+        int step = max(1, int(floor(radius)));
+        for (int dy = -r; dy <= r; ++dy) {
+            for (int dx = -r; dx <= r; ++dx) {
+                ivec2 sampleCoord = pix + ivec2(dx * step, dy * step);
+                sampleCoord = clamp(sampleCoord, ivec2(0), size - ivec2(1));
+                vec3 sampleHdr = imageLoad(rtImage, sampleCoord).rgb;
+                vec3 sampleExposed = sampleHdr * totalExposure;
+                float lum = dot(sampleExposed, vec3(0.2126, 0.7152, 0.0722));
+                if (lum <= threshold) continue;
+                float dist2 = float(dx*dx + dy*dy);
+                float w = exp(-dist2 / twoSigma2);
+                // soft knee: (lum - threshold) scaled, keep color
+                float knee = lum - threshold;
+                vec3 bright = sampleExposed * (knee / max(lum, 0.001));
+                bloomAccum += bright * w;
+                wSum += w;
+            }
+        }
+        if (wSum > 0.0) {
+            bloomAccum /= wSum;
+        }
+        // bloom in exposed domain -> convert back to hdr domain for final addition
+        vec3 bloomHdr = bloomAccum / max(totalExposure, 1e-6);
+        baseHdr += bloomHdr * pc.bloomIntensity;
+    }
+
+    vec3 ldr = tonemap(baseHdr, exposure);
     imageStore(outputImage, pix, vec4(ldr, 1.0));
 
     if (pc.hdrEnabled != 0) {
-        imageStore(hdrImage, pix, vec4(tonemapHdr(rt.rgb, exposure), 1.0));
+        // For HDR we want bloom to also appear: use same baseHdr with bloom already added
+        imageStore(hdrImage, pix, vec4(tonemapHdr(baseHdr, exposure), 1.0));
     }
 }

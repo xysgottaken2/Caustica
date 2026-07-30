@@ -1013,7 +1013,11 @@ public final class RtComposite {
                         CausticaConfig.Rt.Tonemapping.EXPOSURE_EV.value(),
                         CausticaConfig.Rt.Tonemapping.GAMMA.value(),
                         CausticaConfig.Rt.Tonemapping.SATURATION.value(),
-                        CausticaConfig.Rt.Tonemapping.CONTRAST.value());
+                        CausticaConfig.Rt.Tonemapping.CONTRAST.value(),
+                        CausticaConfig.Rt.Bloom.ENABLED.value(),
+                        CausticaConfig.Rt.Bloom.INTENSITY.value(),
+                        CausticaConfig.Rt.Bloom.THRESHOLD.value(),
+                        CausticaConfig.Rt.Bloom.RADIUS.value());
             }
             hdrWrittenThisFrame = CausticaConfig.Rt.Hdr.enabled();
             VulkanCommandEncoder.memoryBarrier(cmd, stack);
@@ -1094,38 +1098,92 @@ public final class RtComposite {
         float moonNoon = Mth.cos(moonAngle);
         moonX = -Mth.sin(moonAngle); moonY = sunNoonY() * moonNoon; moonZ = sunNoonZ() * moonNoon;
         moonPhase = probe.getValue(EnvironmentAttributes.MOON_PHASE, partial).index(); // 0 full .. 4 new
-        // Stars: use Minecraft's actual celestial rotation + brightness (the same values vanilla's
-        // SkyRenderer uses), so the starfield wheels about the celestial pole tied to world time and
-        // fades in/out at dusk/dawn exactly like vanilla. STAR_ANGLE is in degrees -> radians.
         starAngle = probe.getValue(EnvironmentAttributes.STAR_ANGLE, partial) * (float) (Math.PI / 180.0);
         starBrightness = probe.getValue(EnvironmentAttributes.STAR_BRIGHTNESS, partial);
         dayFactor = smoothstep(-0.08f, 0.10f, sunY);
         float[] trans = new float[3];
         if (sunY > -0.05f) {
-            // Sun stays the NEE light through the whole sunset: its colour/intensity is the atmosphere's
-            // own transmittance (same Rayleigh+Mie+ozone march as the sky shader — see
-            // atmosphereTransmittance), so it whitens overhead and reddens+dims into the horizon on
-            // exactly the curve the visible sky follows. The old hand-tuned warmth ramp switched to the
-            // moon at sunY == 0 while the sun was still at ~16% strength, which read as a hard light pop
-            // at sunset/sunrise; transmittance is already near zero at the horizon, and the short
-            // smoothstep below carries the remainder to exactly zero before the moon takes over.
             atmosphereTransmittance(sunX, sunY, sunZ, trans);
             float fade = smoothstep(-0.05f, 0.005f, sunY);
+            // Time-of-day color: sunrise yellowish, sunset pink-orange, midday white.
+            // Base is physical transmittance (already reddens at low sun), then we tint for artistic sunrise/sunset hues.
             float sunPeak = 21.0f;
+            // Artistic temperature based on sun height
+            float t = sunY;
+            float tintR = 1f, tintG = 1f, tintB = 1f;
+            if (t > 0.5f) {
+                // high noon – slightly warm white
+                tintR = 1.0f; tintG = 0.98f; tintB = 0.96f;
+            } else if (t > 0.25f) {
+                float k = (t - 0.25f) / 0.25f; // 0..1
+                // noon->warm
+                tintR = 1.0f;
+                tintG = 0.82f + 0.16f * k;
+                tintB = 0.55f + 0.41f * k;
+            } else if (t > 0.10f) {
+                float k = (t - 0.10f) / 0.15f;
+                tintR = 1.0f;
+                tintG = 0.50f + 0.32f * k;
+                tintB = 0.25f + 0.30f * k;
+            } else if (t > -0.02f) {
+                float k = (t + 0.02f) / 0.12f; // -0.02..0.10
+                // low sun: orange to pink
+                tintR = 1.0f;
+                tintG = 0.35f + 0.15f * k;
+                tintB = 0.35f + 0.10f * k; // pinkish
+                // at very low (<0.02) push pink more
+                if (t < 0.03f) {
+                    float pink = (0.03f - t) / 0.05f;
+                    pink = Math.clamp(pink, 0f, 1f);
+                    tintR = 1.0f;
+                    tintG = tintG * (1f - 0.25f * pink) + 0.25f * pink;
+                    tintB = tintB * (1f - 0.2f * pink) + 0.55f * pink;
+                }
+            } else {
+                tintR = 0.9f; tintG = 0.4f; tintB = 0.45f;
+            }
+            // Sunrise vs sunset detection: same sunY but different time angle
+            // Use sunAngle to know if morning or evening for slight variation
+            float sunAngleNorm = sunAngle / (2f * (float)Math.PI);
+            sunAngleNorm = sunAngleNorm - (float)Math.floor(sunAngleNorm);
+            boolean isSunrise = sunAngleNorm > 0.7f || sunAngleNorm < 0.2f;
+            if (t < 0.20f) {
+                if (isSunrise) {
+                    // sunrise: more golden yellow
+                    tintR = tintR * 0.95f + 1.0f * 0.05f;
+                    tintG = tintG * 0.85f + 0.85f * 0.15f;
+                    tintB = tintB * 0.85f;
+                } else {
+                    // sunset: more pink/red
+                    tintR = Math.min(1.0f, tintR * 1.05f);
+                    tintG = tintG * 0.9f;
+                    tintB = tintB * 1.0f + 0.08f;
+                }
+            }
+
             lx = sunX; ly = sunY; lz = sunZ;
-            rr = sunPeak * trans[0] * fade;
-            rg = sunPeak * trans[1] * fade;
-            rb = sunPeak * trans[2] * fade;
+            // Apply tint on top of physical transmittance
+            rr = sunPeak * trans[0] * fade * tintR;
+            rg = sunPeak * trans[1] * fade * tintG;
+            rb = sunPeak * trans[2] * fade * tintB;
+            // Slight overall brightness variation: midday brighter, low sun dimmer extra for dramatic sunset
+            float brightnessMod = 1.0f;
+            if (t < 0.15f) {
+                brightnessMod = 0.7f + 0.3f * Math.clamp((t + 0.05f) / 0.20f, 0f, 1f);
+            }
+            rr *= brightnessMod; rg *= brightnessMod; rb *= brightnessMod;
             lightRadius = CausticaConfig.Rt.Composite.SUN_ANGULAR_RADIUS.value();
         } else {
-            // Moon: dim cool light, ramping up from zero at the sun→moon handoff (sunY = -0.05, where
-            // the sun fade also reaches zero) so the switch is invisible. Scaled by the lit fraction so
-            // a new moon gives near-zero moonlight, and tinted by the same transmittance so a low moon
-            // is warm amber, silver once high (or zero while it is below the horizon).
+            // Moon: drastically dimmer per user request – night truly dark
             atmosphereTransmittance(moonX, moonY, moonZ, trans);
             float moonStrength = smoothstep(0.04f, 0.22f, -sunY);
             float litFraction = 1.0f - Math.abs(moonPhase - 4.0f) / 4.0f; // 0 new .. 1 full
-            float moonPeak = 0.20f * (0.15f + 0.85f * litFraction);
+            // old: 0.20f * (0.15+0.85*lit)
+            // new: much darker, and new-moon almost black
+            float moonPeak = 0.035f * (0.05f + 0.95f * litFraction);
+            // Apply extra night darkness config if needed
+            float nightDarkness = CausticaConfig.Rt.DayNight.MOON_INTENSITY.value();
+            moonPeak *= nightDarkness;
             lx = moonX; ly = moonY; lz = moonZ;
             rr = 0.30f * moonPeak * moonStrength * trans[0];
             rg = 0.36f * moonPeak * moonStrength * trans[1];

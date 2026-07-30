@@ -59,7 +59,9 @@ public final class CausticaConfig {
             Rt.ENABLED, Rt.Composite.SPP, Rt.Composite.MAX_BOUNCES, Rt.Terrain.ASYNC_DISPATCH_PER_PASS, Rt.Omm.ENABLED,
             Rt.Entities.ENABLED, Rt.Entities.GLOW_ENABLED, Rt.EntityTextures.MAX_TEXTURES, Rt.DlssRr.ENABLED, Rt.Fg.ENABLED,
             Rt.Reflex.ENABLED, Rt.Lights.DYNAMIC_INTENSITY, Rt.Lights.BLOCK_INTENSITY, Rt.Hand.FOV_FOLLOWS_CAMERA,
-            Rt.Exposure.MODE, Rt.Tonemapping.OPERATOR, Rt.FrameStats.ENABLED, Rt.Hdr.ENABLED, Ngx.PATH,
+            Rt.Exposure.MODE, Rt.Tonemapping.OPERATOR, Rt.FrameStats.ENABLED, Rt.Hdr.ENABLED,
+            Rt.DayNight.MOON_INTENSITY, Rt.Bloom.ENABLED, Rt.Bloom.INTENSITY, Rt.Bloom.THRESHOLD, Rt.Bloom.RADIUS,
+            Ngx.PATH,
         };
     }
 
@@ -882,6 +884,31 @@ public final class CausticaConfig {
             public static float headroom() {
                 return Math.max(1.0f, PEAK_NITS.value() / Math.max(1.0f, PAPER_WHITE_NITS.value()));
             }
+        }
+
+        /** Day/night cycle tweaks: moon intensity, night darkness, sunrise/sunset colors. */
+        public static final class DayNight {
+            /** Multiplier for moon direct light (0 = pitch-black night, 1 = old brightness, <1 = dark night). */
+            public static final FloatSetting MOON_INTENSITY =
+                    clampedFloat("caustica.rt.dayNight.moonIntensity", "day-night.moon-intensity", 0.25f, 0.0f, 2.0f);
+            /** Extra tint strength for sunrise/sunset (0 = pure physical transmittance, 1 = full artistic pink/orange). */
+            public static final FloatSetting SUNSET_TINT_STRENGTH =
+                    clampedFloat("caustica.rt.dayNight.sunsetTint", "day-night.sunset-tint-strength", 1.0f, 0.0f, 1.0f);
+
+            private DayNight() {}
+        }
+
+        /** Screen-space bloom around bright emitters (portals, torches, sun). */
+        public static final class Bloom {
+            public static final BooleanSetting ENABLED = bool("caustica.rt.bloom.enabled", "bloom.enabled", true);
+            public static final FloatSetting INTENSITY =
+                    clampedFloat("caustica.rt.bloom.intensity", "bloom.intensity", 0.8f, 0.0f, 3.0f);
+            public static final FloatSetting THRESHOLD =
+                    clampedFloat("caustica.rt.bloom.threshold", "bloom.threshold", 1.0f, 0.1f, 5.0f);
+            public static final FloatSetting RADIUS =
+                    clampedFloat("caustica.rt.bloom.radius", "bloom.radius", 1.0f, 0.2f, 4.0f);
+
+            private Bloom() {}
         }
     }
 
