@@ -18,6 +18,9 @@
 	"caustica.options.rt.sunSize": "Sun Size",
 	"caustica.options.rt.sunSize.tooltip": "Angular radius of the sun and moon disk. Larger discs cast softer shadow penumbrae.",
 
+	"caustica.options.rt.nightBrightness": "Night Brightness",
+	"caustica.options.rt.nightBrightness.tooltip": "How much light the night sky itself gives off, moonlight included. 0.00 is a pitch-black night lit only by torches; higher values brighten the whole night.",
+
 	"caustica.options.rt.entities": "Ray-Traced Entities",
 	"caustica.options.rt.entities.tooltip": "Include entities and block entities in the ray-traced scene.",
 
@@ -63,7 +66,6 @@
 
 	"caustica.options.rt.lightsHeader": "RT Lighting",
 	"caustica.options.rt.tonemapHeader": "RT Tonemapping",
-	"caustica.options.rt.bloomHeader": "Bloom & Night",
 	"caustica.options.rt.blockEmissiveIntensity": "Emissive Block Intensity",
 	"caustica.options.rt.blockEmissiveIntensity.tooltip": "Scales light emitted by blocks placed in the world, including torches, glowstone, lanterns, lava and other emissive surfaces.",
 
@@ -75,8 +77,6 @@
 	"caustica.options.rt.bloomThreshold.tooltip": "Minimum brightness to trigger bloom. Higher = only very bright lights bloom.",
 	"caustica.options.rt.bloomRadius": "Bloom Radius",
 	"caustica.options.rt.bloomRadius.tooltip": "Spread radius of bloom blur.",
-	"caustica.options.rt.moonIntensity": "Moon Intensity",
-	"caustica.options.rt.moonIntensity.tooltip": "Brightness of moonlight at night. 0 = pitch black night, 1 = old, <1 = dark night as requested.",
 	"caustica.options.rt.tonemapOperator": "Tonemap Operator",
 	"caustica.options.rt.tonemapOperator.tooltip": "Selects the HDR-to-SDR tonemapping curve used after exposure.",
 	"caustica.options.rt.tonemapOperator.agx": "AgX",
