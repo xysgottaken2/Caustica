@@ -1,0 +1,55 @@
+#version 460
+
+// Bloom pass 2/3: mip-chain downsample.
+//
+// The 13-tap filter from Jorge Jimenez's "Next Generation Post Processing in Call of Duty: Advanced
+// Warfare" (SIGGRAPH 2014), the same kernel Unity's and Unreal's bloom use. Each of the 13 taps is a
+// bilinear sample sitting on a 2x2 texel corner; with storage images (no sampler) an explicit 4-texel
+// average is exactly that bilinear tap. The overlapping inner quad carries half of the total weight,
+// which is what keeps the chain free of the blocky aliasing a plain box downsample produces.
+
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+
+layout(binding = 0, set = 0, rgba16f) uniform writeonly image2D dstImage; // mip N+1
+layout(binding = 1, set = 0, rgba16f) uniform readonly image2D srcImage;  // mip N
+
+vec3 texel(ivec2 c, ivec2 maxCoord) {
+    return imageLoad(srcImage, clamp(c, ivec2(0), maxCoord)).rgb;
+}
+
+// One bilinear tap centred on the corner shared by the 2x2 block starting at `c`.
+vec3 block(ivec2 c, ivec2 maxCoord) {
+    return 0.25 * (texel(c, maxCoord) + texel(c + ivec2(1, 0), maxCoord)
+            + texel(c + ivec2(0, 1), maxCoord) + texel(c + ivec2(1, 1), maxCoord));
+}
+
+void main() {
+    ivec2 pix = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 dstSize = imageSize(dstImage);
+    if (pix.x >= dstSize.x || pix.y >= dstSize.y) {
+        return;
+    }
+    ivec2 maxCoord = imageSize(srcImage) - ivec2(1);
+    ivec2 base = pix * 2;
+
+    vec3 a = block(base + ivec2(-2, -2), maxCoord);
+    vec3 b = block(base + ivec2(0, -2), maxCoord);
+    vec3 c = block(base + ivec2(2, -2), maxCoord);
+    vec3 d = block(base + ivec2(-2, 0), maxCoord);
+    vec3 e = block(base, maxCoord);
+    vec3 f = block(base + ivec2(2, 0), maxCoord);
+    vec3 g = block(base + ivec2(-2, 2), maxCoord);
+    vec3 h = block(base + ivec2(0, 2), maxCoord);
+    vec3 i = block(base + ivec2(2, 2), maxCoord);
+    vec3 j = block(base + ivec2(-1, -1), maxCoord);
+    vec3 k = block(base + ivec2(1, -1), maxCoord);
+    vec3 l = block(base + ivec2(-1, 1), maxCoord);
+    vec3 m = block(base + ivec2(1, 1), maxCoord);
+
+    vec3 result = e * 0.125
+            + (a + c + g + i) * 0.03125
+            + (b + d + f + h) * 0.0625
+            + (j + k + l + m) * 0.125;
+
+    imageStore(dstImage, pix, vec4(result, 1.0));
+}

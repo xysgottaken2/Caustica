@@ -1,0 +1,62 @@
+#version 460
+
+// Bloom pass 1/3: threshold + half-resolution prefilter.
+//
+// Reads the display-resolution HDR image, applies the compositor's exposure (so the threshold is a
+// display-referred value the player can reason about, not a raw scene-radiance one), Karis-averages
+// the 2x2 source block (weighting each tap by 1/(1+luma)) so a single path-traced firefly cannot
+// dominate a whole bloom texel, then applies a soft-knee threshold. The result is the top of the
+// bloom mip chain, in the exposed domain; display.comp converts it back before adding it in.
+
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+
+layout(binding = 0, set = 0, rgba16f) uniform writeonly image2D dstImage;  // bloom mip 0 (half res)
+layout(binding = 1, set = 0, rgba16f) uniform readonly image2D srcImage;   // display-res HDR scene
+layout(binding = 2, set = 0, r32f) uniform readonly image2D exposureImage; // 1x1 linear exposure scale
+
+layout(push_constant) uniform Push {
+    float threshold;   // exposed-domain luminance where bloom starts
+    float softKnee;    // knee width as a fraction of the threshold (0 = hard cut)
+    float exposureEv;  // extra tonemap exposure bias, matched with display.comp
+} pc;
+
+float luma(vec3 c) {
+    return dot(c, vec3(0.2126, 0.7152, 0.0722));
+}
+
+vec3 fetch(ivec2 c, ivec2 maxCoord) {
+    return max(imageLoad(srcImage, clamp(c, ivec2(0), maxCoord)).rgb, vec3(0.0));
+}
+
+void main() {
+    ivec2 pix = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 dstSize = imageSize(dstImage);
+    if (pix.x >= dstSize.x || pix.y >= dstSize.y) {
+        return;
+    }
+    ivec2 maxCoord = imageSize(srcImage) - ivec2(1);
+    float exposure = max(imageLoad(exposureImage, ivec2(0)).r, 0.0) * exp2(pc.exposureEv);
+
+    // Karis average of the 2x2 source block: firefly suppression before any blur runs.
+    ivec2 base = pix * 2;
+    vec3 sum = vec3(0.0);
+    float weightSum = 0.0;
+    for (int i = 0; i < 4; ++i) {
+        vec3 c = fetch(base + ivec2(i & 1, i >> 1), maxCoord) * exposure;
+        float w = 1.0 / (1.0 + luma(c));
+        sum += c * w;
+        weightSum += w;
+    }
+    vec3 color = sum / max(weightSum, 1.0e-6);
+
+    // Soft-knee threshold: a quadratic ramp of width `knee` below the cutoff, so bloom fades in
+    // instead of popping on when a surface crosses the threshold.
+    float threshold = max(pc.threshold, 0.0);
+    float knee = max(threshold * max(pc.softKnee, 0.0), 1.0e-4);
+    float brightest = max(color.r, max(color.g, color.b));
+    float soft = clamp(brightest - threshold + knee, 0.0, 2.0 * knee);
+    soft = soft * soft / (4.0 * knee);
+    float contribution = max(soft, brightest - threshold) / max(brightest, 1.0e-5);
+
+    imageStore(dstImage, pix, vec4(color * contribution, 1.0));
+}
