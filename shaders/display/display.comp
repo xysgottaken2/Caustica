@@ -6,6 +6,7 @@ layout(binding = 0, set = 0, rgba8) uniform writeonly image2D outputImage; // LD
 layout(binding = 1, set = 0, rgba16f) uniform readonly image2D rtImage; // HDR RT radiance
 layout(binding = 2, set = 0, r32f) uniform readonly image2D exposureImage; // 1x1 linear exposure scale
 layout(binding = 3, set = 0, rgba16f) uniform writeonly image2D hdrImage; // PQ-encoded ([0,1], ST.2084) HDR display
+layout(binding = 4, set = 0, rgba16f) uniform readonly image2D bloomImage; // half-res resolved bloom, exposed domain
 
 // HDR display parameters. hdrEnabled gates the parallel PQ write; the SDR tonemap path always runs because
 // vanilla main-target presentation still consumes LDR.
@@ -20,8 +21,8 @@ layout(push_constant) uniform Push {
     float tonemapContrast;
     int bloomEnabled;
     float bloomIntensity;
-    float bloomThreshold;
-    float bloomRadius;
+    float bloomThreshold;  // owned by the bloom prefilter pass, kept for push-layout stability
+    float bloomRadius;     // owned by the bloom upsample pass, kept for push-layout stability
 } pc;
 
 // Tonemap seam: map HDR RT radiance to displayable LDR before copying back to the main target.
@@ -192,6 +193,20 @@ vec3 tonemapHdrExposed(vec3 exposed) {
     return vec3(pqEncode(nits2020.r), pqEncode(nits2020.g), pqEncode(nits2020.b));
 }
 
+// Bilinear fetch of the half-resolution bloom image at this full-resolution pixel. The chain is already
+// wide and smooth, so a plain bilinear upscale is all that is needed here.
+vec3 sampleBloom(ivec2 pix) {
+    ivec2 maxCoord = imageSize(bloomImage) - ivec2(1);
+    vec2 uv = (vec2(pix) + vec2(0.5)) * 0.5 - vec2(0.5);
+    ivec2 i0 = ivec2(floor(uv));
+    vec2 t = uv - vec2(i0);
+    vec3 s00 = imageLoad(bloomImage, clamp(i0, ivec2(0), maxCoord)).rgb;
+    vec3 s10 = imageLoad(bloomImage, clamp(i0 + ivec2(1, 0), ivec2(0), maxCoord)).rgb;
+    vec3 s01 = imageLoad(bloomImage, clamp(i0 + ivec2(0, 1), ivec2(0), maxCoord)).rgb;
+    vec3 s11 = imageLoad(bloomImage, clamp(i0 + ivec2(1, 1), ivec2(0), maxCoord)).rgb;
+    return max(mix(mix(s00, s10, t.x), mix(s01, s11, t.x), t.y), vec3(0.0));
+}
+
 void main() {
     ivec2 pix = ivec2(gl_GlobalInvocationID.xy);
     ivec2 size = imageSize(outputImage);
@@ -206,39 +221,11 @@ void main() {
 
     vec3 baseHdr = rt.rgb;
 
-    // Bloom: sample bright areas in a small radius around pixel
-    vec3 bloomAccum = vec3(0.0);
+    // Bloom is produced by the prefilter/downsample/upsample chain in the exposed domain; undo the
+    // exposure here so the additive blend happens in the same scene-referred space as the RT radiance
+    // and both tonemap paths (SDR and PQ) see the identical input.
     if (pc.bloomEnabled != 0 && pc.bloomIntensity > 0.0) {
-        // tunable kernel: 5x5 by default, radius scales step
-        float threshold = max(pc.bloomThreshold, 0.0);
-        float radius = max(pc.bloomRadius, 0.2);
-        int r = 4; // kernel half-size in taps
-        float sigma = radius * 1.2 + 0.8;
-        float twoSigma2 = 2.0 * sigma * sigma;
-        float wSum = 0.0;
-        int step = max(1, int(floor(radius)));
-        for (int dy = -r; dy <= r; ++dy) {
-            for (int dx = -r; dx <= r; ++dx) {
-                ivec2 sampleCoord = pix + ivec2(dx * step, dy * step);
-                sampleCoord = clamp(sampleCoord, ivec2(0), size - ivec2(1));
-                vec3 sampleHdr = imageLoad(rtImage, sampleCoord).rgb;
-                vec3 sampleExposed = sampleHdr * totalExposure;
-                float lum = dot(sampleExposed, vec3(0.2126, 0.7152, 0.0722));
-                if (lum <= threshold) continue;
-                float dist2 = float(dx*dx + dy*dy);
-                float w = exp(-dist2 / twoSigma2);
-                // soft knee: (lum - threshold) scaled, keep color
-                float knee = lum - threshold;
-                vec3 bright = sampleExposed * (knee / max(lum, 0.001));
-                bloomAccum += bright * w;
-                wSum += w;
-            }
-        }
-        if (wSum > 0.0) {
-            bloomAccum /= wSum;
-        }
-        // bloom in exposed domain -> convert back to hdr domain for final addition
-        vec3 bloomHdr = bloomAccum / max(totalExposure, 1e-6);
+        vec3 bloomHdr = sampleBloom(pix) / max(totalExposure, 1.0e-6);
         baseHdr += bloomHdr * pc.bloomIntensity;
     }
 
