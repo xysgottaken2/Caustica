@@ -36,6 +36,8 @@ public final class RtDisplayPipeline {
      * float tonemapExposureEv/gamma/saturation/contrast, bloom toggles.
      */
     private static final int PUSH_BYTES = 12 * Integer.BYTES;
+    /** Storage images: output, RT color, exposure, HDR output, resolved bloom. */
+    private static final int BINDING_COUNT = 5;
 
     private final RtContext ctx;
     private final long descriptorSetLayout;
@@ -47,6 +49,7 @@ public final class RtDisplayPipeline {
     private long boundRtView;
     private long boundExposureView;
     private long boundHdrView;
+    private long boundBloomView;
     private boolean destroyed;
 
     private RtDisplayPipeline(RtContext ctx, long dsl, long pool, long set, long layout, long pipeline) {
@@ -61,15 +64,11 @@ public final class RtDisplayPipeline {
     public static RtDisplayPipeline create(RtContext ctx) {
         VkDevice vk = ctx.vk();
         try (MemoryStack stack = MemoryStack.stackPush()) {
-            VkDescriptorSetLayoutBinding.Buffer binds = VkDescriptorSetLayoutBinding.calloc(4, stack);
-            binds.get(0).binding(0).descriptorType(VK10.VK_DESCRIPTOR_TYPE_STORAGE_IMAGE)
-                    .descriptorCount(1).stageFlags(VK10.VK_SHADER_STAGE_COMPUTE_BIT);
-            binds.get(1).binding(1).descriptorType(VK10.VK_DESCRIPTOR_TYPE_STORAGE_IMAGE)
-                    .descriptorCount(1).stageFlags(VK10.VK_SHADER_STAGE_COMPUTE_BIT);
-            binds.get(2).binding(2).descriptorType(VK10.VK_DESCRIPTOR_TYPE_STORAGE_IMAGE)
-                    .descriptorCount(1).stageFlags(VK10.VK_SHADER_STAGE_COMPUTE_BIT);
-            binds.get(3).binding(3).descriptorType(VK10.VK_DESCRIPTOR_TYPE_STORAGE_IMAGE)
-                    .descriptorCount(1).stageFlags(VK10.VK_SHADER_STAGE_COMPUTE_BIT);
+            VkDescriptorSetLayoutBinding.Buffer binds = VkDescriptorSetLayoutBinding.calloc(BINDING_COUNT, stack);
+            for (int i = 0; i < BINDING_COUNT; i++) {
+                binds.get(i).binding(i).descriptorType(VK10.VK_DESCRIPTOR_TYPE_STORAGE_IMAGE)
+                        .descriptorCount(1).stageFlags(VK10.VK_SHADER_STAGE_COMPUTE_BIT);
+            }
 
             VkDescriptorSetLayoutCreateInfo dslci = VkDescriptorSetLayoutCreateInfo.calloc(stack).sType$Default().pBindings(binds);
             LongBuffer p = stack.mallocLong(1);
@@ -78,7 +77,7 @@ public final class RtDisplayPipeline {
             RtDebugLabels.name(ctx, VK10.VK_OBJECT_TYPE_DESCRIPTOR_SET_LAYOUT, dsl, "display descriptor set layout");
 
             VkDescriptorPoolSize.Buffer poolSizes = VkDescriptorPoolSize.calloc(1, stack);
-            poolSizes.get(0).type(VK10.VK_DESCRIPTOR_TYPE_STORAGE_IMAGE).descriptorCount(4);
+            poolSizes.get(0).type(VK10.VK_DESCRIPTOR_TYPE_STORAGE_IMAGE).descriptorCount(BINDING_COUNT);
             VkDescriptorPoolCreateInfo dpci = VkDescriptorPoolCreateInfo.calloc(stack).sType$Default().maxSets(1).pPoolSizes(poolSizes);
             check(VK10.vkCreateDescriptorPool(vk, dpci, null, p), "vkCreateDescriptorPool(rt display)");
             long pool = p.get(0);
@@ -115,42 +114,42 @@ public final class RtDisplayPipeline {
         }
     }
 
-    public void setImages(long outputImageView, long rtImageView, long exposureImageView, long hdrImageView) {
+    public void setImages(long outputImageView, long rtImageView, long exposureImageView, long hdrImageView,
+                          long bloomImageView) {
         if (boundOutputView == outputImageView && boundRtView == rtImageView
-                && boundExposureView == exposureImageView && boundHdrView == hdrImageView) {
+                && boundExposureView == exposureImageView && boundHdrView == hdrImageView
+                && boundBloomView == bloomImageView) {
             return;
         }
         try (MemoryStack stack = MemoryStack.stackPush()) {
-            VkDescriptorImageInfo.Buffer outputInfo = VkDescriptorImageInfo.calloc(1, stack);
-            outputInfo.get(0).imageView(outputImageView).imageLayout(VK10.VK_IMAGE_LAYOUT_GENERAL);
-            VkDescriptorImageInfo.Buffer rtInfo = VkDescriptorImageInfo.calloc(1, stack);
-            rtInfo.get(0).imageView(rtImageView).imageLayout(VK10.VK_IMAGE_LAYOUT_GENERAL);
-            VkDescriptorImageInfo.Buffer exposureInfo = VkDescriptorImageInfo.calloc(1, stack);
-            exposureInfo.get(0).imageView(exposureImageView).imageLayout(VK10.VK_IMAGE_LAYOUT_GENERAL);
-            VkDescriptorImageInfo.Buffer hdrInfo = VkDescriptorImageInfo.calloc(1, stack);
-            hdrInfo.get(0).imageView(hdrImageView).imageLayout(VK10.VK_IMAGE_LAYOUT_GENERAL);
-
-            VkWriteDescriptorSet.Buffer writes = VkWriteDescriptorSet.calloc(4, stack);
-            writes.get(0).sType$Default().dstSet(descriptorSet).dstBinding(0)
-                    .descriptorCount(1).descriptorType(VK10.VK_DESCRIPTOR_TYPE_STORAGE_IMAGE).pImageInfo(outputInfo);
-            writes.get(1).sType$Default().dstSet(descriptorSet).dstBinding(1)
-                    .descriptorCount(1).descriptorType(VK10.VK_DESCRIPTOR_TYPE_STORAGE_IMAGE).pImageInfo(rtInfo);
-            writes.get(2).sType$Default().dstSet(descriptorSet).dstBinding(2)
-                    .descriptorCount(1).descriptorType(VK10.VK_DESCRIPTOR_TYPE_STORAGE_IMAGE).pImageInfo(exposureInfo);
-            writes.get(3).sType$Default().dstSet(descriptorSet).dstBinding(3)
-                    .descriptorCount(1).descriptorType(VK10.VK_DESCRIPTOR_TYPE_STORAGE_IMAGE).pImageInfo(hdrInfo);
+            VkWriteDescriptorSet.Buffer writes = VkWriteDescriptorSet.calloc(BINDING_COUNT, stack);
+            writeImage(writes, 0, stack, outputImageView);
+            writeImage(writes, 1, stack, rtImageView);
+            writeImage(writes, 2, stack, exposureImageView);
+            writeImage(writes, 3, stack, hdrImageView);
+            writeImage(writes, 4, stack, bloomImageView);
             VK10.vkUpdateDescriptorSets(ctx.vk(), writes, null);
         }
         boundOutputView = outputImageView;
         boundRtView = rtImageView;
         boundExposureView = exposureImageView;
         boundHdrView = hdrImageView;
+        boundBloomView = bloomImageView;
+    }
+
+    private void writeImage(VkWriteDescriptorSet.Buffer writes, int binding, MemoryStack stack, long view) {
+        VkDescriptorImageInfo.Buffer info = VkDescriptorImageInfo.calloc(1, stack);
+        info.get(0).imageView(view).imageLayout(VK10.VK_IMAGE_LAYOUT_GENERAL);
+        writes.get(binding).sType$Default().dstSet(descriptorSet).dstBinding(binding)
+                .descriptorCount(1).descriptorType(VK10.VK_DESCRIPTOR_TYPE_STORAGE_IMAGE).pImageInfo(info);
     }
 
     /**
      * Run the display mapping. The SDR tonemapped output is always written (binding 0). When
      * {@code hdrEnabled}, the PQ-encoded HDR image (binding 3) is also written using the
-     * paper-white/headroom mapping. Bloom is applied in-scene before tonemapping.
+     * paper-white/headroom mapping. Bloom comes in pre-resolved from {@link RtBloomPipeline} and is added
+     * to the scene radiance before tonemapping; {@code bloomThreshold}/{@code bloomRadius} are consumed by
+     * that chain, and are pushed here only to keep the push-constant layout stable.
      */
     public void dispatch(VkCommandBuffer cmd, int width, int height, boolean hdrEnabled, float paperWhiteNits,
                          float headroom, int tonemapOperator, float tonemapExposureEv, float tonemapGamma,
