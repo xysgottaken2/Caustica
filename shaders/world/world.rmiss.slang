@@ -31,10 +31,13 @@ static const float SKY_SATURATION = 1.2;
 // distance 100 → half-angle = atan(0.30) / atan(0.20). Decoupled from the NEE light radius (≈0.6°).
 static const float SUN_DISC_HALF_ANGLE  = 0.29146; // atan(30/100), vanilla sun size
 static const float MOON_DISC_HALF_ANGLE = 0.19740; // atan(20/100), vanilla moon size
-// Faint night-sky ambient so the night isn't pure black where the atmosphere in-scatter falls to zero.
-// Made much darker per user request – night should be truly dark.
-static const float3 NIGHT_ZENITH  = float3(0.004, 0.008, 0.022) / 25.0;
-static const float3 NIGHT_HORIZON = float3(0.015, 0.022, 0.045) / 25.0;
+// Night-sky ambient: the sky's own residual radiance once the sun is gone (airglow + scattered
+// moonlight), which is what keeps a night scene readable instead of pitch black. These are the values
+// at night brightness 1.0; worldPush.lightScales.z scales them, so the setting has real authority over
+// how dark the night gets. They used to be divided by 25, which made them numerically irrelevant and
+// left the night lit exclusively by block emitters.
+static const float3 NIGHT_ZENITH  = float3(0.004, 0.008, 0.022);
+static const float3 NIGHT_HORIZON = float3(0.015, 0.022, 0.045);
 
 // ---- Physically-based atmosphere (Nishita / O'Neil single scattering + ozone absorption). A view ray
 // is marched through the atmospheric shell; at each step the transmittance toward the sun is integrated
@@ -176,17 +179,24 @@ float3 rotateAxis(float3 v, float3 axis, float ang) {
     return v * c + cross(axis, v) * s + axis * dot(axis, v) * (1.0 - c);
 }
 
-// Procedural starfield, a faithful port of vanilla's buildStars(): ~1500 discrete stars at random
-// sphere directions, each a small SQUARE billboard of random size + random rotation. A cube-map grid is
-// the spatial accelerator — at most one star per cell, placed at a hashed position INSET from the cell
+// Procedural starfield, a faithful port of vanilla's buildStars(): discrete stars at random sphere
+// directions, each a small SQUARE billboard of random size + random rotation. A cube-map grid is the
+// spatial accelerator — at most one star per cell, placed at a hashed position INSET from the cell
 // edges (so its square never crosses into a neighbour), drawn as a hash-rotated square of hashed size.
 // The lookup direction is rotated about the celestial pole by -STAR_ANGLE so the field wheels with
 // world time like the real sky.
-static const float STAR_CELLS     = 21.0;  // cube-face grid resolution; with the threshold gives ~1500 stars
-static const float STAR_THRESHOLD = 0.86;  // cell occupancy cutoff (higher = fewer stars)
+static const float STAR_CELLS     = 21.0;  // cube-face grid resolution
+static const float STAR_THRESHOLD = 0.935; // cell occupancy cutoff (higher = fewer stars)
 static const float STAR_HALF      = 0.045; // star half-size as a fraction of a cell (≈ vanilla 0.11° at center)
+// Vanilla's star brightness attribute tops out around 0.5 and starts rising the moment the sun dips.
+// Normalising by that maximum and raising it to a power keeps the full-night level intact while pushing
+// the onset later into dusk, so stars no longer appear over a still-bright sunset sky.
+static const float STAR_BRIGHTNESS_MAX   = 0.5;
+static const float STAR_ONSET_EXPONENT   = 2.5;
 float3 stars(float3 dir, float starBrightness, float VdotS, float4 celestial) {
     if (starBrightness <= 0.0 || dir.y <= 0.0) return float3(0.0, 0.0, 0.0);
+    float fade = pow(clamp(starBrightness / STAR_BRIGHTNESS_MAX, 0.0, 1.0), STAR_ONSET_EXPONENT);
+    if (fade <= 0.0) return float3(0.0, 0.0, 0.0);
     // Negative angle: rotating the LOOKUP direction is the inverse of rotating star geometry, so
     // -starAngle makes the field wheel the SAME way as the sun/moon (whose world dirs are
     // forward-rotated on the CPU).
@@ -217,7 +227,7 @@ float3 stars(float3 dir, float starBrightness, float VdotS, float4 celestial) {
     // Per-star colour temperature: hash picks a spot on a warm-orange ↔ blue-white ramp (real star
     // populations). Average luminance close to the old uniform constant so night exposure doesn't shift.
     float3 starCol = lerp(float3(0.78, 0.60, 0.42), float3(0.50, 0.62, 0.95), hash13(id + 137.0));
-    return 0.2 * star * starCol * starBrightness;
+    return 0.2 * star * starCol * fade;
 }
 
 [shader("miss")]
@@ -230,6 +240,9 @@ void main(inout Payload payload) {
     float VdotS = dot(dir, sd);
     float sunUp = clamp((SdotU + 0.0625) / 0.125, 0.0, 1.0); // 0 well below horizon .. 1 above
     float starBrightness = worldPush.lightRadiance.w;
+    // Night brightness setting (lightScales.z): scales the residual night sky radiance, which in turn is
+    // what the path tracer gathers as ambient light on the world after sunset.
+    float nightScale = max(worldPush.lightScales.z, 0.0);
     bool showCelestial = (payload.flags & PAYLOAD_SHOW_CELESTIAL) != 0u;
 
     // Physically-based in-scattering: blue zenith, bright/desaturated horizon, warm Mie halo + red
@@ -253,7 +266,7 @@ void main(inout Payload payload) {
     float lum = dot(col, float3(0.2126, 0.7152, 0.0722));
     col = max(lerp(float3(lum, lum, lum), col, SKY_SATURATION), float3(0.0, 0.0, 0.0));
     float up = clamp(dir.y, 0.0, 1.0);
-    float3 nightAmbient = lerp(NIGHT_HORIZON, NIGHT_ZENITH, up);
+    float3 nightAmbient = lerp(NIGHT_HORIZON, NIGHT_ZENITH, up) * nightScale;
     col += nightAmbient * (1.0 - day);
     col *= downFade;
     col += stars(dir, starBrightness, VdotS, worldPush.celestial);
