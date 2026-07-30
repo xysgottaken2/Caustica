@@ -1,0 +1,17 @@
+{
+	"format": 1,
+	"match": {
+		"sprite": "minecraft:block/nether_portal"
+	},
+	"model": "dielectric",
+	"base": {
+		"roughness": 0.02
+	},
+	"transmission": {
+		"factor": 0.55,
+		"ior": 1.28
+	},
+	"emission": {
+		"strength": 0.06
+	}
+}
