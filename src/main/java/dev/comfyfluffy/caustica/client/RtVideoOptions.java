@@ -35,6 +35,7 @@ public final class RtVideoOptions {
             spp(),
             maxBounces(),
             sunSize(),
+            nightBrightness(),
             entities(),
             particles(),
             waterWaves(),
@@ -60,7 +61,11 @@ public final class RtVideoOptions {
         };
     }
 
-    /** Tonemapping/exposure options for the display-mapping pass. */
+    /**
+     * Tonemapping/exposure options for the display-mapping pass, bloom included: bloom is part of the same
+     * pass, is authored in the same exposed domain as the tonemap curve, and its threshold is only
+     * meaningful relative to the exposure settings right above it.
+     */
     public static OptionInstance<?>[] tonemapOptions() {
         return new OptionInstance<?>[] {
             exposureMode(),
@@ -70,16 +75,10 @@ public final class RtVideoOptions {
             tonemapGamma(),
             tonemapSaturation(),
             tonemapContrast(),
-        };
-    }
-
-    public static OptionInstance<?>[] bloomOptions() {
-        return new OptionInstance<?>[] {
             bloomEnabled(),
             bloomIntensity(),
             bloomThreshold(),
             bloomRadius(),
-            moonIntensity(),
         };
     }
 
@@ -99,8 +98,13 @@ public final class RtVideoOptions {
         return hundredths("caustica.options.rt.bloomRadius", CausticaConfig.Rt.Bloom.RADIUS, 20, 400);
     }
 
-    private static OptionInstance<Integer> moonIntensity() {
-        return hundredths("caustica.options.rt.moonIntensity", CausticaConfig.Rt.DayNight.MOON_INTENSITY, 0, 200);
+    /**
+     * How much light the night sky itself gives off. One slider covers the whole night: it scales both the
+     * sky's residual night radiance (which the path tracer gathers as ambient) and the moon's direct light,
+     * so 0 is a truly pitch-black night lit only by torches and 2.00 is a bright moonlit one.
+     */
+    private static OptionInstance<Integer> nightBrightness() {
+        return hundredths("caustica.options.rt.nightBrightness", CausticaConfig.Rt.DayNight.MOON_INTENSITY, 0, 200);
     }
 
     private static OptionInstance<String> exposureMode() {
