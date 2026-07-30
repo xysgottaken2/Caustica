@@ -54,6 +54,7 @@ import dev.comfyfluffy.caustica.rt.material.RtBlockMaterials;
 import dev.comfyfluffy.caustica.rt.material.RtEmissionSemantics;
 import dev.comfyfluffy.caustica.rt.material.RtMaterialOverrides;
 import dev.comfyfluffy.caustica.rt.material.RtMaterialRegistry;
+import dev.comfyfluffy.caustica.rt.pipeline.RtBloomPipeline;
 import dev.comfyfluffy.caustica.rt.pipeline.RtDisplayPipeline;
 import dev.comfyfluffy.caustica.rt.pipeline.RtDlssFg;
 import dev.comfyfluffy.caustica.rt.pipeline.RtDlssRr;
@@ -180,6 +181,9 @@ public final class RtComposite {
     private PushSlot[] pushRing;
     private int pushSlot;
     private RtDisplayPipeline displayPipeline;
+    // Mip-chain bloom feeding the display pass (prefilter -> downsample* -> upsample*). Sized alongside the
+    // display images; its resolved half-res result is bound into the display pipeline.
+    private RtBloomPipeline bloomPipeline;
     private RtImage output;
     // Packed primary -> indirect continuations. Pass A is fixed at one sample and owns two records per
     // render pixel (base + optional transmission); Pass B resamples them at the configured SPP.
@@ -461,6 +465,9 @@ public final class RtComposite {
         try {
             if (displayPipeline == null) {
                 displayPipeline = RtDisplayPipeline.create(ctx);
+            }
+            if (bloomPipeline == null) {
+                bloomPipeline = RtBloomPipeline.create(ctx);
             }
             // A resource reload re-stitches the block atlas. We've already torn down the world pipeline
             // (onResourceReloadStart) so nothing references the old atlas, but MC's deferred free keeps the
@@ -762,7 +769,11 @@ public final class RtComposite {
             worldPipeline.setStorageImage(output.view);
             bindGuideImages();
         }
-        displayPipeline.setImages(displayImage.view, rrOutput.view, exposure.image().view, hdrDisplayImage.view);
+        // The bloom chain reads the same display-res RT image and exposure image the display pass does, so
+        // it is (re)built here, while the device is idle and the views are known good.
+        bloomPipeline.ensure(rrOutput.view, exposure.image().view, width, height);
+        displayPipeline.setImages(displayImage.view, rrOutput.view, exposure.image().view, hdrDisplayImage.view,
+                bloomPipeline.resolvedView());
     }
 
     /**
@@ -920,9 +931,11 @@ public final class RtComposite {
                     new Int4(terrain.lightGridDimX(), terrain.lightGridDimY(), terrain.lightGridDimZ(), 0),
                     terrain.lightCount(),
                     CausticaConfig.Rt.Lights.RIS_CANDIDATES.value(),
+                    // z = night brightness: the sky miss shader scales its night ambient by it, so the one
+                    // slider dims or lifts the whole night, not just the moon's direct light below.
                     new Float4(CausticaConfig.Rt.Lights.BLOCK_INTENSITY.value(),
                             CausticaConfig.Rt.Lights.DYNAMIC_INTENSITY.value(),
-                            0.0f, 0.0f)
+                            CausticaConfig.Rt.DayNight.MOON_INTENSITY.value(), 0.0f)
             ).write(push);
             pushBuf.flush(0L, WORLD_PUSH_SIZE);
             // Upload any entity textures registered this frame into the bindless set before the trace.
@@ -1005,6 +1018,21 @@ public final class RtComposite {
             }
             VulkanCommandEncoder.memoryBarrier(cmd, stack); // exposure image visible to the display mapper
 
+            // Bloom runs between exposure and the display mapping: the prefilter needs this frame's
+            // exposure to threshold in the same domain the tonemap curve works in, and the display pass
+            // needs the finished chain. Skipped entirely when bloom is off or its intensity is zero.
+            boolean bloomActive = CausticaConfig.Rt.Bloom.ENABLED.value()
+                    && CausticaConfig.Rt.Bloom.INTENSITY.value() > 0.0f
+                    && bloomPipeline.ready();
+            if (bloomActive) {
+                try (RtFrameStats.Scope ignoredStats = RtFrameStats.FRAME.stage("frame.bloom")) {
+                    bloomPipeline.record(cmd, stack, CausticaConfig.Rt.Bloom.THRESHOLD.value(),
+                            CausticaConfig.Rt.Tonemapping.EXPOSURE_EV.value(),
+                            CausticaConfig.Rt.Bloom.RADIUS.value());
+                }
+                VulkanCommandEncoder.memoryBarrier(cmd, stack); // bloom writes visible to the display mapper
+            }
+
             try (RtDebugLabels.Scope ignored = RtDebugLabels.scope(ctx, cmd, "map RT to display");
                  RtFrameStats.Scope ignoredStats = RtFrameStats.FRAME.stage("frame.displayMap")) {
                 displayPipeline.dispatch(cmd, displayW, displayH, CausticaConfig.Rt.Hdr.enabled(),
@@ -1014,7 +1042,7 @@ public final class RtComposite {
                         CausticaConfig.Rt.Tonemapping.GAMMA.value(),
                         CausticaConfig.Rt.Tonemapping.SATURATION.value(),
                         CausticaConfig.Rt.Tonemapping.CONTRAST.value(),
-                        CausticaConfig.Rt.Bloom.ENABLED.value(),
+                        bloomActive,
                         CausticaConfig.Rt.Bloom.INTENSITY.value(),
                         CausticaConfig.Rt.Bloom.THRESHOLD.value(),
                         CausticaConfig.Rt.Bloom.RADIUS.value());
@@ -1105,85 +1133,31 @@ public final class RtComposite {
         if (sunY > -0.05f) {
             atmosphereTransmittance(sunX, sunY, sunZ, trans);
             float fade = smoothstep(-0.05f, 0.005f, sunY);
-            // Time-of-day color: sunrise yellowish, sunset pink-orange, midday white.
-            // Base is physical transmittance (already reddens at low sun), then we tint for artistic sunrise/sunset hues.
+            // The sun's colour at any elevation IS the atmospheric transmittance along its own direction:
+            // the very function the sky shader tints its disc and horizon with, so sunlight on terrain can
+            // never disagree with the sky behind it. The old hand-authored tint ladder (pink/orange steps
+            // keyed off sunY) is gone; all that survives is a small warm residual, scaled by
+            // SUNSET_TINT_STRENGTH, for people who want a pushed sunset.
             float sunPeak = 21.0f;
-            // Artistic temperature based on sun height
-            float t = sunY;
-            float tintR = 1f, tintG = 1f, tintB = 1f;
-            if (t > 0.5f) {
-                // high noon – slightly warm white
-                tintR = 1.0f; tintG = 0.98f; tintB = 0.96f;
-            } else if (t > 0.25f) {
-                float k = (t - 0.25f) / 0.25f; // 0..1
-                // noon->warm
-                tintR = 1.0f;
-                tintG = 0.82f + 0.16f * k;
-                tintB = 0.55f + 0.41f * k;
-            } else if (t > 0.10f) {
-                float k = (t - 0.10f) / 0.15f;
-                tintR = 1.0f;
-                tintG = 0.50f + 0.32f * k;
-                tintB = 0.25f + 0.30f * k;
-            } else if (t > -0.02f) {
-                float k = (t + 0.02f) / 0.12f; // -0.02..0.10
-                // low sun: orange to pink
-                tintR = 1.0f;
-                tintG = 0.35f + 0.15f * k;
-                tintB = 0.35f + 0.10f * k; // pinkish
-                // at very low (<0.02) push pink more
-                if (t < 0.03f) {
-                    float pink = (0.03f - t) / 0.05f;
-                    pink = Math.clamp(pink, 0f, 1f);
-                    tintR = 1.0f;
-                    tintG = tintG * (1f - 0.25f * pink) + 0.25f * pink;
-                    tintB = tintB * (1f - 0.2f * pink) + 0.55f * pink;
-                }
-            } else {
-                tintR = 0.9f; tintG = 0.4f; tintB = 0.45f;
-            }
-            // Sunrise vs sunset detection: same sunY but different time angle
-            // Use sunAngle to know if morning or evening for slight variation
-            float sunAngleNorm = sunAngle / (2f * (float)Math.PI);
-            sunAngleNorm = sunAngleNorm - (float)Math.floor(sunAngleNorm);
-            boolean isSunrise = sunAngleNorm > 0.7f || sunAngleNorm < 0.2f;
-            if (t < 0.20f) {
-                if (isSunrise) {
-                    // sunrise: more golden yellow
-                    tintR = tintR * 0.95f + 1.0f * 0.05f;
-                    tintG = tintG * 0.85f + 0.85f * 0.15f;
-                    tintB = tintB * 0.85f;
-                } else {
-                    // sunset: more pink/red
-                    tintR = Math.min(1.0f, tintR * 1.05f);
-                    tintG = tintG * 0.9f;
-                    tintB = tintB * 1.0f + 0.08f;
-                }
-            }
-
+            // 1 with the disc on the horizon, 0 by ~14 degrees up.
+            float low = 1.0f - smoothstep(0.0f, 0.25f, sunY);
+            // Real sunsets are dim. By the time the disc touches the horizon the direct beam has crossed
+            // dozens of air masses and most of the scene is lit by skylight instead; transmittance alone
+            // still leaves the beam too hot next to that (already dim) sky, so roll the peak down with it.
+            float horizonDim = 1.0f - 0.45f * low * low;
+            float warm = 0.12f * low * CausticaConfig.Rt.DayNight.SUNSET_TINT_STRENGTH.value();
             lx = sunX; ly = sunY; lz = sunZ;
-            // Apply tint on top of physical transmittance
-            rr = sunPeak * trans[0] * fade * tintR;
-            rg = sunPeak * trans[1] * fade * tintG;
-            rb = sunPeak * trans[2] * fade * tintB;
-            // Slight overall brightness variation: midday brighter, low sun dimmer extra for dramatic sunset
-            float brightnessMod = 1.0f;
-            if (t < 0.15f) {
-                brightnessMod = 0.7f + 0.3f * Math.clamp((t + 0.05f) / 0.20f, 0f, 1f);
-            }
-            rr *= brightnessMod; rg *= brightnessMod; rb *= brightnessMod;
+            rr = sunPeak * trans[0] * fade * horizonDim * (1.0f + warm);
+            rg = sunPeak * trans[1] * fade * horizonDim;
+            rb = sunPeak * trans[2] * fade * horizonDim * (1.0f - 0.5f * warm);
             lightRadius = CausticaConfig.Rt.Composite.SUN_ANGULAR_RADIUS.value();
         } else {
-            // Moon: drastically dimmer per user request – night truly dark
+            // Moonlight, scaled by the same night-brightness slider that scales the sky's night ambient.
             atmosphereTransmittance(moonX, moonY, moonZ, trans);
             float moonStrength = smoothstep(0.04f, 0.22f, -sunY);
             float litFraction = 1.0f - Math.abs(moonPhase - 4.0f) / 4.0f; // 0 new .. 1 full
-            // old: 0.20f * (0.15+0.85*lit)
-            // new: much darker, and new-moon almost black
             float moonPeak = 0.035f * (0.05f + 0.95f * litFraction);
-            // Apply extra night darkness config if needed
-            float nightDarkness = CausticaConfig.Rt.DayNight.MOON_INTENSITY.value();
-            moonPeak *= nightDarkness;
+            moonPeak *= CausticaConfig.Rt.DayNight.MOON_INTENSITY.value();
             lx = moonX; ly = moonY; lz = moonZ;
             rr = 0.30f * moonPeak * moonStrength * trans[0];
             rg = 0.36f * moonPeak * moonStrength * trans[1];
@@ -1319,6 +1293,10 @@ public final class RtComposite {
         }
         destroyGuideImages();
         exposure.destroy();
+        if (bloomPipeline != null) {
+            bloomPipeline.destroy();
+            bloomPipeline = null;
+        }
         if (displayPipeline != null) {
             displayPipeline.destroy();
             displayPipeline = null;
@@ -1616,256 +1594,4 @@ public final class RtComposite {
             // Swapchain UNDEFINED -> TRANSFER_DST, plus make the compute write visible to the blit read.
             VkImageMemoryBarrier2.Buffer toDst = VkImageMemoryBarrier2.calloc(1, stack).sType$Default();
             toDst.get(0).srcStageMask(0L).srcAccessMask(0L).dstStageMask(4096L).dstAccessMask(4096L)
-                    .oldLayout(VK10.VK_IMAGE_LAYOUT_UNDEFINED).newLayout(VK10.VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL)
-                    .srcQueueFamilyIndex(-1).dstQueueFamilyIndex(-1).image(swapchainImage);
-            toDst.get(0).subresourceRange().aspectMask(VK10.VK_IMAGE_ASPECT_COLOR_BIT).baseMipLevel(0).levelCount(1).baseArrayLayer(0).layerCount(1);
-            VkMemoryBarrier2.Buffer srcVis = VkMemoryBarrier2.calloc(1, stack).sType$Default();
-            srcVis.get(0).srcStageMask(65536L).srcAccessMask(65536L).dstStageMask(4096L).dstAccessMask(2048L);
-            VkDependencyInfo dep1 = VkDependencyInfo.calloc(stack).sType$Default().pImageMemoryBarriers(toDst).pMemoryBarriers(srcVis);
-            KHRSynchronization2.vkCmdPipelineBarrier2KHR(cmd, dep1);
-
-            // Blit converted PQ image (GENERAL) -> swapchain (TRANSFER_DST), Y-flipped like vanilla.
-            VkImageBlit.Buffer region = VkImageBlit.calloc(1, stack);
-            region.get(0).srcSubresource().aspectMask(VK10.VK_IMAGE_ASPECT_COLOR_BIT).mipLevel(0).baseArrayLayer(0).layerCount(1);
-            region.get(0).dstSubresource().aspectMask(VK10.VK_IMAGE_ASPECT_COLOR_BIT).mipLevel(0).baseArrayLayer(0).layerCount(1);
-            region.get(0).srcOffsets(1).set(copyW, copyH, 1); // srcOffsets[0] = (0,0,0) from calloc
-            region.get(0).dstOffsets(0).set(0, copyH, 0);
-            region.get(0).dstOffsets(1).set(copyW, 0, 1);
-            VK10.vkCmdBlitImage(cmd, dst.image, VK10.VK_IMAGE_LAYOUT_GENERAL, swapchainImage,
-                    VK10.VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, region, VK10.VK_FILTER_NEAREST);
-
-            // Swapchain TRANSFER_DST -> PRESENT_SRC_KHR (1000001002).
-            VkImageMemoryBarrier2.Buffer toPresent = VkImageMemoryBarrier2.calloc(1, stack).sType$Default();
-            toPresent.get(0).srcStageMask(4096L).srcAccessMask(4096L).dstStageMask(65536L).dstAccessMask(0L)
-                    .oldLayout(VK10.VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL).newLayout(1000001002)
-                    .srcQueueFamilyIndex(-1).dstQueueFamilyIndex(-1).image(swapchainImage);
-            toPresent.get(0).subresourceRange().aspectMask(VK10.VK_IMAGE_ASPECT_COLOR_BIT).baseMipLevel(0).levelCount(1).baseArrayLayer(0).layerCount(1);
-            VkMemoryBarrier2.Buffer mem2 = VkMemoryBarrier2.calloc(1, stack).sType$Default();
-            mem2.get(0).srcStageMask(4096L).srcAccessMask(2048L).dstStageMask(65536L).dstAccessMask(98304L);
-            VkDependencyInfo dep2 = VkDependencyInfo.calloc(stack).sType$Default().pImageMemoryBarriers(toPresent).pMemoryBarriers(mem2);
-            KHRSynchronization2.vkCmdPipelineBarrier2KHR(cmd, dep2);
-
-            if (VK10.vkEndCommandBuffer(cmd) != VK10.VK_SUCCESS) {
-                throw new IllegalStateException("vkEndCommandBuffer(sdr present) failed");
-            }
-            enc.waitSemaphore(acquireSem, 0L, 65536L);
-            enc.execute(cmd);
-            enc.signalSemaphore(presentSem, 0L, 4096L);
-        }
-        return true;
-    }
-
-    /**
-     * Linear-filtered blit of the full render-res image into the full display-res image. Used as the
-     * non-RR / fallback upscale so display mapping always sees a display-res RT image; a no-op stretch when
-     * the two are the same size (RR disabled -> render == display).
-     */
-    private static void blitUpscale(VkCommandBuffer cmd, MemoryStack stack, RtImage src, RtImage dst) {
-        VkImageBlit.Buffer region = VkImageBlit.calloc(1, stack);
-        region.get(0).srcSubresource().aspectMask(VK10.VK_IMAGE_ASPECT_COLOR_BIT).mipLevel(0).baseArrayLayer(0).layerCount(1);
-        region.get(0).dstSubresource().aspectMask(VK10.VK_IMAGE_ASPECT_COLOR_BIT).mipLevel(0).baseArrayLayer(0).layerCount(1);
-        region.get(0).srcOffsets(1).set(src.width, src.height, 1); // srcOffsets[0] zeroed by calloc
-        region.get(0).dstOffsets(1).set(dst.width, dst.height, 1);
-        VK10.vkCmdBlitImage(cmd, src.image, VK10.VK_IMAGE_LAYOUT_GENERAL,
-                dst.image, VK10.VK_IMAGE_LAYOUT_GENERAL, region, VK10.VK_FILTER_LINEAR);
-    }
-
-    /**
-     * DLSS Frame Generation quality: capture a copy of {@code main} (the main render target) into
-     * {@link #fgHudlessImage} for {@link #fgInterpolate} to feed DLSSG as the "hudless" resource. Call from
-     * {@code GameRendererMixin} right after {@code GuiRenderer.render()} but BEFORE
-     * {@link RtUiOverlay#compositeIfUsed()} — at that point, when the UI overlay redirect is active, {@code
-     * main} still has no combined UI baked in (world overlays, hand/screen effects and GUI went to the
-     * overlay target instead). No-op (and {@link #fgInterpolate} passes 0/0/0 for hudless, same as always)
-     * unless both FG and the UI overlay redirect are active — capturing this without the redirect would just
-     * copy the ALREADY-composited backbuffer, which is useless as a distinct hudless input.
-     */
-    public void captureFgHudless(RenderTarget main) {
-        if (!RtDlssFg.enabled() || !RtUiOverlay.enabled() || main == null || main.getColorTexture() == null) {
-            return;
-        }
-        RtContext ctx = RtContext.currentOrNull();
-        if (ctx == null) {
-            return;
-        }
-        long srcImage;
-        try {
-            srcImage = vkImage(main.getColorTexture());
-        } catch (IllegalStateException e) {
-            return; // not a Vulkan-backed texture (shouldn't happen on this backend)
-        }
-        if (fgHudlessImage == null || fgHudlessImage.width != main.width || fgHudlessImage.height != main.height) {
-            if (fgHudlessImage != null) {
-                fgHudlessImage.destroy();
-            }
-            fgHudlessImage = ctx.createStorageImage(main.width, main.height, VK10.VK_FORMAT_R8G8B8A8_UNORM,
-                    "FG hudless capture " + main.width + "x" + main.height);
-        }
-        var encoder = (VulkanCommandEncoder) ((CommandEncoderAccessor) RenderSystem.getDevice().createCommandEncoder()).caustica$getBackend();
-        VkCommandBuffer cmd = encoder.allocateAndBeginTransientCommandBuffer();
-        try (MemoryStack stack = MemoryStack.stackPush()) {
-            // Make writes into `main` visible to the copy (the combined UI has not touched `main` yet this
-            // frame — it went to the UI overlay target instead).
-            VulkanCommandEncoder.memoryBarrier(cmd, stack);
-            VK10.vkCmdCopyImage(cmd, srcImage, VK10.VK_IMAGE_LAYOUT_GENERAL,
-                    fgHudlessImage.image, VK10.VK_IMAGE_LAYOUT_GENERAL, copyRegion(stack, main.width, main.height));
-            VulkanCommandEncoder.memoryBarrier(cmd, stack);
-        }
-        if (VK10.vkEndCommandBuffer(cmd) != VK10.VK_SUCCESS) {
-            throw new IllegalStateException("vkEndCommandBuffer(fg hudless capture) failed");
-        }
-        encoder.execute(cmd);
-    }
-
-    /**
-     * HDR counterpart of {@link #captureFgHudless} — copies {@code src} (this frame's {@code hdrDisplayImage},
-     * before the combined UI overlay is blended in) into {@link #fgHdrHudlessImage} for {@link
-     * #fgInterpolate}'s HDR path to feed DLSSG as the "hudless" resource. A plain copy, not a format
-     * conversion: both images are
-     * already PQ-encoded (the display-ready EOTF-encoded [0,1] signal DLSS-FG's programming guide requires),
-     * so no encode step is needed. Called from {@link #presentHdr} using its already-open {@code cmd}/
-     * {@code stack}, right before that method's own combined-UI composite dispatch overwrites
-     * {@code hdrDisplayImage} in place — same "capture before the UI gets baked back in" timing as the SDR
-     * version, just within a single method instead of split across a mixin hook.
-     */
-    private void captureFgHdrHudless(VkCommandBuffer cmd, MemoryStack stack, RtImage src) {
-        RtContext ctx = RtContext.currentOrNull();
-        if (ctx == null) {
-            return;
-        }
-        if (fgHdrHudlessImage == null || fgHdrHudlessImage.width != src.width || fgHdrHudlessImage.height != src.height) {
-            if (fgHdrHudlessImage != null) {
-                fgHdrHudlessImage.destroy();
-            }
-            fgHdrHudlessImage = ctx.createStorageImage(src.width, src.height, VK10.VK_FORMAT_R16G16B16A16_SFLOAT,
-                    "FG HDR hudless capture (PQ) " + src.width + "x" + src.height);
-        }
-        // Make composite()'s writes to hdrDisplayImage (an earlier submit this frame) visible to this copy;
-        // the copy's write is then made visible to the UI-composite dispatch that follows (and to DLSSG's
-        // read, in a later command buffer) by the same idiom.
-        VulkanCommandEncoder.memoryBarrier(cmd, stack);
-        VK10.vkCmdCopyImage(cmd, src.image, VK10.VK_IMAGE_LAYOUT_GENERAL,
-                fgHdrHudlessImage.image, VK10.VK_IMAGE_LAYOUT_GENERAL, copyRegion(stack, src.width, src.height));
-        VulkanCommandEncoder.memoryBarrier(cmd, stack);
-    }
-
-    /**
-     * DLSS Frame Generation: record the DLSSG evaluate for generated frame {@code index} of {@code count}
-     * (backbuffer = the final frame; HW depth = {@code gDepth}; motion = {@code gMotion}) into Minecraft's
-     * command encoder, returning the interpolated output image (backbuffer size) for {@link RtFramePresenter}
-     * to blit into a generated swapchain image. On {@code index == 1} it ensures the feature (created in its
-     * own synchronous submit), the per-index output images, and the jitter-free reprojection matrices.
-     * Returns {@code null} (caller falls back to duplicating the real frame for this one frame, no session
-     * impact) when there's simply no captured RT frame to interpolate from right now — routine and expected
-     * on menu/loading/transition frames, since {@link RtFramePresenter#isActive} only gates on being in a
-     * world, not on RT having actually produced a frame this tick. Throws instead for failures that should
-     * never happen once RT is actively producing frames (DLSSG feature creation failing, an out-of-range
-     * index, the evaluate itself failing) — the caller treats those as fatal and disables FG for the
-     * session, same as any other FG present-record failure, rather than silently degrading to duplicated
-     * (non-interpolated) frames forever with no visible sign anything is wrong. Rotation-only matrices;
-     * camera translation is carried by the mvecs (cameraMotionIncluded).
-     *
-     * <p>{@code hdrBackbuffer} selects the HDR path. Per the DLSS-FG programming guide's HDR section, scRGB is
-     * explicitly unsupported as a DLSS-FG input ("not suitable as inputs to DLSS-FG" — it wants a
-     * display-ready, EOTF-encoded [0,1] signal, recommending HDR10/ST.2084) — since the renderer's whole HDR
-     * pipeline is natively PQ-encoded, every image fed to {@code RtDlssFg.evaluate} in HDR mode is already in
-     * that format with no extra conversion needed: the backbuffer is the raw {@code backbufferView}/
-     * {@code backbufferImage} the caller passed in ({@link #hdrBackbufferView()}, already PQ + UI-composited
-     * by {@link #presentHdr}); the hudless resource is {@link #fgHdrHudlessImage} (copied by {@link
-     * #presentHdr} <em>before</em> its own UI composite ran, mirroring {@link #captureFgHudless}'s pre-UI
-     * timing); and DLSSG's own (also PQ-encoded) output is returned as-is, since the swapchain itself is
-     * PQ-native and can blit it directly. The UI resource itself needs no HDR-specific handling — it's the
-     * same combined {@link RtUiOverlay} texture used by both present paths (only the *compositing* math that
-     * consumes it differs, done separately by {@code presentHdr}/{@code RtUiOverlay}, not here).
-     */
-    public RtImage fgInterpolate(VulkanCommandEncoder enc, long backbufferView, long backbufferImage,
-            int swapW, int swapH, int index, int count, boolean hdrBackbuffer) {
-        if (failed || gDepth == null || gMotion == null || !frameCaptured) {
-            return null;
-        }
-        RtContext ctx = RtContext.currentOrNull();
-        if (ctx == null) {
-            return null;
-        }
-        final int fmt = hdrBackbuffer ? VK10.VK_FORMAT_R16G16B16A16_SFLOAT : VK10.VK_FORMAT_R8G8B8A8_UNORM;
-        if (index == 1) {
-            if (!ensureFgFeature(ctx, swapW, swapH, renderW, renderH, fmt)) {
-                throw new IllegalStateException("DLSSG feature not ready (ensureFgFeature failed)");
-            }
-            ensureFgInterp(ctx, count, swapW, swapH, fmt);
-            // clipToPrevClip = prevVP * inverse(curVP); prevClipToClip = curVP * inverse(prevVP). Both from
-            // the (rotation-only, camera-relative) MV view-projections, so jitter-free.
-            fgMatTmp.set(mvCurProjView).invert();
-            fgClipToPrev.set(mvPrevProjView).mul(fgMatTmp);
-            fgMatTmp.set(mvPrevProjView).invert();
-            fgPrevToClip.set(mvCurProjView).mul(fgMatTmp);
-        }
-        if (index < 1 || index > fgInterp.length || fgInterp[index - 1] == null) {
-            throw new IllegalStateException(
-                    "fgInterpolate index " + index + " out of range for fgInterp[" + fgInterp.length + "]");
-        }
-        RtImage out = fgInterp[index - 1];
-        // Only feed hudless/ui when they exist AND match this frame's backbuffer size — a stale or mismatched
-        // size (e.g. mid-resize) is worse than skipping, so fall back to 0/0/0 (DLSSG just does without).
-        RtImage hudlessSrc = hdrBackbuffer ? fgHdrHudlessImage : fgHudlessImage;
-        boolean hudlessReady = hudlessSrc != null && hudlessSrc.width == swapW && hudlessSrc.height == swapH;
-        long hudlessView = hudlessReady ? hudlessSrc.view : 0L;
-        long hudlessImg = hudlessReady ? hudlessSrc.image : 0L;
-        int hudlessFmt = hdrBackbuffer ? VK10.VK_FORMAT_R16G16B16A16_SFLOAT : VK10.VK_FORMAT_R8G8B8A8_UNORM;
-        boolean uiReady = RtUiOverlay.overlayWidth() == swapW && RtUiOverlay.overlayHeight() == swapH
-                && RtUiOverlay.overlayColorView() != 0L && RtUiOverlay.overlayColorImage() != 0L;
-        long uiView = uiReady ? RtUiOverlay.overlayColorView() : 0L;
-        long uiImg = uiReady ? RtUiOverlay.overlayColorImage() : 0L;
-
-        VkCommandBuffer cmd = enc.allocateAndBeginTransientCommandBuffer();
-        boolean ok = RtDlssFg.INSTANCE.evaluate(cmd.address(),
-                backbufferView, backbufferImage, fmt,
-                gDepth.view, gDepth.image, VK10.VK_FORMAT_R32_SFLOAT,
-                gMotion.view, gMotion.image, VK10.VK_FORMAT_R16G16_SFLOAT,
-                hudlessView, hudlessImg, hudlessReady ? hudlessFmt : 0,
-                uiView, uiImg, uiReady ? VK10.VK_FORMAT_R8G8B8A8_UNORM : 0,
-                out.view, out.image, fmt,
-                swapW, swapH, renderW, renderH, count, index, 1.0f, 1.0f,
-                true /* depthInverted (reversed-Z) */, hdrBackbuffer /* colorBuffersHDR */,
-                true /* cameraMotionIncluded (in mvecs) */, fgReset,
-                fgClipToPrev, fgPrevToClip);
-        if (VK10.vkEndCommandBuffer(cmd) != VK10.VK_SUCCESS) {
-            throw new IllegalStateException("vkEndCommandBuffer(fg interpolate) failed");
-        }
-        fgReset = false;
-        if (!ok) {
-            throw new IllegalStateException("ngxshim_evaluate_dlssg failed (RtDlssFg.evaluate returned false)");
-        }
-        enc.execute(cmd);
-        return out;
-    }
-
-    private boolean ensureFgFeature(RtContext ctx, int w, int h, int rw, int rh, int fmt) {
-        if (RtDlssFg.INSTANCE.featureReadyFor(w, h, rw, rh, fmt)) {
-            return true;
-        }
-        // Create the feature in its own submit + wait (not folded into MC's frame submit).
-        ctx.submitSync(c -> RtDlssFg.INSTANCE.ensureFeature(c.address(), w, h, rw, rh, fmt));
-        fgReset = true; // fresh feature has no temporal history
-        return RtDlssFg.INSTANCE.featureReadyFor(w, h, rw, rh, fmt);
-    }
-
-    private void ensureFgInterp(RtContext ctx, int count, int w, int h, int fmt) {
-        if (fgInterp.length == count && fgInterpW == w && fgInterpH == h && fgInterpFormat == fmt
-                && (count == 0 || fgInterp[0] != null)) {
-            return;
-        }
-        for (RtImage img : fgInterp) {
-            if (img != null) {
-                img.destroy();
-            }
-        }
-        fgInterp = new RtImage[count];
-        for (int i = 0; i < count; i++) {
-            fgInterp[i] = ctx.createStorageImage(w, h, fmt, "FG interp " + i + " " + w + "x" + h);
-        }
-        fgInterpW = w;
-        fgInterpH = h;
-        fgInterpFormat = fmt;
-    }
-}
+                    .oldLayout
