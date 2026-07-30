@@ -46,10 +46,13 @@ import net.minecraft.core.SectionPos;
 import net.minecraft.tags.FluidTags;
 import net.minecraft.util.RandomSource;
 import net.minecraft.world.level.block.Block;
+import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.RenderShape;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.material.FluidState;
 import net.minecraft.world.phys.Vec3;
+import net.minecraft.client.renderer.texture.TextureAtlas;
+import net.minecraft.resources.Identifier;
 import org.lwjgl.system.MemoryUtil;
 
 import java.util.ArrayList;
@@ -181,6 +184,132 @@ final class RtTerrainMesher {
         return new PackedSection(positions, indices, uvs, material, bucketTris, triBase, lights);
     }
 
+    private static TextureAtlasSprite tryGetBlockSprite(String path) {
+        try {
+            Minecraft mc = Minecraft.getInstance();
+            if (mc == null) return null;
+            var manager = mc.getTextureManager();
+            if (manager == null) return null;
+            var tex = manager.getTexture(TextureAtlas.LOCATION_BLOCKS);
+            if (!(tex instanceof TextureAtlas atlas)) return null;
+            Identifier id = Identifier.withDefaultNamespace(path);
+            return atlas.getSprite(id);
+        } catch (Throwable t) {
+            return null;
+        }
+    }
+
+    private static void emitPortalBox(SectionMesh mesh, int lx, int ly, int lz,
+                                      RtMaterialRegistry.Snapshot materials, BlockState state) {
+        TextureAtlasSprite sprite = null;
+        if (state.is(Blocks.NETHER_PORTAL)) {
+            sprite = tryGetBlockSprite("block/nether_portal");
+        } else if (state.is(Blocks.END_PORTAL)) {
+            sprite = tryGetBlockSprite("block/end_portal");
+            if (sprite == null) sprite = tryGetBlockSprite("block/nether_portal");
+        } else if (state.is(Blocks.END_GATEWAY)) {
+            sprite = tryGetBlockSprite("block/end_gateway");
+            if (sprite == null) sprite = tryGetBlockSprite("block/nether_portal");
+        }
+        int materialId;
+        if (sprite != null) {
+            try {
+                materialId = materials.resolve(sprite, state, false);
+            } catch (Throwable t) {
+                materialId = materials.lavaId();
+            }
+        } else {
+            materialId = materials.lavaId();
+        }
+        // Determine tint: portals have their own texture; keep white so texture color shows.
+        // For fallback without sprite (end portals), tint slightly colored for recognizability.
+        float tr = 1f, tg = 1f, tb = 1f;
+        if (sprite == null) {
+            if (state.is(Blocks.END_PORTAL)) {
+                tr = 0.05f; tg = 0.15f; tb = 0.35f; // dark bluish end void
+            } else if (state.is(Blocks.END_GATEWAY)) {
+                tr = 0.1f; tg = 0.2f; tb = 0.15f;
+            } else {
+                tr = 0.7f; tg = 0.25f; tb = 1.0f;
+            }
+        }
+        float emission = 1.0f; // make portals bright and drive light buffer + bloom
+        float u0, v0, u1, v1;
+        if (sprite != null) {
+            u0 = sprite.getU0(); v0 = sprite.getV0();
+            u1 = sprite.getU1(); v1 = sprite.getV1();
+        } else {
+            u0 = 0f; v0 = 0f; u1 = 1f; v1 = 1f;
+        }
+        // Slight inset to avoid z-fighting with frame blocks
+        float inset = 0.001f;
+        float x0 = lx + inset, x1 = lx + 1 - inset;
+        float y0 = ly + inset, y1 = ly + 1 - inset;
+        float z0 = lz + inset, z1 = lz + 1 - inset;
+
+        Geom g = mesh.opaque();
+        // For end portal the vanilla shape is a flat plane inside; emitting full box may occlude surroundings.
+        // Emit a single horizontal quad in the middle for END_PORTAL to mimic vanilla, but also sides for visibility from side angles when inside.
+        if (state.is(Blocks.END_PORTAL)) {
+            float ym = (y0 + y1) * 0.5f;
+            // horizontal plane
+            addPortalQuad(g, x0, ym, z0, x1, ym, z0, x1, ym, z1, x0, ym, z1,
+                    u0, v0, u1, v1, 0, 1, 0, tr, tg, tb, emission, materialId, sprite);
+            // also a bottom face slightly below to be visible from below
+            addPortalQuad(g, x0, ym - 0.01f, z1, x1, ym - 0.01f, z1, x1, ym - 0.01f, z0, x0, ym - 0.01f, z0,
+                    u0, v0, u1, v1, 0, -1, 0, tr, tg, tb, emission, materialId, sprite);
+        } else if (state.is(Blocks.END_GATEWAY)) {
+            // small cube inside gateway block (gateway is ~0.5 size, but full block emission is fine)
+            addPortalQuad(g, x1, y0, z0, x1, y0, z1, x1, y1, z1, x1, y1, z0, u0, v0, u1, v1, 1, 0, 0, tr, tg, tb, emission, materialId, sprite);
+            addPortalQuad(g, x0, y0, z1, x0, y0, z0, x0, y1, z0, x0, y1, z1, u0, v0, u1, v1, -1, 0, 0, tr, tg, tb, emission, materialId, sprite);
+            addPortalQuad(g, x0, y1, z0, x1, y1, z0, x1, y1, z1, x0, y1, z1, u0, v0, u1, v1, 0, 1, 0, tr, tg, tb, emission, materialId, sprite);
+            addPortalQuad(g, x0, y0, z0, x0, y0, z1, x1, y0, z1, x1, y0, z0, u0, v0, u1, v1, 0, -1, 0, tr, tg, tb, emission, materialId, sprite);
+            addPortalQuad(g, x0, y0, z1, x0, y1, z1, x1, y1, z1, x1, y0, z1, u0, v0, u1, v1, 0, 0, 1, tr, tg, tb, emission, materialId, sprite);
+            addPortalQuad(g, x0, y0, z0, x1, y0, z0, x1, y1, z0, x0, y1, z0, u0, v0, u1, v1, 0, 0, -1, tr, tg, tb, emission, materialId, sprite);
+        } else {
+            // Nether portal invisible fallback (should not happen, but handle): full box
+            addPortalQuad(g, x1, y0, z0, x1, y0, z1, x1, y1, z1, x1, y1, z0, u0, v0, u1, v1, 1, 0, 0, tr, tg, tb, emission, materialId, sprite);
+            addPortalQuad(g, x0, y0, z1, x0, y0, z0, x0, y1, z0, x0, y1, z1, u0, v0, u1, v1, -1, 0, 0, tr, tg, tb, emission, materialId, sprite);
+            addPortalQuad(g, x0, y1, z0, x1, y1, z0, x1, y1, z1, x0, y1, z1, u0, v0, u1, v1, 0, 1, 0, tr, tg, tb, emission, materialId, sprite);
+            addPortalQuad(g, x0, y0, z0, x0, y0, z1, x1, y0, z1, x1, y0, z0, u0, v0, u1, v1, 0, -1, 0, tr, tg, tb, emission, materialId, sprite);
+            addPortalQuad(g, x0, y0, z1, x0, y1, z1, x1, y1, z1, x1, y0, z1, u0, v0, u1, v1, 0, 0, 1, tr, tg, tb, emission, materialId, sprite);
+            addPortalQuad(g, x0, y0, z0, x1, y0, z0, x1, y1, z0, x0, y1, z0, u0, v0, u1, v1, 0, 0, -1, tr, tg, tb, emission, materialId, sprite);
+        }
+    }
+
+    private static void addPortalQuad(Geom g,
+                                      float x0, float y0, float z0,
+                                      float x1, float y1, float z1,
+                                      float x2, float y2, float z2,
+                                      float x3, float y3, float z3,
+                                      float u0, float v0, float u1, float v1,
+                                      float nx, float ny, float nz,
+                                      float tr, float tg, float tb,
+                                      float emission,
+                                      int materialId,
+                                      TextureAtlasSprite sprite) {
+        int base = g.verts.size() / 3;
+        g.verts.add(x0); g.verts.add(y0); g.verts.add(z0);
+        g.verts.add(x1); g.verts.add(y1); g.verts.add(z1);
+        g.verts.add(x2); g.verts.add(y2); g.verts.add(z2);
+        g.verts.add(x3); g.verts.add(y3); g.verts.add(z3);
+        var idx = g.idx;
+        idx.add(base); idx.add(base + 1); idx.add(base + 2);
+        idx.add(base); idx.add(base + 2); idx.add(base + 3);
+        // uvs: v0-v1 mapping as described
+        addTriUv(g, u0, v0, u1, v0, u1, v1);
+        addTriUv(g, u0, v0, u1, v1, u0, v1);
+        var prim = g.prim;
+        for (int t = 0; t < 2; t++) {
+            prim.add(nx); prim.add(ny); prim.add(nz);
+            prim.add(emission);
+            prim.add(tr); prim.add(tg); prim.add(tb); prim.add(0f);
+            prim.add(Float.intBitsToFloat(materialId));
+            prim.add(0f); prim.add(0f); prim.add(0f);
+            g.ommSprites.add(sprite);
+        }
+    }
+
     private static void tessellate(BlockAndTintGetter region, BlockStateModelSet modelSet,
                                    QuadEmitter blockEmitter, RandomSource blockRandom, QuadCapture capture,
                                    FluidRenderer fluidRenderer, FluidCapture fluidCapture,
@@ -198,17 +327,17 @@ final class RtTerrainMesher {
                     if (state.isAir()) {
                         continue;
                     }
-                    // Fluids (water/lava, incl. waterlogged blocks): separate mesher, INVISIBLE render
-                    // shape, so handled independently of the block model below. Emits section-local
-                    // coords + atlas sprite UVs straight into the capturing consumer. Lava's block light
-                    // (15) rides the emission channel (water emits 0).
+                    // Fluids
                     FluidState fluid = state.getFluidState();
                     if (!fluid.isEmpty()) {
                         fluidCapture.emission = state.getLightEmission() / 15f;
-                        // Water is the dielectric fluid; lava stays an opaque emitter. Tagged per-prim
-                        // so the path tracer can branch (see emitQuad).
                         fluidCapture.water = fluid.is(FluidTags.WATER);
                         RtFluidMesher.tesselate(region, m, fluidCapture, fluidRenderer.fluidModels, state, fluid);
+                    }
+                    // Invisible portals (END_PORTAL / END_GATEWAY) – vanilla uses block-entity renderers, RT needs explicit opaque emissive geometry
+                    if (state.is(Blocks.END_PORTAL) || state.is(Blocks.END_GATEWAY)) {
+                        emitPortalBox(mesh, lx, ly, lz, capture.materials, state);
+                        continue;
                     }
                     if (state.getRenderShape() != RenderShape.MODEL) {
                         continue;
@@ -225,7 +354,7 @@ final class RtTerrainMesher {
                     capture.originZ = lz + (float) offset.z;
                     blockRandom.setSeed(state.getSeed(m));
                     model.emitQuads(blockEmitter, region, m, state, blockRandom, capture.cullTest);
-                    capture.flushBlock(); // resolve coplanar ties (grass overlay / cross faces), then emit
+                    capture.flushBlock();
                 }
             }
         }
@@ -422,6 +551,15 @@ final class RtTerrainMesher {
         private int pendingCount;
         private int[] gidScratch = new int[0];
 
+        private static boolean isPortalState(BlockState s) {
+            if (s == null) return false;
+            return s.is(Blocks.NETHER_PORTAL) || s.is(Blocks.END_PORTAL) || s.is(Blocks.END_GATEWAY);
+        }
+
+        private static boolean isNetherPortalState(BlockState s) {
+            return s != null && s.is(Blocks.NETHER_PORTAL);
+        }
+
         /** Capture a final Fabric Renderer API quad before raster AO/directional lighting is applied. */
         private void putFabric(MutableQuadView quad) {
             PendingQuad q = acquire();
@@ -471,7 +609,16 @@ final class RtTerrainMesher {
             q.emission = quad.emissive() ? 1f : (state != null ? state.getLightEmission() / 15f : 0f);
             TextureAtlasSprite sprite = spriteFinder.find(quad);
             q.sprite = sprite;
-            q.materialId = materials.resolve(sprite, state, q.translucent);
+            boolean portal = isNetherPortalState(state);
+            if (portal) {
+                // Nether portal was translucent (glass-like). Force opaque emissive so it looks like vanilla portal and casts light.
+                q.cutout = false;
+                q.translucent = false;
+                q.emission = Math.max(q.emission, 1.0f);
+                q.materialId = materials.resolve(sprite, state, false);
+            } else {
+                q.materialId = materials.resolve(sprite, state, q.translucent);
+            }
         }
 
         /** Fabric's cull predicate returns true when the nominal face should be discarded. */

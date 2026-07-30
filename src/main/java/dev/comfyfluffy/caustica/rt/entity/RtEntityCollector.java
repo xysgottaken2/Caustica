@@ -427,6 +427,18 @@ public final class RtEntityCollector implements SubmitNodeCollector {
         return location.contains("glint");
     }
 
+    private static boolean isPortalRenderType(RenderType renderType) {
+        if (renderType == null) return false;
+        try {
+            Object setup = ((RenderTypeAccessor) renderType).caustica$state();
+            RenderPipeline pipeline = ((RenderSetupAccessor) setup).caustica$pipeline();
+            String loc = pipeline.getLocation().toString().toLowerCase(java.util.Locale.ROOT);
+            return loc.contains("portal") || loc.contains("end_gateway") || loc.contains("end_portal");
+        } catch (Throwable t) {
+            return false;
+        }
+    }
+
     /** Resolve a quad's tint colour from its tint index + the submission's tint layers (white if untinted). */
     private static int tintColor(int tintIndex, int[] tintLayers) {
         if (tintIndex < 0 || tintLayers == null || tintIndex >= tintLayers.length) {
@@ -922,21 +934,25 @@ public final class RtEntityCollector implements SubmitNodeCollector {
             return;
         }
 
+        boolean portal = !lines && isPortalRenderType(renderType);
         boolean glint = !lines && isGlint(renderType);
         capture.currentOrder = pendingOrder + (glint ? ENCHANTMENT_GLINT_ORDER : 0);
         pendingOrder = 0;
         capture.clearUvRemap(); // custom callbacks already emit final texture/atlas UV coordinates
         boolean stochasticAlpha = glint || isTranslucent(renderType);
+        if (portal) stochasticAlpha = false;
         capture.currentOpacity = glint ? ENCHANTMENT_GLINT_OPACITY : 1.0f;
+        capture.currentEmission = portal ? 1.0f : 0f;
         // Lines are untextured: bind the white slot so albedo is exactly the vertex colour (slot 0 is
         // the block atlas, whose (0,0) texel would tint the ribbon arbitrarily).
         capture.currentTexSlot = lines ? RtEntityTextures.INSTANCE.whiteSlot()
                 : RtEntityTextures.INSTANCE.slotFor(renderType);
         capture.currentMaterialId = lines
                 ? RtMaterialRegistry.INSTANCE.entityFallbackId(false)
-                : RtEntityTextures.INSTANCE.materialIdFor(renderType, stochasticAlpha);
+                : (portal ? RtMaterialRegistry.INSTANCE.entityFallbackId(false)
+                          : RtEntityTextures.INSTANCE.materialIdFor(renderType, stochasticAlpha));
         capture.currentAlphaBucket = lines ? RtAccel.ENTITY_BUCKET_OPAQUE
-                : (glint ? RtAccel.ENTITY_BUCKET_ANY_HIT : alphaBucket(renderType));
+                : (glint ? RtAccel.ENTITY_BUCKET_ANY_HIT : (portal ? RtAccel.ENTITY_BUCKET_OPAQUE : alphaBucket(renderType)));
 
         if (lines) {
             lineVertexConsumer.begin();
@@ -948,6 +964,7 @@ public final class RtEntityCollector implements SubmitNodeCollector {
             customQuadVertexConsumer.finish();
             capture.requireCompleteQuads("custom geometry " + renderType);
         }
+        capture.currentEmission = 0f;
     }
 
     /**
