@@ -40,6 +40,13 @@ alpha test/discard de CUTOUT e termina no primeiro SOLID/CUTOUT/entidade aceito.
 TRANSLUCENT é ignorado como bloqueador e essa limitação é exposta na
 instrumentação; não há shadow map, CPU tracing, readback ou segundo TLAS.
 
+Como a interface Vulkan de um miss/closest-hit aceita um único payload de
+entrada por entry point, o pipeline de chunks usa grupos SBT separados para os
+payloads primário (`location=0`) e shadow (`location=1`): raygen, miss primário,
+miss shadow, hit primário e hit shadow. O segundo miss/hit group não cria outro
+renderer ou TLAS; ele apenas seleciona, pelo `sbtRecordOffset` do shadow ray, o
+mesmo conjunto de materiais e geometrias compartilhado.
+
 `GameRenderer.renderItemInHand` foi confirmado na fonte 26.3 como uma passagem
 separada antes da composição de GUI: ele chama
 `FirstPersonHandsAndItemsRenderer.submitHandsWithItems`, que emite braços,

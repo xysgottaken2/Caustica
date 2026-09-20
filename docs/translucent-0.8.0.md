@@ -53,8 +53,10 @@ classes, not against assumptions about earlier Minecraft releases.
 
 TRANSLUCENT has independent residents/BLAS alongside SOLID and CUTOUT, in the
 same TLAS and material-table order: SOLID → CUTOUT → TRANSLUCENT. Its non-opaque
-geometry invokes the existing any-hit stage. The hit group and three SBT records
-are unchanged. The material row grows 80→96 bytes with original index address,
+geometry invokes the existing primary any-hit stage. The primary terrain hit
+record and material row remain unchanged; a dedicated shadow hit record uses the
+same material rows only for the separate hard-shadow payload. The material row
+grows 80→96 bytes with original index address,
 width and count; preexisting fields/flags keep their offsets. Both hit shaders
 read the same original index snapshot, including packed SHORT without shaderInt16.
 
