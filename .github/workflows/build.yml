@@ -30,7 +30,9 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y spirv-tools
       # JUnit stays in the unchanged test job. A test failure must not skip JAR publication.
       - name: Assemble mod and verify Minecraft ABI and JAR
-        run: ./gradlew --no-daemon assemble verifyMinecraftAbi verifyModJar
+        run: |
+          set -o pipefail
+          ./gradlew --no-daemon assemble verifyMinecraftAbi verifyModJar 2>&1 | tee build-output.log || { python3 .github/scripts/annotate-build.py; exit 1; }
       - name: Validate the SPIR-V consumed by the RT pipeline
         run: |
           for shader in build/generated/rt-shaders/assets/native_vulkan_rt/spirv/*.spv; do

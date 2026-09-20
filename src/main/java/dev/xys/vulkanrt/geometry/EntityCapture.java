@@ -12,7 +12,7 @@ import net.minecraft.client.renderer.feature.*;
 import net.minecraft.client.renderer.rendertype.*;
 import net.minecraft.client.resources.model.geometry.BakedQuad;
 import net.minecraft.core.registries.BuiltInRegistries;
-import org.joml.*;
+import org.joml.Matrix4f;
 import java.util.*;
 
 /** Receipts for vanilla-emitted ranges, never a mesher. All methods run on the render thread. */

@@ -41,7 +41,9 @@ jobs:
       - name: Test ABI verifier with synthetic Java 25 classfiles
         run: ./gradlew --no-daemon -p buildSrc test
       - name: Test RT CPU utilities, validate Minecraft signatures and packaged shaders
-        run: ./gradlew --no-daemon check
+        run: |
+          set -o pipefail
+          ./gradlew --no-daemon check 2>&1 | tee build-output.log || { python .github/scripts/annotate-build.py; exit 1; }
       - name: Upload test and ABI reports
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
