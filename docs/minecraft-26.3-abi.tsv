@@ -65,3 +65,11 @@ net/minecraft/client/renderer/chunk/CompiledSectionMesh	M	isVertexBufferUploaded
 net/minecraft/client/renderer/chunk/CompiledSectionMesh	M	isIndexBufferUploaded	(Lnet/minecraft/client/renderer/chunk/ChunkSectionLayer;)Z
 net/minecraft/client/renderer/chunk/ChunkSectionLayer	M	pipeline	(Z)Lcom/mojang/renderpearl/api/pipeline/RenderPipeline;
 com/mojang/renderpearl/api/pipeline/RenderPipeline	M	getVertexFormatBinding	(I)Lcom/mojang/renderpearl/api/vertex/VertexFormat;
+net/minecraft/client/renderer/chunk/ChunkSectionsToRender	M	renderGroup	(Lnet/minecraft/client/renderer/chunk/ChunkSectionLayerGroup;Lcom/mojang/renderpearl/api/commands/RenderPass;Lcom/mojang/renderpearl/api/textures/GpuSampler;Lcom/mojang/renderpearl/api/textures/GpuTextureView;Z)V
+net/minecraft/client/renderer/chunk/ChunkSectionLayerGroup	F	OPAQUE	Lnet/minecraft/client/renderer/chunk/ChunkSectionLayerGroup;
+com/mojang/renderpearl/backend/vulkan/VulkanGpuTextureView	M	texture	()Lcom/mojang/renderpearl/backend/vulkan/VulkanGpuTexture;
+com/mojang/renderpearl/backend/vulkan/VulkanGpuTextureView	M	isClosed	()Z
+com/mojang/renderpearl/backend/vulkan/VulkanGpuSampler	M	vkSampler	()J
+com/mojang/renderpearl/backend/vulkan/VulkanGpuSampler	M	isClosed	()Z
+com/mojang/renderpearl/api/textures/GpuTextureView	M	getWidth	(I)I
+com/mojang/renderpearl/api/textures/GpuTextureView	M	getHeight	(I)I

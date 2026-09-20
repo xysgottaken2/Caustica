@@ -8,6 +8,7 @@
     "VulkanDeviceMixin",
     "GameRendererMixin",
     "LevelRendererMixin",
+    "ChunkSectionsToRenderMixin",
     "RenderSystemMixin",
     "VulkanCommandEncoderMixin"
   ],

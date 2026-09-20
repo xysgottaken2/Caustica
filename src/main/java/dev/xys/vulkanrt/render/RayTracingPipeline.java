@@ -10,6 +10,7 @@ import java.nio.ByteBuffer;
 import static org.lwjgl.vulkan.VK10.*;
 import static org.lwjgl.vulkan.KHRAccelerationStructure.*;
 import static org.lwjgl.vulkan.KHRRayTracingPipeline.*;
+import static org.lwjgl.vulkan.KHRSynchronization2.*;
 import static dev.xys.vulkanrt.render.VulkanRayTracingContext.check;
 
 /** Three real KHR shader groups, immutable SBT and per-scene descriptor sets.
@@ -17,7 +18,9 @@ import static dev.xys.vulkanrt.render.VulkanRayTracingContext.check;
 public final class RayTracingPipeline implements AutoCloseable {
     private final VulkanRayTracingContext context;
     private long descriptorLayout, pipelineLayout, pipeline;
-    private GpuBuffer sbt;
+    private GpuBuffer sbt, hitProbe;
+    private final boolean chunks = RtOptions.CHUNKS;
+    private final boolean materialDiagnostics = chunks && Boolean.getBoolean("nativevulkanrt.materialDiagnostics");
     private long raygenAddress, missAddress, hitAddress, stride;
     public static final int PUSH_BYTES = 96;
 
@@ -26,9 +29,16 @@ public final class RayTracingPipeline implements AutoCloseable {
         org.slf4j.LoggerFactory.getLogger("native_vulkan_rt").info("[RT] Creating ray tracing pipeline...");
         long[] modules = new long[3];
         try (MemoryStack stack = MemoryStack.stackPush()) {
-            var bindings = VkDescriptorSetLayoutBinding.calloc(2, stack);
+            var bindings = VkDescriptorSetLayoutBinding.calloc(chunks ? 5 : 2, stack);
             bindings.get(0).binding(0).descriptorType(VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR).descriptorCount(1).stageFlags(VK_SHADER_STAGE_RAYGEN_BIT_KHR);
             bindings.get(1).binding(1).descriptorType(VK_DESCRIPTOR_TYPE_STORAGE_IMAGE).descriptorCount(1).stageFlags(VK_SHADER_STAGE_RAYGEN_BIT_KHR);
+            if (chunks) {
+                bindings.get(2).binding(2).descriptorType(VK_DESCRIPTOR_TYPE_STORAGE_BUFFER).descriptorCount(1).stageFlags(VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR);
+                bindings.get(3).binding(3).descriptorType(VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER).descriptorCount(1).stageFlags(VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR);
+                bindings.get(4).binding(4).descriptorType(VK_DESCRIPTOR_TYPE_STORAGE_BUFFER).descriptorCount(1).stageFlags(VK_SHADER_STAGE_RAYGEN_BIT_KHR);
+                hitProbe = new GpuBuffer(context,64,VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,false,false);
+                org.slf4j.LoggerFactory.getLogger("native_vulkan_rt").info("[RT] Chunks material shader: vanilla atlas + GPU vertex addresses; GPU-only center-hit HUD={}; no readback, unchanged 3-group SBT", materialDiagnostics);
+            }
             var out = stack.mallocLong(1);
             check(vkCreateDescriptorSetLayout(context.device(), VkDescriptorSetLayoutCreateInfo.calloc(stack).sType$Default().pBindings(bindings), null, out), "vkCreateDescriptorSetLayout(RT)");
             descriptorLayout = out.get(0);
@@ -36,7 +46,8 @@ public final class RayTracingPipeline implements AutoCloseable {
             check(vkCreatePipelineLayout(context.device(), VkPipelineLayoutCreateInfo.calloc(stack).sType$Default()
                     .pSetLayouts(stack.longs(descriptorLayout)).pPushConstantRanges(pushRange), null, out), "vkCreatePipelineLayout(RT)");
             pipelineLayout = out.get(0);
-            String[] resources = {"primary.rgen.spv", "primary.rmiss.spv", "primary.rchit.spv"};
+            String prefix = chunks ? "chunks" : "primary";
+            String[] resources = {prefix + ".rgen.spv", prefix + ".rmiss.spv", prefix + ".rchit.spv"};
             int[] stageBits = {VK_SHADER_STAGE_RAYGEN_BIT_KHR, VK_SHADER_STAGE_MISS_BIT_KHR, VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR};
             var stages = VkPipelineShaderStageCreateInfo.calloc(3, stack);
             for (int i = 0; i < 3; i++) {
@@ -100,16 +111,25 @@ public final class RayTracingPipeline implements AutoCloseable {
         } finally { MemoryUtil.memFree(handles); }
     }
 
-    public Bindings bind(AccelerationStructureManager.Structure tlas, RtOutputImage output) { return new Bindings(tlas, output); }
+    public Bindings bind(AccelerationStructureManager.Structure tlas, RtOutputImage output) { return new Bindings(tlas, output, null, null); }
+    public Bindings bind(AccelerationStructureManager.Structure tlas, RtOutputImage output,
+                         ChunkMaterialTable materials, TerrainAtlasCapture.Atlas atlas) { return new Bindings(tlas,output,materials,atlas); }
 
     /** Pool/set are never rewritten in flight. Allocate a new binding after TLAS replacement/resize. */
     public final class Bindings implements AutoCloseable {
         private long pool, set;
-        private Bindings(AccelerationStructureManager.Structure tlas, RtOutputImage output) {
+        private Bindings(AccelerationStructureManager.Structure tlas, RtOutputImage output,
+                         ChunkMaterialTable materials, TerrainAtlasCapture.Atlas atlas) {
+            if (chunks && (materials == null || materials.count != tlas.count || atlas == null || !atlas.live()))
+                throw new IllegalArgumentException("Chunk material rows/TLAS count/atlas mismatch");
             try (MemoryStack stack = MemoryStack.stackPush()) {
-                var sizes = VkDescriptorPoolSize.calloc(2, stack);
+                var sizes = VkDescriptorPoolSize.calloc(chunks ? 4 : 2, stack);
                 sizes.get(0).type(VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR).descriptorCount(1);
                 sizes.get(1).type(VK_DESCRIPTOR_TYPE_STORAGE_IMAGE).descriptorCount(1);
+                if (chunks) {
+                    sizes.get(2).type(VK_DESCRIPTOR_TYPE_STORAGE_BUFFER).descriptorCount(2);
+                    sizes.get(3).type(VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER).descriptorCount(1);
+                }
                 var result = stack.mallocLong(1);
                 check(vkCreateDescriptorPool(context.device(), VkDescriptorPoolCreateInfo.calloc(stack).sType$Default().maxSets(1).pPoolSizes(sizes), null, result), "vkCreateDescriptorPool(RT)");
                 pool = result.get(0);
@@ -118,11 +138,20 @@ public final class RayTracingPipeline implements AutoCloseable {
                 set = result.get(0);
                 var asWrite = VkWriteDescriptorSetAccelerationStructureKHR.calloc(stack).sType$Default().pAccelerationStructures(stack.longs(tlas.handle()));
                 var image = VkDescriptorImageInfo.calloc(1, stack).imageView(output.view()).imageLayout(VK_IMAGE_LAYOUT_GENERAL);
-                var writes = VkWriteDescriptorSet.calloc(2, stack);
+                var writes = VkWriteDescriptorSet.calloc(chunks ? 5 : 2, stack);
                 writes.get(0).sType$Default().dstSet(set).dstBinding(0).descriptorCount(1)
                         .descriptorType(VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR).pNext(asWrite);
                 writes.get(1).sType$Default().dstSet(set).dstBinding(1).descriptorCount(1)
                         .descriptorType(VK_DESCRIPTOR_TYPE_STORAGE_IMAGE).pImageInfo(image);
+                if (chunks) {
+                    var table = VkDescriptorBufferInfo.calloc(1,stack).buffer(materials.buffer.handle()).offset(0).range(materials.buffer.size);
+                    var atlasImage = VkDescriptorImageInfo.calloc(1,stack).imageView(atlas.view().vkImageView())
+                            .sampler(atlas.sampler().vkSampler()).imageLayout(VK_IMAGE_LAYOUT_GENERAL);
+                    var probe = VkDescriptorBufferInfo.calloc(1,stack).buffer(hitProbe.handle()).offset(0).range(64);
+                    writes.get(2).sType$Default().dstSet(set).dstBinding(2).descriptorCount(1).descriptorType(VK_DESCRIPTOR_TYPE_STORAGE_BUFFER).pBufferInfo(table);
+                    writes.get(3).sType$Default().dstSet(set).dstBinding(3).descriptorCount(1).descriptorType(VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER).pImageInfo(atlasImage);
+                    writes.get(4).sType$Default().dstSet(set).dstBinding(4).descriptorCount(1).descriptorType(VK_DESCRIPTOR_TYPE_STORAGE_BUFFER).pBufferInfo(probe);
+                }
                 vkUpdateDescriptorSets(context.device(), writes, null);
             } catch (RuntimeException | Error failure) { close(); throw failure; }
         }
@@ -145,13 +174,32 @@ public final class RayTracingPipeline implements AutoCloseable {
             var miss = VkStridedDeviceAddressRegionKHR.calloc(stack).deviceAddress(missAddress).stride(stride).size(stride);
             var hit = VkStridedDeviceAddressRegionKHR.calloc(stack).deviceAddress(hitAddress).stride(stride).size(stride);
             var callable = VkStridedDeviceAddressRegionKHR.calloc(stack);
+            if (chunks) {
+                // Includes copied vertices/table, vanilla atlas uploads/animation and prior probe readers.
+                VulkanRayTracingContext.memoryBarrier(cmd,VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT_KHR,
+                        VK_ACCESS_2_MEMORY_WRITE_BIT_KHR | VK_ACCESS_2_MEMORY_READ_BIT_KHR,
+                        VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR,VK_ACCESS_2_SHADER_READ_BIT_KHR | VK_ACCESS_2_SHADER_WRITE_BIT_KHR);
+                if (materialDiagnostics) {
+                    constants.putInt(92,1);
+                    vkCmdPushConstants(cmd,pipelineLayout,VK_SHADER_STAGE_RAYGEN_BIT_KHR,0,constants);
+                    vkCmdTraceRaysKHR(cmd,raygen,miss,hit,callable,1,1,1);
+                    VulkanRayTracingContext.memoryBarrier(cmd,VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR,VK_ACCESS_2_SHADER_WRITE_BIT_KHR,
+                            VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR,VK_ACCESS_2_SHADER_READ_BIT_KHR);
+                    constants.putInt(92,2);
+                    vkCmdPushConstants(cmd,pipelineLayout,VK_SHADER_STAGE_RAYGEN_BIT_KHR,0,constants);
+                }
+            }
             vkCmdTraceRaysKHR(cmd, raygen, miss, hit, callable, width, height, 1);
+            if (chunks) VulkanRayTracingContext.memoryBarrier(cmd,VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR,
+                    VK_ACCESS_2_SHADER_READ_BIT_KHR | VK_ACCESS_2_SHADER_WRITE_BIT_KHR,
+                    VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT_KHR,VK_ACCESS_2_MEMORY_WRITE_BIT_KHR | VK_ACCESS_2_MEMORY_READ_BIT_KHR);
         }
     }
 
     @Override public void close() {
         if (pipeline != 0) { vkDestroyPipeline(context.device(), pipeline, null); pipeline = 0; }
         if (sbt != null) sbt.close();
+        if (hitProbe != null) hitProbe.close();
         if (pipelineLayout != 0) { vkDestroyPipelineLayout(context.device(), pipelineLayout, null); pipelineLayout = 0; }
         if (descriptorLayout != 0) { vkDestroyDescriptorSetLayout(context.device(), descriptorLayout, null); descriptorLayout = 0; }
     }

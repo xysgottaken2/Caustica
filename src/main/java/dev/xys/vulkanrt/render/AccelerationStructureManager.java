@@ -30,6 +30,11 @@ public final class AccelerationStructureManager {
         }
         public long handle() { return handle; }
         public long address() { return address; }
+        /** Owned, unchanged interleaved chunk vertices; never the borrowed Uber allocation. */
+        public long vertexAddress() {
+            if (vertices == null) throw new IllegalStateException("AS has no vertex buffer");
+            return vertices.address();
+        }
         @Override public void close() {
             if (handle != 0) { vkDestroyAccelerationStructureKHR(device, handle, null); handle = 0; address = 0; }
             storage.close();
@@ -97,7 +102,7 @@ public final class AccelerationStructureManager {
         Structure result = null;
         ByteBuffer indexBytes = MemoryUtil.memAlloc(Math.multiplyExact(layout.indexCount(), 4));
         try (MemoryStack stack = MemoryStack.stackPush()) {
-            vertices = new GpuBuffer(context, bytes, VK_BUFFER_USAGE_TRANSFER_DST_BIT
+            vertices = new GpuBuffer(context, bytes, VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT
                     | VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR, false, true);
             memoryBarrier(batch.commands, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT_KHR, VK_ACCESS_2_MEMORY_WRITE_BIT_KHR,
                     VK_PIPELINE_STAGE_2_TRANSFER_BIT_KHR, VK_ACCESS_2_TRANSFER_READ_BIT_KHR);

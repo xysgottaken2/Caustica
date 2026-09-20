@@ -29,7 +29,7 @@ final class BootstrapTest {
                         + "/" + name.getAsString() + ".class"));
             }
             assertTrue(names.containsAll(java.util.Set.of("VulkanBackendMixin", "FrontendGpuDeviceAccessor", "RenderSystemMixin",
-                    "GameRendererMixin", "VulkanCommandEncoderMixin", "VulkanDeviceMixin", "LevelRendererMixin")));
+                    "GameRendererMixin", "VulkanCommandEncoderMixin", "VulkanDeviceMixin", "LevelRendererMixin", "ChunkSectionsToRenderMixin")));
         }
     }
 

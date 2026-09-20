@@ -36,6 +36,8 @@ public final class RayTracingRenderer {
     private static AccelerationStructureManager.Structure boundTlas, testBlas, testTlas;
     private static WorldGeometryManager world;
     private static WorldGeometryManager.Prepared chunkScene;
+    private static ChunkMaterialTable boundMaterials;
+    private static TerrainAtlasCapture.Atlas boundAtlas;
 
     /** Called when RenderSystem has installed Minecraft's actual GpuDevice, not from bootstrap. */
     public static void deviceReady() {
@@ -51,7 +53,7 @@ public final class RayTracingRenderer {
         if (!RtOptions.ENABLED) return;
         if (!frameLogged) { frameLogged = true; LOG.info("[RT] GameRenderer.render frame hook reached"); }
         projectionCaptured = false;
-        if (RtOptions.CHUNKS) { chunkScene = null; TerrainDrawCapture.beginFrame(); }
+        if (RtOptions.CHUNKS) { chunkScene = null; TerrainDrawCapture.beginFrame(); TerrainAtlasCapture.beginFrame(); }
         if (resetRequested) { resetRequested = false; retireScene(); }
         if (!failed) {
             if (context == null) deviceReady(); // explicit recovery path if initRenderer was already called
@@ -91,7 +93,7 @@ public final class RayTracingRenderer {
                         VK_PIPELINE_STAGE_2_TRANSFER_BIT_KHR, VK_ACCESS_2_TRANSFER_READ_BIT_KHR,
                         VK_PIPELINE_STAGE_2_TRANSFER_BIT_KHR, VK_ACCESS_2_TRANSFER_WRITE_BIT_KHR);
                 batch.commit(); // source copy + BLAS/TLAS are ordered before subsequent vanilla uploads
-                if (boundTlas != prepared.tlas && bindings != null) {
+                if ((boundTlas != prepared.tlas || boundMaterials != prepared.materials) && bindings != null) {
                     context.retire(bindings); bindings = null; boundTlas = null;
                 }
                 prepared.commit();
@@ -135,6 +137,8 @@ public final class RayTracingRenderer {
             if (RtOptions.CHUNKS && chunkScene == null) {
                 waiting("chunks have no completed terrain extraction callback: " + TerrainDrawCapture.failure()); return;
             }
+            var atlas = RtOptions.CHUNKS ? TerrainAtlasCapture.current() : null;
+            if (RtOptions.CHUNKS && atlas == null) { waiting("SOLID Sampler0 atlas capture absent/closed this frame"); return; }
             stage = "allocate vanilla transient RT command buffer";
             try (CommandBatch batch = new CommandBatch(context)) {
                 stage = "create/validate RT output and Minecraft blit target";
@@ -172,8 +176,9 @@ public final class RayTracingRenderer {
                 stage = "descriptor allocation/update";
                 var nextBindings = bindings;
                 if (nextTlas == null) nextBindings = null;
-                else if (nextBindings == null || boundTlas != nextTlas || nextOutput != output)
-                    nextBindings = batch.own(pipeline.bind(nextTlas, nextOutput));
+                else if (nextBindings == null || boundTlas != nextTlas || nextOutput != output
+                        || (RtOptions.CHUNKS && (boundMaterials != prepared.materials || !atlas.equals(boundAtlas))))
+                    nextBindings = batch.own(RtOptions.CHUNKS ? pipeline.bind(nextTlas,nextOutput,prepared.materials,atlas) : pipeline.bind(nextTlas,nextOutput));
                 TriangleReadback nextProof = proof;
                 boolean recordProof = !RtOptions.CHUNKS && nextProof == null;
                 if (recordProof) {
@@ -196,6 +201,7 @@ public final class RayTracingRenderer {
                 // Transfer persistent ownership immediately after successful enqueue.
                 var oldBindings = bindings; var oldOutput = output;
                 output = nextOutput; bindings = nextBindings; boundTlas = nextTlas;
+                if (RtOptions.CHUNKS) { boundMaterials = prepared.materials; boundAtlas = atlas; }
                 testBlas = nextTestBlas; testTlas = nextTestTlas; proof = nextProof;
                 if (oldBindings != null && oldBindings != nextBindings) context.retire(oldBindings);
                 if (oldOutput != null && oldOutput != nextOutput) context.retire(oldOutput);
@@ -244,7 +250,7 @@ public final class RayTracingRenderer {
             if (testBlas != null) context.retire(testBlas);
             if (output != null) context.retire(output);
         }
-        bindings = null; boundTlas = null; world = null; chunkScene = null; testTlas = null; testBlas = null; output = null; proof = null;
+        bindings = null; boundTlas = null; boundMaterials = null; boundAtlas = null; world = null; chunkScene = null; testTlas = null; testBlas = null; output = null; proof = null;
         traceLogged = false; tracePending = false; submitLogged = false;
     }
     public static void deviceClosing(VulkanDevice backend) {

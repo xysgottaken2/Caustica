@@ -27,6 +27,7 @@ public final class WorldGeometryManager implements AutoCloseable {
     private Map<Long, Resident> residents = Map.of();
     private AccelerationStructureManager.Structure tlas;
     private ChunkCoordinates.Anchor anchor;
+    private ChunkMaterialTable materials;
     private String waitReason, invalidReason;
     private long lastReport, lastDetail;
     private int buildsSinceReport, retiresSinceReport;
@@ -45,12 +46,13 @@ public final class WorldGeometryManager implements AutoCloseable {
     public final class Prepared {
         public final AccelerationStructureManager.Structure tlas;
         public final ChunkCoordinates.Anchor anchor;
+        public final ChunkMaterialTable materials;
         private final Map<Long, Resident> next;
         private final int built;
         private boolean committed;
         private Prepared(AccelerationStructureManager.Structure tlas, Map<Long, Resident> next,
-                         ChunkCoordinates.Anchor anchor, int built) {
-            this.tlas = tlas; this.next = next; this.anchor = anchor; this.built = built;
+                         ChunkCoordinates.Anchor anchor, int built, ChunkMaterialTable materials) {
+            this.tlas = tlas; this.next = next; this.anchor = anchor; this.built = built; this.materials = materials;
         }
         /** Only after enqueue: old TLAS/BLAS remain alive through all earlier GPU consumers. */
         public void commit() {
@@ -59,6 +61,9 @@ public final class WorldGeometryManager implements AutoCloseable {
             boolean emptyTransition = residents.isEmpty() != next.isEmpty();
             if (WorldGeometryManager.this.tlas != null && WorldGeometryManager.this.tlas != tlas)
                 context.retire(WorldGeometryManager.this.tlas);
+            if (WorldGeometryManager.this.materials != null && WorldGeometryManager.this.materials != materials)
+                context.retire(WorldGeometryManager.this.materials);
+            WorldGeometryManager.this.materials = materials;
             int retired = SectionResidency.retireReplaced(residents, next, section -> context.retire(section.blas()));
             residents = next; WorldGeometryManager.this.tlas = tlas; WorldGeometryManager.this.anchor = anchor;
             buildsSinceReport += built; retiresSinceReport += retired;
@@ -75,7 +80,7 @@ public final class WorldGeometryManager implements AutoCloseable {
         for (var receipt : draws.values()) {
             if (!liveReceipt(receipt) || !matches(residents.get(receipt.section()), receipt)) return null;
         }
-        return new Prepared(tlas, residents, anchor, 0);
+        return new Prepared(tlas, residents, anchor, 0, materials);
     }
 
     public Prepared prepare(CommandBatch batch, LevelRenderer level, double x, double y, double z) {
@@ -148,8 +153,15 @@ public final class WorldGeometryManager implements AutoCloseable {
                 LOG.debug("[RT] TLAS {}: {} instances; BLAS built={}, reused={}, retired={}; anchor=({}, {}, {})",
                         action, next.size(), diff.build().size(), diff.reuse().size(), diff.retire().size(), nextAnchor.x(), nextAnchor.y(), nextAnchor.z());
             }
+            var nextMaterials = materials;
+            if (diff.changed()) {
+                var entries = new ArrayList<ChunkMaterialTable.Entry>(next.size());
+                for (var section : next.values()) entries.add(new ChunkMaterialTable.Entry(section.section(),section.blas().vertexAddress(),section.layout()));
+                nextMaterials = batch.own(new ChunkMaterialTable(context,batch,entries));
+                LOG.debug("[RT] Material rows={} in TLAS instance order; no vertex readback", entries.size());
+            }
             waitReason = null;
-            return new Prepared(nextTlas, next, nextAnchor, diff.build().size());
+            return new Prepared(nextTlas, next, nextAnchor, diff.build().size(), nextMaterials);
         } finally { dispatcher.unlock(); }
     }
 
@@ -169,7 +181,7 @@ public final class WorldGeometryManager implements AutoCloseable {
     }
     private Prepared empty(ChunkCoordinates.Anchor nextAnchor, String reason) {
         if (!reason.equals(waitReason)) { waitReason = reason; LOG.info("[RT] Chunks: {}", reason); }
-        return new Prepared(null, Map.of(), nextAnchor, 0);
+        return new Prepared(null, Map.of(), nextAnchor, 0, null);
     }
     private void report(boolean force, int reusedThisFrame) {
         if (!force && System.nanoTime()-lastReport < 2_000_000_000L) return;
@@ -186,6 +198,7 @@ public final class WorldGeometryManager implements AutoCloseable {
     private static String coordinates(long node) { return "("+SectionPos.x(node)+","+SectionPos.y(node)+","+SectionPos.z(node)+")"; }
     @Override public void close() {
         if (tlas != null) { tlas.close(); tlas = null; }
+        if (materials != null) { materials.close(); materials = null; }
         residents.values().forEach(section -> section.blas().close());
         residents = Map.of();
     }
