@@ -148,7 +148,7 @@ public final class RayTracingRenderer {
                 waiting("chunks have no completed terrain extraction callback: " + TerrainDrawCapture.failure()); return;
             }
             var atlas = RtOptions.CHUNKS ? TerrainAtlasCapture.current() : null;
-            if (RtOptions.CHUNKS && atlas == null) { waiting("SOLID Sampler0 atlas capture absent/closed this frame"); return; }
+            if (RtOptions.CHUNKS && atlas == null && world.hasTerrain()) { waiting("SOLID Sampler0 atlas capture absent/closed this frame"); return; }
             stage = "allocate vanilla transient RT command buffer";
             try (CommandBatch batch = new CommandBatch(context)) {
                 stage = "create/validate RT output and Minecraft blit target";
@@ -171,6 +171,9 @@ public final class RayTracingRenderer {
                     stage = "prepare chunk acceleration structures";
                     if(entities==null) entities=new EntityGeometryManager(context);
                     var entityFrame=entities.frame(batch,chunkScene.anchor,camera.pos.x,camera.pos.y,camera.pos.z);
+                    // Entity-only sky/void views must not require an opaque terrain draw. This fills
+                    // an unused descriptor; active entity materials still select their original textures.
+                    if(atlas==null && !entityFrame.textures().isEmpty()) atlas=entityFrame.textures().getFirst();
                     prepared = world.compose(batch,entityFrame); nextTlas = prepared.tlas;
                     ChunkCoordinates.inverse(INVERSE, PROJECTION, camera.viewRotationMatrix, prepared.anchor, camera.pos.x, camera.pos.y, camera.pos.z);
                 } else {

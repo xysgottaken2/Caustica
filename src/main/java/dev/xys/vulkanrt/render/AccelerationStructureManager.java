@@ -24,6 +24,8 @@ public final class AccelerationStructureManager {
         private long handle, address;
         public final int type, count;
         private boolean built;
+        private Runnable onDestroyed;
+        public void onDestroyed(Runnable action) { onDestroyed=action; }
         private Structure(VkDevice device, GpuBuffer storage, long handle, long address, int type, int count) {
             this.device = device; this.storage = storage; this.handle = handle; this.address = address;
             this.type = type; this.count = count;
@@ -39,7 +41,7 @@ public final class AccelerationStructureManager {
             return vertices.address();
         }
         @Override public void close() {
-            if (handle != 0) { vkDestroyAccelerationStructureKHR(device, handle, null); handle = 0; address = 0; }
+            if (handle != 0) { vkDestroyAccelerationStructureKHR(device, handle, null); handle = 0; address = 0; if(onDestroyed!=null) onDestroyed.run(); }
             storage.close();
             if (vertices != null) vertices.close();
             if (indices != null) indices.close();
@@ -220,10 +222,7 @@ public final class AccelerationStructureManager {
                 record.transform().matrix(0, 1).matrix(5, 1).matrix(10, 1)
                         .matrix(3, instance.x()).matrix(7, instance.y()).matrix(11, instance.z());
                 if(instance.transform()!=null) {
-                    var m=instance.transform();
-                    record.transform().matrix(0,m.m00()).matrix(1,m.m10()).matrix(2,m.m20()).matrix(3,m.m30())
-                        .matrix(4,m.m01()).matrix(5,m.m11()).matrix(6,m.m21()).matrix(7,m.m31())
-                        .matrix(8,m.m02()).matrix(9,m.m12()).matrix(10,m.m22()).matrix(11,m.m32());
+                    putAffineTransform(record.transform(),instance.transform());
                 }
                 record.instanceCustomIndex(instance.customIndex()).mask(instance.mask()).instanceShaderBindingTableRecordOffset(0)
                         .flags(VK_GEOMETRY_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT_KHR)
@@ -235,6 +234,12 @@ public final class AccelerationStructureManager {
             geometry.geometry().instances().sType$Default().arrayOfPointers(false).data().deviceAddress(input.address());
             return allocateAndBuild(batch, geometry, VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR, count, existing, true);
         } finally { MemoryUtil.memFree(bytes); }
+    }
+
+    static void putAffineTransform(VkTransformMatrixKHR target,org.joml.Matrix4fc m) {
+        target.matrix(0,m.m00()).matrix(1,m.m10()).matrix(2,m.m20()).matrix(3,m.m30())
+            .matrix(4,m.m01()).matrix(5,m.m11()).matrix(6,m.m21()).matrix(7,m.m31())
+            .matrix(8,m.m02()).matrix(9,m.m12()).matrix(10,m.m22()).matrix(11,m.m32());
     }
 
     /** The same descriptor is used for BOTH size query and build/update recording.

@@ -157,3 +157,7 @@ com/mojang/blaze3d/vertex/BufferBuilder	F	vertices	I
 com/mojang/blaze3d/vertex/VertexConsumer	M	putBakedQuad	(Lcom/mojang/blaze3d/vertex/PoseStack$Pose;Lnet/minecraft/client/resources/model/geometry/BakedQuad;Lcom/mojang/blaze3d/vertex/QuadInstance;)V
 net/minecraft/client/renderer/rendertype/RenderType	M	prepare	()Lnet/minecraft/client/renderer/rendertype/PreparedRenderType;
 net/minecraft/client/renderer/rendertype/PreparedRenderType	M	draw	(Lnet/minecraft/client/renderer/StagedVertexBuffer$ExecuteInfo;Lcom/mojang/renderpearl/api/commands/RenderPass;Lcom/mojang/renderpearl/api/pipeline/RenderPipeline;)V
+com/mojang/blaze3d/systems/RenderSystem	F	isRenderingLevel	Z
+net/minecraft/client/renderer/feature/ModelFeatureRenderer$Submit	M	<init>	(Lnet/minecraft/client/renderer/rendertype/RenderType;Lcom/mojang/blaze3d/vertex/PoseStack$Pose;Lnet/minecraft/client/model/Model;Ljava/lang/Object;IIILnet/minecraft/client/renderer/texture/UvMapping;Lcom/mojang/blaze3d/vertex/PoseStack$Pose;)V
+net/minecraft/client/renderer/feature/ItemFeatureRenderer$Submit	M	<init>	(Lcom/mojang/blaze3d/vertex/PoseStack$Pose;Lnet/minecraft/world/item/ItemDisplayContext;III[ILjava/util/List;Lnet/minecraft/client/renderer/item/ItemStackRenderState$FoilType;)V
+net/minecraft/client/renderer/feature/MovingBlockFeatureRenderer$Submit	M	<init>	(Lorg/joml/Matrix4fc;Lnet/minecraft/client/renderer/block/MovingBlockRenderState;IZ)V

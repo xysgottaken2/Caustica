@@ -252,6 +252,8 @@ public final class WorldGeometryManager implements AutoCloseable {
     }
 
     /** Single scene finalization after the original entity feature draws, before vkCmdTraceRaysKHR. */
+    public boolean hasTerrain() { return !residents.isEmpty() || !cutoutResidents.isEmpty() || !translucentResidents.isEmpty(); }
+
     public Prepared compose(CommandBatch batch,EntityGeometryManager.Frame entities) {
         var instances=new ArrayList<AccelerationStructureManager.Instance>();var entries=new ArrayList<ChunkMaterialTable.Entry>();
         for(var section:residents.values()) {

@@ -1,6 +1,7 @@
 package dev.xys.vulkanrt.geometry;
 
 import com.mojang.blaze3d.vertex.*;
+import com.mojang.blaze3d.systems.RenderSystem;
 import com.mojang.renderpearl.api.buffers.GpuBufferSlice;
 import com.mojang.renderpearl.backend.vulkan.VulkanGpuBuffer;
 import com.mojang.renderpearl.api.pipeline.PrimitiveTopology;
@@ -36,29 +37,41 @@ public final class EntityCapture {
     public static final Set<Piece> executed=Collections.newSetFromMap(new IdentityHashMap<>());
     public static final Map<Integer,Owner> discovered=new TreeMap<>();
     public static final Map<String,Integer> rejected=new TreeMap<>();
+    private static final Map<Integer,Set<String>> ownerRejections=new HashMap<>();
     private static Owner submitting,preparing;
     private static Pending pending;
     public static boolean enabled() { return RayTracingRenderer.chunkCaptureEnabled(); }
-    public static boolean collecting() { return enabled() && preparing!=null; }
-    public static void beginFrame() { owners.clear();cursors.clear();types.clear();prepared.clear();uploaded.clear();pieces.clear();executed.clear();discovered.clear();rejected.clear();submitting=null;preparing=null;pending=null; }
+    public static boolean collecting() { return worldCapture() && preparing!=null; }
+    private static boolean worldCapture() { return enabled() && RenderSystem.isRenderingLevel; }
+    public static void beginFrame() { owners.clear();cursors.clear();types.clear();prepared.clear();uploaded.clear();pieces.clear();executed.clear();discovered.clear();rejected.clear();ownerRejections.clear();submitting=null;preparing=null;pending=null; }
     public static void state(EntityRenderState state,int id) { if(enabled()) ids.put(state,id); }
     public static void beginEntity(EntityRenderState s) {
-        if(!enabled()) return;
+        if(!worldCapture()) return;
         submitting=new Owner(ids.getOrDefault(s,System.identityHashCode(s)),String.valueOf(BuiltInRegistries.ENTITY_TYPE.getKey(s.entityType)),s.x,s.y,s.z,s instanceof FallingBlockRenderState,s instanceof FallingBlockRenderState f?String.valueOf(f.movingBlockRenderState.blockState):"");
         discovered.put(submitting.id(),submitting);
     }
     public static void endEntity() { submitting=null; }
-    public static void tag(Object submit) { if(enabled() && submitting!=null) owners.put(submit,submitting); }
-    public static void enter(Object submit) { preparing=owners.get(submit); }
+    public static void tag(Object submit) { if(worldCapture() && submitting!=null) owners.put(submit,submitting); }
+    public static void enter(Object submit) { preparing=worldCapture()?owners.get(submit):null; }
     public static void leave() { preparing=null;pending=null; }
-    public static void reject(String reason) { rejected.merge(reason,1,Integer::sum); }
-    public static void prepared(RenderType type,PreparedRenderType value) { if(enabled()) prepared.put(type,value); }
-    public static void builder(StagedVertexBuffer.Draw draw,VertexConsumer vertex) {
-        if(enabled() && vertex instanceof BufferBuilder b) cursors.putIfAbsent(b,new Cursor(draw,((EntityDrawAccessor)(Object)draw).nativeVulkanRt$vertexCount()));
+    public static void reject(String reason) { reject(preparing,reason); }
+    public static void reject(Owner owner,String reason) {
+        rejected.merge(reason,1,Integer::sum);
+        if(owner!=null) ownerRejections.computeIfAbsent(owner.id(),id->new TreeSet<>()).add(reason);
     }
-    public static void renderType(VertexConsumer vertex,RenderType type) { if(enabled() && vertex instanceof BufferBuilder b) types.put(b,type); }
+    public static String ignoredReason(Owner owner) {
+        var reasons=ownerRejections.get(owner.id());if(reasons!=null) return reasons.toString();
+        if(pieces.stream().noneMatch(p->p.owner().id()==owner.id())) return "NO_MODEL_CUBE_OR_BAKED_QUAD_EMISSION";
+        if(executed.stream().noneMatch(p->p.owner().id()==owner.id())) return "NO_MATCHING_EXECUTED_DRAW";
+        return "NO_ACCEPTED_GPU_UPLOAD";
+    }
+    public static void prepared(RenderType type,PreparedRenderType value) { if(worldCapture()) prepared.put(type,value); }
+    public static void builder(StagedVertexBuffer.Draw draw,VertexConsumer vertex) {
+        if(worldCapture() && vertex instanceof BufferBuilder b) cursors.putIfAbsent(b,new Cursor(draw,((EntityDrawAccessor)(Object)draw).nativeVulkanRt$vertexCount()));
+    }
+    public static void renderType(VertexConsumer vertex,RenderType type) { if(worldCapture() && vertex instanceof BufferBuilder b) types.put(b,type); }
     public static void beginPiece(VertexConsumer vertex,Object shape,PoseStack.Pose pose,Colors colors,int overlay) {
-        pending=null;if(!enabled() || preparing==null) return;
+        pending=null;if(!collecting()) return;
         if(!(vertex instanceof BufferBuilder b)) { reject("WRAPPED_VERTEX_CONSUMER");return; }
         var cursor=cursors.get(b);var rt=types.get(b);var material=prepared.get(rt);
         if(cursor==null || material==null) { reject("NO_STAGED_DRAW_OR_PREPARED_MATERIAL");return; }
@@ -74,6 +87,7 @@ public final class EntityCapture {
         if(n==0) return;
         if(n<0 || n%4!=0 || p.start()%4!=0) { reject("INCOMPLETE_QUAD_RANGE");return; }
         var format=((EntityDrawAccessor)(Object)p.cursor().draw()).nativeVulkanRt$format();
+        if(format!=DefaultVertexFormat.ENTITY && format!=DefaultVertexFormat.BLOCK) { reject(p.owner(),"UNSUPPORTED_VERTEX_FORMAT:"+format);return; }
         SectionGeometryLayout layout;
         try { layout=SectionGeometryLayout.solidQuads(format,n/4*6); }
         catch(IllegalArgumentException failure) { reject("VERTEX_LAYOUT:"+failure.getMessage());return; }
@@ -86,20 +100,20 @@ public final class EntityCapture {
         endPiece();
     }
     public static void upload(StagedVertexBuffer owner,GpuBufferSlice source,GpuBufferSlice target) {
-        if(!enabled() || source.offset()!=0 || !(source.buffer() instanceof VulkanGpuBuffer vk)) return;
+        if(!worldCapture() || source.offset()!=0 || !(source.buffer() instanceof VulkanGpuBuffer vk)) return;
         var draws=((EntityStagedAccessor)(Object)owner).nativeVulkanRt$draws();var uploads=new ArrayList<Upload>();
         for(var p:pieces) if(draws.contains(p.draw())) {
             var d=(EntityDrawAccessor)(Object)p.draw();int stride=p.key().layout().stride();
             long offset=(long)d.nativeVulkanRt$vertexOffset()+(long)p.first()*stride;
             long bytes=p.key().layout().vertexBytes();
-            if(offset<0 || offset>source.length()-bytes || p.first()+p.key().layout().vertexCount()>d.nativeVulkanRt$vertexCount()) { reject("STAGED_UPLOAD_RANGE");continue; }
+            if(offset<0 || offset>source.length()-bytes || p.first()+p.key().layout().vertexCount()>d.nativeVulkanRt$vertexCount()) { reject(p.owner(),"STAGED_UPLOAD_RANGE");continue; }
             uploads.add(new Upload(p,vk,offset));
             uploaded.computeIfAbsent(new DrawAddress(target.buffer(),d.nativeVulkanRt$vertexOffset()/stride),k->new ArrayList<>()).add(p);
         }
         if(!uploads.isEmpty()) RayTracingRenderer.uploadEntities(uploads);
     }
     public static void draw(PreparedRenderType material,StagedVertexBuffer.ExecuteInfo info) {
-        if(!enabled()) return;
+        if(!worldCapture()) return;
         var list=uploaded.get(new DrawAddress(info.vertexBuffer(),info.baseVertex()));
         if(list!=null) for(var p:list) if(p.material().equals(material)) executed.add(p);
     }

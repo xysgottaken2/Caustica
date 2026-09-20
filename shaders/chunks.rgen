@@ -277,6 +277,7 @@ int entityText(int row,int col) {
  if(row==10) { const int t[11]=int[](66,76,65,83,32,66,85,73,76,84,61);if(col<11) return t[col];return col<18?digit(entityHud.ops.x,col-11,7):32; }
  if(row==11) { const int t[13]=int[](66,76,65,83,32,82,69,84,73,82,69,68,61);if(col<13) return t[col];return col<20?digit(entityHud.ops.z,col-13,7):32; }
  if(row==20) { const int t[16]=int[](82,69,85,83,69,68,32,69,78,84,73,84,73,69,83,61);if(col<16) return t[col];return col<23?digit(entityHud.reuse.x,col-16,7):32; }
+ if(row==21) { const int t[10]=int[](68,69,83,84,82,79,89,69,68,61);if(col<10) return t[col];return col<17?digit(entityHud.reuse.y,col-10,7):32; }
  if(probe.entity.x==0xffffffffu || probe.entity.x>=uint(entityHud.rows.length())) return 32;
  if(row==12) { const int t[14]=int[](69,78,84,73,84,89,32,72,73,84,32,73,68,61);if(col<14) return t[col];return col<23?digit(uint(entityHud.rows[probe.entity.x].state.x),col-14,9):32; }
  if(row==13) { const int t[5]=int[](84,89,80,69,61);if(col<5) return t[col];return col<37?entityChar(probe.entity.x,col-5):32; }
@@ -294,7 +295,7 @@ void main() {
     ivec2 pixel=ivec2(gl_LaunchIDEXT.xy);
     if(!probePass && (camera.frame.w&2u)!=0u) {
         ivec2 entityPanel=pixel-ivec2(max(336,int(gl_LaunchSizeEXT.x)-392),8);
-        if(all(greaterThanEqual(entityPanel,ivec2(0))) && all(lessThan(entityPanel,ivec2(384,294)))) {
+        if(all(greaterThanEqual(entityPanel,ivec2(0))) && all(lessThan(entityPanel,ivec2(384,308)))) {
             ivec2 ep=entityPanel/2;int ec=entityText(ep.y/7,ep.x/4);
             bool ink=ep.x%4<3 && ep.y%7<5 && ((glyph(ec)>>uint((ep.y%7)*3+ep.x%4))&1u)!=0u;
             imageStore(outputImage,pixel,vec4(ink?vec3(1,.9,.65):vec3(.015),1));return;

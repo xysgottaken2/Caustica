@@ -147,7 +147,9 @@ public final class RayTracingPipeline implements AutoCloseable {
                 writes.get(1).sType$Default().dstSet(set).dstBinding(1).descriptorCount(1)
                         .descriptorType(VK_DESCRIPTOR_TYPE_STORAGE_IMAGE).pImageInfo(image);
                 if (chunks) {
-                    TerrainAtlasCapture.binding(atlas);
+                    if(TerrainAtlasCapture.current()!=null) TerrainAtlasCapture.binding(atlas);
+                    else if(materials.count!=entities.materials().size() || !entities.textures().contains(atlas))
+                        throw new IllegalStateException("Missing terrain atlas: entity-only descriptor fallback cannot shade terrain");
                     var table = VkDescriptorBufferInfo.calloc(1,stack).buffer(materials.buffer.handle()).offset(0).range(materials.buffer.size);
                     var atlasImage = VkDescriptorImageInfo.calloc(1,stack).imageView(atlas.view().vkImageView())
                             .sampler(atlas.sampler().vkSampler()).imageLayout(VK_IMAGE_LAYOUT_GENERAL);

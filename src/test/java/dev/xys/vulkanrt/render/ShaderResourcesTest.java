@@ -77,6 +77,32 @@ final class ShaderResourcesTest {
         assertTrue(offsets.values().stream().anyMatch(m->m.size()==18 && java.util.stream.IntStream.range(0,18).allMatch(i->java.util.Objects.equals(m.get(i),i*16))));
         assertEquals(288,ChunkTextureSampling.PROBE_BYTES);
     }
+    @Test void entityGpuUnposeHasNoDescriptorsAndHudHeaderMatchesJava() throws Exception {
+        var words=shader("entity-local.comp");var caps=new HashSet<Integer>();
+        boolean compute=false,matrix=false,local=false;
+        for(int i=20;i<words.limit();) {
+            int h=words.getInt(i),n=h>>>16,op=h&0xffff;assertTrue(n>0);
+            if(op==17) caps.add(words.getInt(i+4));
+            if(op==15) compute=words.getInt(i+4)==5;
+            if(op==16 && n==6 && words.getInt(i+8)==17) local=words.getInt(i+12)==64;
+            if(op==71 && n==4) assertNotEquals(33,words.getInt(i+8));
+            if(op==72 && n==5 && words.getInt(i+8)==3 && words.getInt(i+12)==35) matrix=words.getInt(i+16)==16;
+            i+=n*4;
+        }
+        assertTrue(compute);assertTrue(matrix);assertTrue(local);assertEquals(80,EntityVertexNormalizer.PUSH_BYTES);
+        assertTrue(caps.contains(5347));assertFalse(caps.contains(11));assertFalse(caps.contains(5301));
+        words=shader("chunks.rgen");boolean rows=false,header=false,binding=false;
+        for(int i=20;i<words.limit();) {
+            int h=words.getInt(i),n=h>>>16,op=h&0xffff;assertTrue(n>0);
+            if(op==71 && n==4) {
+                if(words.getInt(i+8)==6 && words.getInt(i+12)==EntityGeometryManager.HUD_ROW) rows=true;
+                if(words.getInt(i+8)==33 && words.getInt(i+12)==6) binding=true;
+            }
+            if(op==72 && n==5 && words.getInt(i+8)==4 && words.getInt(i+12)==35 && words.getInt(i+16)==EntityGeometryManager.HUD_HEADER) header=true;
+            i+=n*4;
+        }
+        assertTrue(rows);assertTrue(header);assertTrue(binding);
+    }
     @Test void overlayComputeIsOfflineCompiledWithBoundedInterfaceAndNoExtraDescriptors() throws Exception {
         var words=shader("overlay.comp");
         shader("entity-local.comp");

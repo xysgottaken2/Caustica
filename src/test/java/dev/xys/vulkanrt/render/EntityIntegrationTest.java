@@ -11,6 +11,17 @@ import static org.junit.jupiter.api.Assertions.*;
 
 /** No GPU: real format/pipeline contracts plus cache/transform/material reference checks. */
 final class EntityIntegrationTest {
+ @Test void actualVulkanTransformPackingIsRowMajorAndIncludesAnimationScaleAndTranslation() {
+  var m=new Matrix4f().translation(12,4,-7).rotateY(.7f).rotateX(.3f).scale(-2,.5f,3);
+  try(var stack=org.lwjgl.system.MemoryStack.stackPush()) {
+   var packed=org.lwjgl.vulkan.VkTransformMatrixKHR.calloc(stack);
+   AccelerationStructureManager.putAffineTransform(packed,m);
+   for(var v:List.of(new Vector3f(),new Vector3f(1,2,3),new Vector3f(-4,.2f,7))) {
+    var expected=m.transformPosition(v,new Vector3f());
+    for(int r=0;r<3;r++) assertEquals(expected.get(r),packed.matrix(r*4)*v.x+packed.matrix(r*4+1)*v.y+packed.matrix(r*4+2)*v.z+packed.matrix(r*4+3),.00001f);
+   }
+  }
+ }
  @Test void realEntityFormatHasOverlayLightAndNormalUnlikeTerrain() {
   var l=SectionGeometryLayout.solidQuads(DefaultVertexFormat.ENTITY,36);
   assertEquals(36,l.stride());assertEquals(24,l.vertexCount());assertEquals(12,l.triangles());
