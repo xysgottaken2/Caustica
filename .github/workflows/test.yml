@@ -9,11 +9,21 @@ concurrency:
   group: test-${{ github.ref }}
   cancel-in-progress: true
 jobs:
+  # Publish the mod alongside the test artifacts in THIS run too, not only in build.yml's run.
+  # No needs: test and build run independently; failed tests cannot skip the build/upload job.
+  build:
+    name: Build mod JAR
+    uses: ./.github/workflows/build.yml
   test:
+    name: test (${{ matrix.os }})
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-24.04, windows-2022]
+        include:
+          - os: ubuntu-24.04
+            artifact: test-ubuntu
+          - os: windows-2022
+            artifact: test-windows
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     defaults:
@@ -36,7 +46,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: tests-${{ matrix.os }}
+          name: ${{ matrix.artifact }}
           path: |
             build/reports/
             build/test-results/
