@@ -90,6 +90,7 @@ jobs:
         run: |
           test -n "$ARTIFACT_ID"
           echo "Published native-vulkan-rt-experimental: $JAR_PATH (artifact ID $ARTIFACT_ID)"
+          echo "::notice title=Mod JAR published::JAR=$JAR_NAME; path=$JAR_PATH; artifact=native-vulkan-rt-experimental; artifact-id=$ARTIFACT_ID; SHA-256=$JAR_SHA256"
           {
             echo '## Download do mod'
             echo "- JAR: \`$JAR_NAME\`"
