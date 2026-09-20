@@ -1,44 +1,35 @@
 # Native Vulkan RT — Minecraft Java 26.3
 
-**Caminho de hardware ray tracing implementado experimentalmente. RUNTIME VERIFIED: NO.**
+## 0.8.0-experimental — TRANSLUCENT integrado; validação visual pendente
 
-O código usa o **device Vulkan nativo do Minecraft 26.3**, sem Iris, OptiFine,
-shaderpack, OpenGL, janela ou backend paralelo. RT permanece desativado por padrão.
-Não há alegação de build aprovado, Minecraft iniciado ou imagem RT renderizada.
+O usuário **validou a 0.7.0 em jogo**: SOLID, texturas/UV/tint, overlay do Grass
+Block e CUTOUT com alpha test (folhas, grama, flores e furos). Essa é a base aceita.
+A 0.8.0 acrescenta TRANSLUCENT real do vanilla — incluindo vidro/água conforme a
+classificação da malha — ao **mesmo TLAS**, com cache independente, cópia GPU dos
+índices originais, composição alpha ordenada e continuação até o fundo.
 
-## Estado desta entrega
+Usa o device Vulkan nativo do Minecraft 26.3 e o atlas original, sem segundo
+backend, renderer paralelo, readback ou retesselação CPU. TEXEL permanece padrão.
+CUTOUT continua sendo descarte em 0,5; TRANSLUCENT usa descarte residual vanilla
+em 0,1 **mais composição**, não um substituto opaco. Os três registros SBT permanecem.
 
-| Componente | Estado no código; execução ainda não validada |
-|---|---|
-| Contexto Vulkan e capacidades | Device emprestado; negociação de AS, RT pipeline e BDA antes da criação do device lógico |
-| BLAS / TLAS | Criação, buffers, scratch, build e atualização de TLAS com contagem fixa |
-| Pipeline / SBT / shaders | Descritores, grupos, SBT, raygen/miss/closest-hit e `vkCmdTraceRaysKHR` |
-| Integração de imagem | Storage image e blit para o render target vanilla antes do HUD |
-| Cena de teste | Triângulo de diagnóstico |
-| Chunks | Captura das malhas SOLID reais, conversão de quads, BLAS por seção e TLAS |
-| Ciclo de vida | Limites de captura/build, invalidação de mundo e descarte diferido |
-| Build / testes | Gradle, ShaderC offline, verificações de ABI/JAR e testes adicionados; não executados com sucesso |
+**TRANSLUCENT ainda não está validado em jogo.** CI/ABI/SPIR-V não demonstram vidro
+ou água transparentes. O ambiente local continua sem Java/GPU. Publicação do JAR
+real e relatórios independentes Ubuntu/Windows: [PR #1](https://github.com/xysgottaken2/test-3/pull/1).
 
-A saída atual é **visibilidade com cores diagnósticas**, não iluminação completa.
-UV, tint e light bytes são preservados na captura, mas não usados para shading de
-materiais. Cutout/any-hit, transparências, entidades, iluminação, sombras, reflexos,
-GI, denoising, upscaling e UI de configuração ainda não estão implementados.
-O mundo rasterizado e o depth vanilla não são substituídos integralmente.
-Não foi necessário adicionar C/C++: as chamadas Vulkan necessárias existem no LWJGL.
+- [Investigação 26.3, implementação, limites e diagnóstico da 0.8.0](docs/translucent-0.8.0.md)
+- JAR: `native-vulkan-rt-0.8.0-experimental.jar` no artifact `native-vulkan-rt-experimental`.
+- Uso normal: substituir o JAR e abrir o mundo, mantendo `enabled=true`,
+  `scene=chunks` e `textureSampling=texel` nas propriedades `nativevulkanrt`.
+- Teste novo: vidro (também colorido) com blocos atrás e água com substrato visível.
+  Conferir fundo, alpha/UV/tint, camadas coexistentes e cache estável; apenas ver
+  vidro não basta. Diagnósticos detalhados são opcionais.
+- Fora deste marco: entidades/partículas/falling blocks, iluminação RT, sombras,
+  reflexos/GI, refração avançada, skybox e fog volumétrico de água.
 
-## Validação
-
-**RUNTIME VERIFIED: NO**
-
-A tentativa local de `./gradlew --no-daemon build` parou antes de iniciar o Gradle:
-`JAVA_HOME is not set and no 'java' command could be found in your PATH.`
-O ambiente também não dispõe de GPU Vulkan acessível em `/dev/dri`.
-
-A análise sintática de 31 arquivos Java passou; isso **não é compilação nem
-verificação de tipos**. Compilação Java/GLSL, testes JUnit, verificação de ABI contra
-os binários oficiais, aplicação dos Mixins, validation layers e imagem na GPU
-continuam pendentes. Os workflows de CI estão configurados; sua execução deve ser
-verificada no PR e não substitui o teste no jogo.
+Comandos de verificação: `./gradlew --no-daemon check assemble verifyMinecraftAbi
+verifyModJar`. Documentos antigos abaixo descrevem etapas anteriores; o estado
+atual e os limites estão no documento da 0.8.0 acima.
 
 ## Build e teste
 

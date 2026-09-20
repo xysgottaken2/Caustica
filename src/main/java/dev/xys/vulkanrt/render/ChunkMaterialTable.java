@@ -10,13 +10,14 @@ import static org.lwjgl.vulkan.VK10.VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
 /** Immutable rows in exactly the TLAS input order (gl_InstanceID, not custom index/SBT offset).
  * Only CPU-known addresses/layout/section metadata are uploaded. Vertex bytes stay on the GPU. */
 public final class ChunkMaterialTable implements AutoCloseable {
-    public static final int ROW_BYTES = 80;
-    public static final int CUTOUT = 1, CULL_BACK = 2;
-    public record Entry(long section, long vertexAddress, SectionGeometryLayout layout, CoplanarOverlayMapper.Overlay overlay, int flags) {
+    public static final int ROW_BYTES = 96;
+    public static final int CUTOUT = 1, CULL_BACK = 2, TRANSLUCENT = 4;
+    public record Entry(long section, long vertexAddress, SectionGeometryLayout layout, CoplanarOverlayMapper.Overlay overlay, int flags,long indexAddress,int indexBytes) {
         public Entry {
-            if((flags & ~(CUTOUT|CULL_BACK))!=0 || flags==CULL_BACK || (flags!=0 && overlay!=null))
+            if((flags & ~(CUTOUT|CULL_BACK|TRANSLUCENT))!=0 || flags==CULL_BACK || (flags&(CUTOUT|TRANSLUCENT))==(CUTOUT|TRANSLUCENT) || (flags!=0 && overlay!=null))
                 throw new IllegalArgumentException("Invalid layer/material flags");
         }
+        public Entry(long section,long vertexAddress,SectionGeometryLayout layout,CoplanarOverlayMapper.Overlay overlay,int flags) { this(section,vertexAddress,layout,overlay,flags,0,0); }
         public Entry(long section,long vertexAddress,SectionGeometryLayout layout,CoplanarOverlayMapper.Overlay overlay) { this(section,vertexAddress,layout,overlay,0); }
         public Entry(long section,long vertexAddress,SectionGeometryLayout layout) { this(section,vertexAddress,layout,null); }
     }
@@ -60,6 +61,9 @@ public final class ChunkMaterialTable implements AutoCloseable {
         bytes.putInt(offset+16,color).putInt(offset+20,layout.vertexCount()).putInt(offset+24,layout.triangles()).putInt(offset+28,sampling.shaderId);
         bytes.putInt(offset+32,SectionPos.x(entry.section())).putInt(offset+36,SectionPos.y(entry.section()))
                 .putInt(offset+40,SectionPos.z(entry.section())).putInt(offset+44,entry.flags());
+        if((entry.flags()&TRANSLUCENT)!=0 && (entry.indexAddress()==0 || (entry.indexAddress()&3)!=0 || (entry.indexBytes()!=2 && entry.indexBytes()!=4)))
+            throw new IllegalArgumentException("Missing/invalid TRANSLUCENT index snapshot");
+        bytes.putLong(offset+80,entry.indexAddress()).putInt(offset+88,entry.indexBytes()).putInt(offset+92,entry.indexAddress()==0?0:layout.indexCount());
         var overlay=entry.overlay();
         bytes.putLong(offset+48,overlay==null?0:overlay.vertices.address());
         bytes.putInt(offset+56,overlay==null?0:overlay.format.stride()/4).putInt(offset+60,overlay==null?0:attribute(overlay.format,"UV0","RG32_FLOAT",8));

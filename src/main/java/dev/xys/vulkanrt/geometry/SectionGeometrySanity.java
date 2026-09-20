@@ -13,7 +13,8 @@ public final class SectionGeometrySanity {
         SOLID_DRAW_MISSING, LAYER_DRAW_MISSING, VERTEX_UPLOAD_PENDING, INDEX_UPLOAD_PENDING, SLICE_MISSING,
         NOT_VULKAN_BUFFER, CUSTOM_INDICES_UNSUPPORTED, INVALID_INDEX_COUNT, POSITION_FORMAT_UNSUPPORTED,
         INVALID_VERTEX_LAYOUT, VERTEX_RANGE_EMPTY, SECTION_TOO_LARGE, ZERO_BUFFER_HANDLE,
-        BUFFER_CLOSED, COPY_SRC_MISSING, MISALIGNED_OFFSET, RANGE_OUT_OF_BOUNDS
+        BUFFER_CLOSED, COPY_SRC_MISSING, MISALIGNED_OFFSET, RANGE_OUT_OF_BOUNDS,
+        INDEX_SLICE_MISSING, INDEX_FORMAT_UNSUPPORTED, INDEX_RANGE_INVALID, NON_VANILLA_TRANSLUCENT_MESH, TRANSLUCENT_SORT_STATE_INVALID
     }
     public static Failure inspect(SectionRenderDispatcher.RenderSection section, long expectedNode, SectionMesh mesh,
                                   SectionRenderDispatcher.RenderSectionBufferSlice slice, VertexFormat format) {
@@ -34,11 +35,27 @@ public final class SectionGeometrySanity {
         }
         if (slice == null) return Failure.SLICE_MISSING;
         if (!(slice.vertexBuffer() instanceof VulkanGpuBuffer buffer)) return Failure.NOT_VULKAN_BUFFER;
+        boolean indexedTranslucent=layer==ChunkSectionLayer.TRANSLUCENT;
+        if(indexedTranslucent) {
+            // Vertex count derives from the verified vanilla QUADS compiler, not arbitrary custom meshes.
+            if(mesh.getClass()!=CompiledSectionMesh.class) return Failure.NON_VANILLA_TRANSLUCENT_MESH;
+            var sort=((CompiledSectionMesh)mesh).getTransparencyState();
+            if(sort==null || sort.centroids().size()!=draw.indexCount()/6 || sort.indexType()!=draw.indexType()) return Failure.TRANSLUCENT_SORT_STATE_INVALID;
+            if(!draw.hasCustomIndexBuffer() || !(slice.indexBuffer() instanceof VulkanGpuBuffer index)) return Failure.INDEX_SLICE_MISSING;
+            int width=draw.indexType()==null ? 0 : draw.indexType().bytes;
+            if(width!=2 && width!=4) return Failure.INDEX_FORMAT_UNSUPPORTED;
+            if(!validIndexRange(draw.indexCount(),width,slice.indexBufferOffset(),index.size(),index.vkBuffer(),index.isClosed(),(index.usage()&GpuBuffer.USAGE_COPY_SRC)!=0)) return Failure.INDEX_RANGE_INVALID;
+        }
         var pos = format.getElement("Position");
-        return rangeFailure(draw.indexCount(), draw.hasCustomIndexBuffer(), format.getVertexSize(),
+        return rangeFailure(draw.indexCount(), draw.hasCustomIndexBuffer() && !indexedTranslucent, format.getVertexSize(),
                 pos == null ? -1 : pos.offset(), pos != null && pos.format() == GpuFormat.RGB32_FLOAT,
                 slice.vertexBufferOffset(), buffer.size(), buffer.vkBuffer(), buffer.isClosed(),
                 (buffer.usage() & GpuBuffer.USAGE_COPY_SRC) != 0);
+    }
+    public static boolean validIndexRange(int count,int width,long offset,long size,long handle,boolean closed,boolean copySrc) {
+        long bytes=(long)count*width;
+        return count>0 && count%6==0 && (width==2 || width==4) && offset>=0 && (offset&3)==0
+                && bytes<=size && offset<=size-bytes && handle!=0 && !closed && copySrc;
     }
     public static Failure rangeFailure(int indices, boolean custom, int stride, int positionOffset, boolean rgb32,
                                        long offset, long bufferBytes, long handle, boolean closed, boolean copySrc) {

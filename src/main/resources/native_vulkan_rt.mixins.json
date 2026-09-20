@@ -9,6 +9,7 @@
     "GameRendererMixin",
     "LevelRendererMixin",
     "ModelBlockRendererMixin",
+    "FluidRendererMixin",
     "ChunkSectionsToRenderMixin",
     "RenderSystemMixin",
     "VulkanCommandEncoderMixin"

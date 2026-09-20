@@ -27,7 +27,7 @@ final class ShaderResourcesTest {
         var words=shader("chunks.rchit");
         var capabilities=new HashSet<Integer>();
         var bindings=new HashSet<Integer>();
-        boolean rowsStride80=false;
+        boolean rowsStride96=false;
         for (int i=20;i<words.limit();) {
             int head=words.getInt(i), count=head>>>16, opcode=head&0xffff;
             assertTrue(count>0); assertTrue(i+count*4<=words.limit());
@@ -35,7 +35,7 @@ final class ShaderResourcesTest {
             if(opcode==71 && count==4) { // OpDecorate
                 int decoration=words.getInt(i+8), value=words.getInt(i+12);
                 if(decoration==33) bindings.add(value); // Binding
-                if(decoration==6 && value==80) rowsStride80=true; // ArrayStride
+                if(decoration==6 && value==96) rowsStride96=true; // ArrayStride
             }
             i+=count*4;
         }
@@ -43,9 +43,9 @@ final class ShaderResourcesTest {
         assertFalse(capabilities.contains(11),"shaderInt64 is not enabled/required");
         assertFalse(capabilities.contains(5301),"ShaderNonUniform indexing is not enabled/required");
         assertEquals(java.util.Set.of(2,3),bindings);
-        assertTrue(rowsStride80,"Material std430 row must match Java packer");
+        assertTrue(rowsStride96,"Material std430 row must match Java packer");
     }
-    @Test void bothComparisonPathsSampleViewMipZeroAndDiagnosticProbeHasTwelveVectors() throws Exception {
+    @Test void bothComparisonPathsSampleViewMipZeroAndDiagnosticProbeHasSeventeenVectors() throws Exception {
         var words=shader("chunks.rchit");
         var zeroConstants=new HashSet<Integer>();
         var lods=new java.util.ArrayList<Integer>();
@@ -73,8 +73,8 @@ final class ShaderResourcesTest {
                 offsets.computeIfAbsent(raygen.getInt(i+4),k->new java.util.HashMap<>()).put(raygen.getInt(i+8),raygen.getInt(i+16));
             i+=count*4;
         }
-        assertTrue(offsets.values().stream().anyMatch(m->m.size()==12 && java.util.stream.IntStream.range(0,12).allMatch(i->java.util.Objects.equals(m.get(i),i*16))));
-        assertEquals(192,ChunkTextureSampling.PROBE_BYTES);
+        assertTrue(offsets.values().stream().anyMatch(m->m.size()==17 && java.util.stream.IntStream.range(0,17).allMatch(i->java.util.Objects.equals(m.get(i),i*16))));
+        assertEquals(272,ChunkTextureSampling.PROBE_BYTES);
     }
     @Test void overlayComputeIsOfflineCompiledWithBoundedInterfaceAndNoExtraDescriptors() throws Exception {
         var words=shader("overlay.comp");
@@ -98,21 +98,23 @@ final class ShaderResourcesTest {
     @Test void anyHitReallySamplesAlphaAndIgnoresIntersectionsWithoutForcingOpaqueRays() throws Exception {
         var words=shader("chunks.rahit");
         var bindings=new HashSet<Integer>();var capabilities=new HashSet<Integer>();
-        boolean anyHit=false,ignore=false,fetch=false,cutoff=false,stride=false;
+        boolean anyHit=false,ignore=false,fetch=false,cutoff=false,transCutoff=false,stride=false;
         for(int i=20;i<words.limit();) {
             int head=words.getInt(i),count=head>>>16,op=head&0xffff;assertTrue(count>0);
             if(op==15) anyHit=words.getInt(i+4)==5315;
+            assertNotEquals(4445,op,"Any-hit must not recursively trace or compose transparency");
             if(op==4448) ignore=true;
             if(op==95) fetch=true;
             if(op==17) capabilities.add(words.getInt(i+4));
             if(op==43 && count==4 && words.getInt(i+12)==Float.floatToIntBits(0.5f)) cutoff=true;
+            if(op==43 && count==4 && words.getInt(i+12)==Float.floatToIntBits(0.1f)) transCutoff=true;
             if(op==71 && count==4) {
                 if(words.getInt(i+8)==33) bindings.add(words.getInt(i+12));
-                if(words.getInt(i+8)==6 && words.getInt(i+12)==80) stride=true;
+                if(words.getInt(i+8)==6 && words.getInt(i+12)==96) stride=true;
             }
             i+=count*4;
         }
-        assertTrue(anyHit);assertTrue(ignore);assertTrue(fetch);assertTrue(cutoff);assertTrue(stride);
+        assertTrue(anyHit);assertTrue(ignore);assertTrue(fetch);assertTrue(cutoff);assertTrue(transCutoff);assertTrue(stride);
         assertEquals(java.util.Set.of(2,3),bindings);assertFalse(capabilities.contains(11));
         var raygen=shader("chunks.rgen");var zeros=new HashSet<Integer>();var flags=new java.util.ArrayList<Integer>();
         for(int i=20;i<raygen.limit();) {
@@ -121,7 +123,27 @@ final class ShaderResourcesTest {
             if(op==4445) flags.add(raygen.getInt(i+8));
             i+=n*4;
         }
-        assertFalse(flags.isEmpty());assertTrue(zeros.containsAll(flags),"Chunks rays must not force OPAQUE on CUTOUT");
+        assertTrue(flags.size()>=3,"Initial, continuation and overflow-background traces must be executable SPIR-V");assertTrue(zeros.containsAll(flags),"Chunks rays must not force OPAQUE on CUTOUT");
+    }
+    @Test void allPayloadsMatchAndOnlyRaygenComposesInOrderedLoop() throws Exception {
+        String payload=null;
+        for(String stage:new String[]{"rgen","rmiss","rchit","rahit"}) {
+            String source=java.nio.file.Files.readString(java.nio.file.Path.of("shaders/chunks."+stage));
+            String value=source.substring(source.indexOf("struct Hit {"),source.indexOf("};")+2);
+            if(payload==null) payload=value;else assertEquals(payload,value,stage);
+            if(stage.equals("rgen")) {
+                assertTrue(source.contains("composed+=remaining*hit.alpha*hit.color"));
+                assertTrue(source.contains("remaining*=1.0-hit.alpha"));
+                assertTrue(source.contains("floatBitsToUint(hit.distance)+1u"));
+                assertTrue(source.contains("step<64u"));assertTrue(source.contains("0x01"));
+            } else assertFalse(source.contains("composed+="));
+        }
+        var words=shader("chunks.rahit");
+        for(int i=20;i<words.limit();) {
+            int head=words.getInt(i),count=head>>>16;
+            if((head&0xffff)==17) assertNotEquals(22,words.getInt(i+4),"SHORT indices do not require shaderInt16");
+            i+=count*4;
+        }
     }
     @Test void triangleShaderStillUsesOnlyItsOriginalDescriptors() throws Exception {
         var words=shader("primary.rgen");

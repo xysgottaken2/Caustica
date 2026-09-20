@@ -116,3 +116,21 @@ net/minecraft/client/renderer/RenderPipelines	F	CUTOUT_TERRAIN	Lcom/mojang/rende
 net/minecraft/client/renderer/RenderPipelines	F	CUTOUT_TERRAIN_MULTIDRAW	Lcom/mojang/renderpearl/api/pipeline/RenderPipeline;
 com/mojang/renderpearl/api/pipeline/RenderPipeline	M	isCull	()Z
 net/minecraft/client/renderer/texture/SpriteContents	M	transparency	()Lcom/mojang/blaze3d/platform/Transparency;
+
+# TRANSLUCENT: original sorted index slices and emitted fluid attributes (0.8.0).
+net/minecraft/client/renderer/chunk/ChunkSectionLayer	F	TRANSLUCENT	Lnet/minecraft/client/renderer/chunk/ChunkSectionLayer;
+net/minecraft/client/renderer/chunk/CompiledSectionMesh	M	getTransparencyState	()Lcom/mojang/blaze3d/vertex/MeshData$SortState;
+com/mojang/blaze3d/vertex/MeshData$SortState	M	centroids	()Lcom/mojang/blaze3d/vertex/CompactVectorArray;
+com/mojang/blaze3d/vertex/MeshData$SortState	M	indexType	()Lcom/mojang/renderpearl/api/pipeline/IndexType;
+com/mojang/blaze3d/vertex/CompactVectorArray	M	size	()I
+com/mojang/renderpearl/api/pipeline/IndexType	F	bytes	I
+net/minecraft/client/renderer/chunk/SectionRenderDispatcher$RenderSectionBufferSlice	M	indexBuffer	()Lcom/mojang/renderpearl/api/buffers/GpuBuffer;
+net/minecraft/client/renderer/chunk/SectionRenderDispatcher$RenderSectionBufferSlice	M	indexBufferOffset	()J
+net/minecraft/client/renderer/chunk/SectionMesh$SectionDraw	M	indexType	()Lcom/mojang/renderpearl/api/pipeline/IndexType;
+net/minecraft/client/renderer/block/FluidRenderer	F	fluidModels	Lnet/minecraft/client/renderer/block/FluidStateModelSet;
+net/minecraft/client/renderer/block/FluidRenderer	M	tesselate	(Lnet/minecraft/client/renderer/block/BlockAndTintGetter;Lnet/minecraft/core/BlockPos;Lnet/minecraft/client/renderer/block/FluidRenderer$Output;Lnet/minecraft/world/level/block/state/BlockState;Lnet/minecraft/world/level/material/FluidState;)V
+net/minecraft/client/renderer/block/FluidRenderer	M	vertex	(Lcom/mojang/blaze3d/vertex/VertexConsumer;FFFIFFI)V
+net/minecraft/client/renderer/block/FluidStateModelSet	M	get	(Lnet/minecraft/world/level/material/FluidState;)Lnet/minecraft/client/renderer/block/FluidModel;
+net/minecraft/client/renderer/block/FluidModel	M	layer	()Lnet/minecraft/client/renderer/chunk/ChunkSectionLayer;
+net/minecraft/client/renderer/RenderPipelines	F	TRANSLUCENT_TERRAIN	Lcom/mojang/renderpearl/api/pipeline/RenderPipeline;
+net/minecraft/client/renderer/RenderPipelines	F	TRANSLUCENT_TERRAIN_MULTIDRAW	Lcom/mojang/renderpearl/api/pipeline/RenderPipeline;

@@ -31,7 +31,7 @@ final class CutoutIntegrationTest {
         assertEquals(3,ChunkMaterialTable.attribute(layout,"Color","RGBA8_UNORM",4));
         assertEquals(4,ChunkMaterialTable.attribute(layout,"UV0","RG32_FLOAT",8));
         assertEquals(6,ChunkMaterialTable.attribute(layout,"UV2","RG16_SINT",4));
-        var bytes=ByteBuffer.allocate(80).order(ByteOrder.nativeOrder());
+        var bytes=ByteBuffer.allocate(ChunkMaterialTable.ROW_BYTES).order(ByteOrder.nativeOrder());
         ChunkMaterialTable.pack(bytes,0,new ChunkMaterialTable.Entry(0,0x123400L,layout,null,ChunkMaterialTable.CUTOUT|ChunkMaterialTable.CULL_BACK));
         assertEquals(3,bytes.getInt(44));assertEquals(0x123400L,bytes.getLong(0));
         assertEquals(0,bytes.getInt(28),"TEXEL remains default");assertEquals(0,bytes.getLong(64),"CUTOUT closest-hit does not apply the SOLID overlay twice");

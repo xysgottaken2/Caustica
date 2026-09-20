@@ -2,9 +2,9 @@
 #extension GL_EXT_ray_tracing : require
 layout(set=0,binding=0) uniform accelerationStructureEXT scene;
 layout(set=0,binding=1,rgba8) uniform image2D outputImage;
-struct Hit { vec3 color; uint found; ivec3 section; uint primitive; vec2 uv; uint sampled; ivec2 atlasSize; vec2 quadSpan; uint mode; int levels; vec4 baseTint; vec4 overlayTint; vec4 sampleColor; vec2 baseUv; uint overlayState; uint face; uint layer; uvec4 alphaStats; vec4 cutoutSample; ivec4 cutoutSection; };
+struct Hit { vec3 color; uint found; ivec3 section; uint primitive; vec2 uv; uint sampled; ivec2 atlasSize; vec2 quadSpan; uint mode; int levels; vec4 baseTint; vec4 overlayTint; vec4 sampleColor; vec2 baseUv; uint overlayState; uint face; uint layer; uvec4 alphaStats; vec4 cutoutSample; ivec4 cutoutSection; float distance; float alpha; uvec2 previous; uvec4 transStats; vec4 transSample; ivec4 transSection; };
 layout(location=0) rayPayloadEXT Hit hit;
-layout(set=0,binding=4,std430) buffer Probe { uvec4 state; ivec4 section; vec4 uv; vec4 color; uvec4 atlas; vec4 baseTint; vec4 overlayTint; vec4 sampleColor; vec4 tintInfo; uvec4 alphaStats; vec4 cutoutSample; ivec4 cutoutSection; } probe;
+layout(set=0,binding=4,std430) buffer Probe { uvec4 state; ivec4 section; vec4 uv; vec4 color; uvec4 atlas; vec4 baseTint; vec4 overlayTint; vec4 sampleColor; vec4 tintInfo; uvec4 alphaStats; vec4 cutoutSample; ivec4 cutoutSection; uvec4 transStats; vec4 transSample; ivec4 transSection; uvec4 transState; vec4 transBlend; } probe;
 layout(push_constant,std430) uniform Camera { mat4 inverseViewProjection; vec4 origin; uvec4 frame; } camera;
 // GPU-only center-ray telemetry. One optional 1x1 trace writes this probe, then a barrier precedes
 // the image trace/HUD. No vertex, image, UV or hit-record data is ever mapped/read by the CPU.
@@ -166,7 +166,7 @@ int text(int row,int col) {
  }
  if(row==19) {
     const int t[6]=int[](76,65,89,69,82,61); if(col<6) return t[col];
-    const int names[12]=int[](83,79,76,73,68,32,67,85,84,79,85,84);
+    const int names[18]=int[](83,79,76,73,68,32,67,85,84,79,85,84,84,82,65,78,83,32);
     int i=col-6; return i<6?names[int(probe.state.w)*6+i]:32;
  }
  if(row==20 || row==21) {
@@ -208,6 +208,43 @@ int text(int row,int col) {
     const int t[6]=int[](67,80,82,73,77,61);if(col<6) return t[col];
     return probe.cutoutSection.w>=0 && col<15 ? digit(uint(probe.cutoutSection.w),col-6,9) : 32;
  }
+ if(row==31) {
+    const int t[7]=int[](84,82,78,32,85,86,61); if(col<7) return t[col];
+    if(probe.transSection.w<0) return 32;
+    if(any(isnan(probe.transSample.xy)) || any(isinf(probe.transSample.xy))) return col==7?66:col==8?65:col==9?68:32;
+    int c=col-7; if(c>=17) return 32; if(c==8) return 44;
+    int axis=c<8?0:1,part=c<8?c:c-9; float uv=clamp(probe.transSample[axis],0.0,1.0);
+    if(part==0) return 48+int(uv);if(part==1) return 46;
+    return digit(uint(fract(uv)*1000000.0),part-2,6);
+ }
+ if(row==32) {
+    const int t[12]=int[](84,65,32,84,69,88,44,86,69,82,84,61); if(col<12) return t[col];
+    if(probe.transSample.z<0.0) return 32;
+    return pairDigit(uvec2(round(clamp(probe.transSample.zw,0.0,1.0)*255.0)),col-12,3);
+ }
+ if(row==33) {
+    const int t[9]=int[](84,83,69,67,84,73,79,78,61); if(col<9) return t[col];
+    if(probe.transSection.w<0) return 32;
+    int c=col-9;if(c>=26) return 32;int axis=c/9,part=c%9;
+    if(part==8) return axis<2?44:32;int value=probe.transSection[axis];
+    if(part==0) return value<0?45:43;
+    return digit(uint(abs(value)),part-1,7);
+ }
+ if(row==34) {
+    const int t[6]=int[](84,80,82,73,77,61);if(col<6) return t[col];
+    return probe.transSection.w>=0 && col<15 ? digit(uint(probe.transSection.w),col-6,9) : 32;
+ }
+ if(row==27 || row==28) {
+    const int labels[12]=int[](84,84,69,83,84,61,84,68,82,79,80,61);
+    if(col<6) return labels[(row-27)*6+col];
+    return col<15?digit(probe.transStats[row-27],col-6,9):32;
+ }
+ if(row==29) { const int t[9]=int[](84,67,79,77,80,79,83,69,61);if(col<9) return t[col];return col<12?digit(probe.transState.x,col-9,3):32; }
+ if(row==30) { const int t[16]=int[](84,65,32,70,73,78,65,76,44,82,69,77,65,73,78,61);if(col<16) return t[col];if(probe.transSample.z<0.0) return 32;
+    return pairDigit(uvec2(round(clamp(vec2(probe.transSample.z*probe.transSample.w,probe.transBlend.y),0.0,1.0)*255.0)),col-16,3);
+ }
+ if(row==35) { const int t[8]=int[](84,83,69,76,69,67,84,61);if(col<8) return t[col];return col<9?digit(probe.transState.z,col-8,1):32; }
+ if(row==36) { const int t[14]=int[](84,79,86,69,82,70,76,79,87,44,69,78,68,61);if(col<14) return t[col];return pairDigit(probe.transState.yw,col-14,1); }
  return 32;
 }
 void main() {
@@ -215,7 +252,7 @@ void main() {
     ivec2 pixel=ivec2(gl_LaunchIDEXT.xy);
     if(!probePass && (camera.frame.w&2u)!=0u) {
         ivec2 panel=pixel-ivec2(8,8);
-        if(all(greaterThanEqual(panel,ivec2(0))) && all(lessThan(panel,ivec2(320,378)))) {
+        if(all(greaterThanEqual(panel,ivec2(0))) && all(lessThan(panel,ivec2(320,518)))) {
             ivec2 p=panel/2;
             int row=p.y/7, col=p.x/4;
             bool ink=(p.x%4<3 && p.y%7<5) && ((glyph(text(row,col))>>uint((p.y%7)*3+p.x%4))&1u)!=0u;
@@ -228,6 +265,8 @@ void main() {
     vec4 projected=camera.inverseViewProjection*vec4(uv*2.0-1.0,0.5,1.0);
     vec3 direction=normalize(projected.xyz/projected.w-camera.origin.xyz);
     hit.color=vec3(0); hit.found=0u; hit.section=ivec3(0); hit.primitive=0u; hit.uv=vec2(0); hit.sampled=0u; hit.atlasSize=ivec2(0); hit.quadSpan=vec2(0); hit.mode=0u; hit.levels=0; hit.baseTint=vec4(0); hit.overlayTint=vec4(0); hit.sampleColor=vec4(0); hit.baseUv=vec2(0); hit.overlayState=0u; hit.face=0u; hit.layer=0u; hit.alphaStats=uvec4(0u,0u,floatBitsToUint(1.0),floatBitsToUint(0.0)); hit.cutoutSample=vec4(-1); hit.cutoutSection=ivec4(0,0,0,-1);
+    hit.distance=4096.0;hit.alpha=1.0;hit.previous=uvec2(0xffffffffu);
+    hit.transStats=uvec4(0u,0u,floatBitsToUint(1.0),floatBitsToUint(0.0));hit.transSample=vec4(-1);hit.transSection=ivec4(0,0,0,-1);
     traceRayEXT(scene,gl_RayFlagsNoneEXT,0xff,0,0,0,camera.origin.xyz,0.001,direction,4096.0,0);
     if(probePass) {
         probe.state=uvec4(hit.found,hit.primitive,hit.sampled,hit.layer);
@@ -236,5 +275,40 @@ void main() {
         probe.atlas=uvec4(hit.atlasSize,uint(hit.levels),hit.mode);
         probe.baseTint=hit.baseTint; probe.overlayTint=hit.overlayTint; probe.sampleColor=hit.sampleColor;
         probe.tintInfo=vec4(hit.baseUv,float(hit.overlayState),float(hit.face));
-    } else imageStore(outputImage,pixel,vec4(hit.color,1));
+    }
+    // Ordered closest-hit continuation, never unordered any-hit blending or recursive trace calls.
+    vec3 composed=vec3(0);float remaining=1.0,nextT=0.001,firstAlpha=-1.0;
+    uint layers=0u,overflow=0u,terminal=0u;
+    for(uint step=0u;step<64u;step++) {
+        if(hit.found==0u || hit.layer!=2u) {
+            composed+=remaining*hit.color;terminal=hit.found;break;
+        }
+        if(probePass && layers==0u) {
+            probe.transSample=vec4(hit.uv,hit.sampleColor.a,hit.baseTint.a);
+            probe.transSection=ivec4(hit.section,int(hit.primitive));firstAlpha=hit.alpha;
+        }
+        composed+=remaining*hit.alpha*hit.color;
+        remaining*=1.0-hit.alpha; layers++;
+        if(remaining==0.0) { terminal=2u;break; }
+        // Same origin/direction and absolute t throughout: one positive-float ULP, NOT a world-space
+        // epsilon that skips thin panes. The previous triangle is additionally rejected in any-hit.
+        nextT=uintBitsToFloat(floatBitsToUint(hit.distance)+1u);
+        if(nextT>=4096.0) { composed+=remaining*vec3(0.018,0.025,0.045);terminal=3u;break; }
+        if(step==63u) {
+            // With vanilla alpha>=.1, residual weight is <=.9^64 (~.00118). Bound work and retain
+            // the opaque/CUTOUT background rather than making overflow a black/opaque surface.
+            overflow=1u;
+            traceRayEXT(scene,gl_RayFlagsNoneEXT,0x01,0,0,0,camera.origin.xyz,nextT,direction,4096.0,0);
+            composed+=remaining*hit.color;terminal=hit.found;break;
+        }
+        traceRayEXT(scene,gl_RayFlagsNoneEXT,0xff,0,0,0,camera.origin.xyz,nextT,direction,4096.0,0);
+    }
+    if(probePass) {
+        probe.color=vec4(composed,1);
+        probe.alphaStats=hit.alphaStats;probe.cutoutSample=hit.cutoutSample;probe.cutoutSection=hit.cutoutSection;
+        probe.transStats=hit.transStats;
+        if(layers==0u) { probe.transSample=hit.transSample;probe.transSection=hit.transSection; }
+        probe.transState=uvec4(layers,overflow,layers>0u?1u:0u,terminal);
+        probe.transBlend=vec4(firstAlpha,remaining,nextT,0);
+    } else imageStore(outputImage,pixel,vec4(composed,1));
 }

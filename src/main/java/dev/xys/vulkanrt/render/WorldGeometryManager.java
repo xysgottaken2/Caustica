@@ -19,7 +19,7 @@ import java.util.stream.Collectors;
 /** One cached BLAS per actual SOLID section draw; a single TLAS contains the entire valid set.
  * Capture, lifetime validation and enqueue all precede vanilla's later heap uploads/reuse.
  * No compiler interception, CPU vertex readback or second terrain mesher.
- * Geometry/cache user-verified with 444 sections in 0.5.0; TEXEL sharpness user-verified in 0.5.1; SOLID/materials/coplanar overlay user-verified in 0.6.0; full CUTOUT new in 0.7.0. */
+ * Geometry/cache user-verified with 444 sections in 0.5.0; TEXEL sharpness user-verified in 0.5.1; SOLID/materials/coplanar overlay user-verified in 0.6.0; CUTOUT/alpha test user-verified in 0.7.0; TRANSLUCENT new in 0.8.0. */
 public final class WorldGeometryManager implements AutoCloseable {
     private static final Logger LOG = LoggerFactory.getLogger("native_vulkan_rt");
     private final VulkanRayTracingContext context;
@@ -27,6 +27,8 @@ public final class WorldGeometryManager implements AutoCloseable {
     private Map<Long, Resident> residents = Map.of();
     private Map<Long, Resident> cutoutResidents = Map.of();
     private int cutoutBuildsSinceReport, cutoutRetiresSinceReport;
+    private Map<Long,Resident> translucentResidents=Map.of();
+    private int translucentBuildsSinceReport,translucentRetiresSinceReport;
     private AccelerationStructureManager.Structure tlas;
     private ChunkCoordinates.Anchor anchor;
     private ChunkMaterialTable materials;
@@ -45,7 +47,7 @@ public final class WorldGeometryManager implements AutoCloseable {
         anchor = ChunkCoordinates.Anchor.near(x, y, z);
         var pin = ChunkCoordinates.parseSection(System.getProperty("nativevulkanrt.section"));
         LOG.info("[RT] Scene: chunks; selection={}; BLAS cache keyed by section/owner/mesh/allocation",
-                pin == null ? "ALL eligible SOLID + CUTOUT terrain draws" : "diagnostic pin " + coordinates(pin));
+                pin == null ? "ALL eligible SOLID + CUTOUT + TRANSLUCENT terrain draws" : "diagnostic pin " + coordinates(pin));
     }
 
     public final class Prepared {
@@ -58,9 +60,12 @@ public final class WorldGeometryManager implements AutoCloseable {
         private final int overlayBuilt;
         private final Map<Long,Resident> nextCutouts;
         private final int cutoutBuilt;
+        private final Map<Long,Resident> nextTranslucents;
+        private final int translucentBuilt;
         private boolean committed;
         private Prepared(AccelerationStructureManager.Structure tlas, Map<Long, Resident> next,
-                         ChunkCoordinates.Anchor anchor, int built, ChunkMaterialTable materials, Map<Long,CoplanarOverlayMapper.Overlay> nextOverlays, int overlayBuilt, Map<Long,Resident> nextCutouts, int cutoutBuilt) {
+                         ChunkCoordinates.Anchor anchor, int built, ChunkMaterialTable materials, Map<Long,CoplanarOverlayMapper.Overlay> nextOverlays, int overlayBuilt, Map<Long,Resident> nextCutouts, int cutoutBuilt, Map<Long,Resident> nextTranslucents,int translucentBuilt) {
+            this.nextTranslucents=nextTranslucents; this.translucentBuilt=translucentBuilt;
             this.nextCutouts=nextCutouts; this.cutoutBuilt=cutoutBuilt;
             this.tlas = tlas; this.next = next; this.anchor = anchor; this.built = built; this.materials = materials; this.nextOverlays=nextOverlays; this.overlayBuilt=overlayBuilt;
         }
@@ -68,7 +73,7 @@ public final class WorldGeometryManager implements AutoCloseable {
         public void commit() {
             if (committed) throw new IllegalStateException("Scene committed twice");
             committed = true;
-            boolean emptyTransition = (residents.isEmpty() && cutoutResidents.isEmpty()) != (next.isEmpty() && nextCutouts.isEmpty());
+            boolean emptyTransition = (residents.isEmpty() && cutoutResidents.isEmpty() && translucentResidents.isEmpty()) != (next.isEmpty() && nextCutouts.isEmpty() && nextTranslucents.isEmpty());
             if (WorldGeometryManager.this.tlas != null && WorldGeometryManager.this.tlas != tlas)
                 context.retire(WorldGeometryManager.this.tlas);
             if (WorldGeometryManager.this.materials != null && WorldGeometryManager.this.materials != materials)
@@ -79,18 +84,20 @@ public final class WorldGeometryManager implements AutoCloseable {
             overlays=nextOverlays; overlayBuildsSinceReport+=overlayBuilt;
             cutoutRetiresSinceReport+=SectionResidency.retireReplaced(cutoutResidents,nextCutouts,section -> context.retire(section.blas()));
             cutoutResidents=nextCutouts; cutoutBuildsSinceReport+=cutoutBuilt;
+            translucentRetiresSinceReport+=SectionResidency.retireReplaced(translucentResidents,nextTranslucents,section -> context.retire(section.blas()));
+            translucentResidents=nextTranslucents; translucentBuildsSinceReport+=translucentBuilt;
             residents = next; WorldGeometryManager.this.tlas = tlas; WorldGeometryManager.this.anchor = anchor;
             buildsSinceReport += built; retiresSinceReport += retired;
-            report(emptyTransition, next.size()-built, nextCutouts.size()-cutoutBuilt);
+            report(emptyTransition, next.size()-built, nextCutouts.size()-cutoutBuilt,nextTranslucents.size()-translucentBuilt);
         }
     }
 
     /** No extra GPU command buffer, copies or AS work for an unchanged set, even if draw order changes. */
     public Prepared reuseUnchangedDraws(LevelRenderer level, double x, double y, double z) {
-        if (!TerrainDrawCapture.ready(level, level.sectionRenderDispatcher()) || (residents.isEmpty() && cutoutResidents.isEmpty())) return null;
+        if (!TerrainDrawCapture.ready(level, level.sectionRenderDispatcher()) || (residents.isEmpty() && cutoutResidents.isEmpty() && translucentResidents.isEmpty())) return null;
         var draws = TerrainDrawCapture.draws();
         var nextAnchor = ChunkCoordinates.Anchor.near(x,y,z);
-        if (draws.size() != residents.size() || TerrainDrawCapture.cutoutDraws().size()!=cutoutResidents.size() || !nextAnchor.equals(anchor)) return null;
+        if (draws.size() != residents.size() || TerrainDrawCapture.cutoutDraws().size()!=cutoutResidents.size() || TerrainDrawCapture.translucentDraws().size()!=translucentResidents.size() || !nextAnchor.equals(anchor)) return null;
         for (var receipt : draws.values()) {
             if (!liveReceipt(receipt) || !matches(residents.get(receipt.section()), receipt)) return null;
             var cutout=TerrainDrawCapture.cutout(receipt.section());
@@ -99,7 +106,10 @@ public final class WorldGeometryManager implements AutoCloseable {
         }
         for(var receipt : TerrainDrawCapture.cutoutDraws().values())
             if(!liveReceipt(receipt) || !matches(cutoutResidents.get(receipt.section()),receipt)) return null;
-        return new Prepared(tlas, residents, anchor, 0, materials, overlays, 0, cutoutResidents, 0);
+        // Index-only resorting is a permutation, not new geometry. Owned snapshots stay valid.
+        for(var receipt:TerrainDrawCapture.translucentDraws().values())
+            if(!liveReceipt(receipt) || !matches(translucentResidents.get(receipt.section()),receipt)) return null;
+        return new Prepared(tlas, residents, anchor, 0, materials, overlays, 0, cutoutResidents, 0,translucentResidents,0);
     }
 
     public Prepared prepare(CommandBatch batch, LevelRenderer level, double x, double y, double z) {
@@ -107,7 +117,7 @@ public final class WorldGeometryManager implements AutoCloseable {
         var dispatcher = level.sectionRenderDispatcher();
         if (dispatcher == null) return empty(nextAnchor, "DISPATCHER_MISSING");
         if (!TerrainDrawCapture.ready(level, dispatcher)) return empty(nextAnchor, TerrainDrawCapture.failure());
-        if (TerrainDrawCapture.draws().isEmpty() && TerrainDrawCapture.cutoutDraws().isEmpty()) {
+        if (TerrainDrawCapture.draws().isEmpty() && TerrainDrawCapture.cutoutDraws().isEmpty() && TerrainDrawCapture.translucentDraws().isEmpty()) {
             TerrainDrawCapture.diagnostics(level, false);
             return empty(nextAnchor, TerrainDrawCapture.failure());
         }
@@ -141,11 +151,17 @@ public final class WorldGeometryManager implements AutoCloseable {
                 if(reason==null) validCutouts.put(receipt.section(),receipt);
                 else LOG.warn("[RT][cutout-diag] Invalidated before copy: section={} reason={}",coordinates(receipt.section()),reason);
             }
-            if (valid.isEmpty() && validCutouts.isEmpty()) return empty(nextAnchor, "NO_VALID_SOLID_OR_CUTOUT_RECEIPTS_BEFORE_COPY: " + firstInvalid);
-            int totalInstances=Math.addExact(valid.size(),validCutouts.size());
+            var validTranslucents=new TreeMap<Long,TerrainDrawCapture.Draw>();
+            for(var receipt:TerrainDrawCapture.translucentDraws().values()) {
+                String reason=validateTranslucent(dispatcher,receipt);
+                if(reason==null) validTranslucents.put(receipt.section(),receipt);
+                else LOG.warn("[RT][translucent-diag] Invalidated before copy: section={} reason={}",coordinates(receipt.section()),reason);
+            }
+            if (valid.isEmpty() && validCutouts.isEmpty() && validTranslucents.isEmpty()) return empty(nextAnchor, "NO_VALID_TERRAIN_LAYER_RECEIPTS_BEFORE_COPY: " + firstInvalid);
+            int totalInstances=Math.addExact(Math.addExact(valid.size(),validCutouts.size()),validTranslucents.size());
             // Check before allocating any new BLAS; never silently truncate the captured set.
             if (Long.compareUnsigned(totalInstances, context.capabilities().maxInstanceCount()) > 0)
-                throw new IllegalArgumentException("SOLID+CUTOUT instances=" + totalInstances + " exceeds device maxInstanceCount="
+                throw new IllegalArgumentException("Terrain instances=" + totalInstances + " exceeds device maxInstanceCount="
                         + Long.toUnsignedString(context.capabilities().maxInstanceCount()));
 
             var diff = SectionResidency.diff(residents, valid, WorldGeometryManager::matches);
@@ -178,11 +194,24 @@ public final class WorldGeometryManager implements AutoCloseable {
                 var blas=batch.own(acceleration.buildSectionBlas(batch,receipt.buffer(),receipt.offset(),layout,true));
                 nextCutouts.put(node,new Resident(node,receipt.owner(),receipt.mesh(),receipt.buffer(),receipt.offset(),layout,blas));
             }
-            if (detail && (detailed > 0 || cutoutDetailed>0)) lastDetail = System.nanoTime();
-            var action = SectionResidency.tlasAction(residents.size()+cutoutResidents.size(), next.size()+nextCutouts.size(), diff.changed() || cutoutDiff.changed(), !nextAnchor.equals(anchor));
+            var translucentDiff=SectionResidency.diff(translucentResidents,validTranslucents,WorldGeometryManager::matches);
+            var nextTranslucents=new TreeMap<Long,Resident>();
+            for(long node:translucentDiff.reuse()) nextTranslucents.put(node,translucentResidents.get(node));
+            int translucentDetailed=0;
+            for(long node:translucentDiff.build()) {
+                var receipt=validTranslucents.get(node); var layout=receipt.layout();
+                if(detail && translucentDetailed++<4)
+                    LOG.info("[RT][translucent-diag] group=TRANSLUCENT pipelines={} / {} (or OIT_TERRAIN) section={} mesh={} vertex=0x{} offset={} bytes={} index=0x{} offset={} indexBytes={} triangles={} layout={}; original indexed snapshot -> non-opaque BLAS/shared TLAS",
+                            ChunkSectionLayer.TRANSLUCENT.pipeline(false).getLocation(),ChunkSectionLayer.TRANSLUCENT.pipeline(true).getLocation(),coordinates(node),SectionGeometrySanity.identity(receipt.mesh()),
+                            Long.toHexString(receipt.buffer().vkBuffer()),receipt.offset(),layout.vertexBytes(),Long.toHexString(receipt.indexBuffer().vkBuffer()),receipt.indexOffset(),receipt.indexBytes(),layout.triangles(),layout);
+                var blas=batch.own(acceleration.buildTranslucentBlas(batch,receipt));
+                nextTranslucents.put(node,new Resident(node,receipt.owner(),receipt.mesh(),receipt.buffer(),receipt.offset(),layout,blas));
+            }
+            if (detail && (detailed > 0 || cutoutDetailed>0 || translucentDetailed>0)) lastDetail = System.nanoTime();
+            var action = SectionResidency.tlasAction(residents.size()+cutoutResidents.size()+translucentResidents.size(), next.size()+nextCutouts.size()+nextTranslucents.size(), diff.changed() || cutoutDiff.changed() || translucentDiff.changed(), !nextAnchor.equals(anchor));
             var nextTlas = tlas;
             if (action != SectionResidency.TlasAction.REUSE) {
-                var instances = new ArrayList<AccelerationStructureManager.Instance>(next.size()+nextCutouts.size());
+                var instances = new ArrayList<AccelerationStructureManager.Instance>(next.size()+nextCutouts.size()+nextTranslucents.size());
                 for (var section : next.values()) {
                     long node = section.section();
                     instances.add(new AccelerationStructureManager.Instance(section.blas(), nextAnchor.sectionX(node),
@@ -193,10 +222,14 @@ public final class WorldGeometryManager implements AutoCloseable {
                     long node=section.section();
                     instances.add(new AccelerationStructureManager.Instance(section.blas(),nextAnchor.sectionX(node),nextAnchor.sectionY(node),nextAnchor.sectionZ(node),0));
                 }
+                for(var section:nextTranslucents.values()) {
+                    long node=section.section();
+                    instances.add(new AccelerationStructureManager.Instance(section.blas(),nextAnchor.sectionX(node),nextAnchor.sectionY(node),nextAnchor.sectionZ(node),0,2));
+                }
                 if (action == SectionResidency.TlasAction.BUILD) nextTlas = batch.own(acceleration.buildTlas(batch, instances));
                 else acceleration.updateTlas(batch, tlas, instances);
                 LOG.debug("[RT] TLAS {}: {} instances; BLAS built={}, reused={}, retired={}; anchor=({}, {}, {})",
-                        action, instances.size(), diff.build().size()+cutoutDiff.build().size(), diff.reuse().size()+cutoutDiff.reuse().size(), diff.retire().size()+cutoutDiff.retire().size(), nextAnchor.x(), nextAnchor.y(), nextAnchor.z());
+                        action, instances.size(), diff.build().size()+cutoutDiff.build().size()+translucentDiff.build().size(), diff.reuse().size()+cutoutDiff.reuse().size()+translucentDiff.reuse().size(), diff.retire().size()+cutoutDiff.retire().size()+translucentDiff.retire().size(), nextAnchor.x(), nextAnchor.y(), nextAnchor.z());
             }
             // Independent material cache. The validated coplanar path still shades SOLID deterministically even if its opaque hit wins a depth tie.
             var nextOverlays=new TreeMap<Long,CoplanarOverlayMapper.Overlay>();
@@ -221,16 +254,18 @@ public final class WorldGeometryManager implements AutoCloseable {
             }
             boolean overlaysChanged=overlayBuilt>0 || nextOverlays.size()!=overlays.size();
             var nextMaterials = materials;
-            if (diff.changed() || cutoutDiff.changed() || overlaysChanged) {
-                var entries = new ArrayList<ChunkMaterialTable.Entry>(next.size()+nextCutouts.size());
+            if (diff.changed() || cutoutDiff.changed() || translucentDiff.changed() || overlaysChanged) {
+                var entries = new ArrayList<ChunkMaterialTable.Entry>(next.size()+nextCutouts.size()+nextTranslucents.size());
                 for (var section : next.values()) entries.add(new ChunkMaterialTable.Entry(section.section(),section.blas().vertexAddress(),section.layout(),nextOverlays.get(section.section())));
                 int cutoutFlags=ChunkMaterialTable.CUTOUT | (ChunkSectionLayer.CUTOUT.pipeline(false).isCull() ? ChunkMaterialTable.CULL_BACK : 0);
                 for(var section : nextCutouts.values()) entries.add(new ChunkMaterialTable.Entry(section.section(),section.blas().vertexAddress(),section.layout(),null,cutoutFlags));
+                int transFlags=ChunkMaterialTable.TRANSLUCENT | (ChunkSectionLayer.TRANSLUCENT.pipeline(false).isCull()?ChunkMaterialTable.CULL_BACK:0);
+                for(var section:nextTranslucents.values()) entries.add(new ChunkMaterialTable.Entry(section.section(),section.blas().vertexAddress(),section.layout(),null,transFlags,section.blas().indexAddress(),section.blas().indexBytes()));
                 nextMaterials = batch.own(new ChunkMaterialTable(context,batch,entries));
                 LOG.debug("[RT] Material rows={} in TLAS instance order; no vertex readback", entries.size());
             }
             waitReason = null;
-            return new Prepared(nextTlas, next, nextAnchor, diff.build().size(), nextMaterials,nextOverlays,overlayBuilt,nextCutouts,cutoutDiff.build().size());
+            return new Prepared(nextTlas, next, nextAnchor, diff.build().size(), nextMaterials,nextOverlays,overlayBuilt,nextCutouts,cutoutDiff.build().size(),nextTranslucents,translucentDiff.build().size());
         } finally { dispatcher.unlock(); }
     }
 
@@ -241,6 +276,16 @@ public final class WorldGeometryManager implements AutoCloseable {
         if(sanity!=SectionGeometrySanity.Failure.OK) return sanity.name();
         if(slice.vertexBuffer()!=receipt.buffer() || slice.vertexBufferOffset()!=receipt.offset()) return "CUTOUT_ALLOCATION_CHANGED_AFTER_CAPTURE";
         if(receipt.mesh().getSectionDraw(ChunkSectionLayer.CUTOUT).indexCount()!=receipt.layout().indexCount()) return "CUTOUT_DRAW_COUNT_CHANGED_AFTER_CAPTURE";
+        return null;
+    }
+    private static String validateTranslucent(net.minecraft.client.renderer.chunk.SectionRenderDispatcher dispatcher,TerrainDrawCapture.Draw receipt) {
+        if(!liveReceipt(receipt)) return "STALE_TRANSLUCENT_RECEIPT_OR_MESH";
+        var layer=ChunkSectionLayer.TRANSLUCENT; var slice=dispatcher.getRenderSectionSlice(receipt.mesh(),layer);
+        var sanity=SectionGeometrySanity.inspect(receipt.owner(),receipt.section(),receipt.mesh(),slice,layer.vertexFormat(),layer);
+        if(sanity!=SectionGeometrySanity.Failure.OK) return sanity.name();
+        if(slice.vertexBuffer()!=receipt.buffer() || slice.vertexBufferOffset()!=receipt.offset()
+                || slice.indexBuffer()!=receipt.indexBuffer() || slice.indexBufferOffset()!=receipt.indexOffset()) return "TRANSLUCENT_ALLOCATION_CHANGED_BEFORE_COPY";
+        if(receipt.mesh().getSectionDraw(layer).indexCount()!=receipt.layout().indexCount()) return "TRANSLUCENT_COUNT_CHANGED";
         return null;
     }
     private static boolean liveReceipt(TerrainDrawCapture.Draw receipt) {
@@ -259,9 +304,9 @@ public final class WorldGeometryManager implements AutoCloseable {
     }
     private Prepared empty(ChunkCoordinates.Anchor nextAnchor, String reason) {
         if (!reason.equals(waitReason)) { waitReason = reason; LOG.info("[RT] Chunks: {}", reason); }
-        return new Prepared(null, Map.of(), nextAnchor, 0, null, Map.of(), 0, Map.of(), 0);
+        return new Prepared(null, Map.of(), nextAnchor, 0, null, Map.of(), 0, Map.of(), 0, Map.of(), 0);
     }
-    private void report(boolean force, int reusedThisFrame, int cutoutReusedThisFrame) {
+    private void report(boolean force, int reusedThisFrame, int cutoutReusedThisFrame,int translucentReusedThisFrame) {
         if (!force && System.nanoTime()-lastReport < 2_000_000_000L) return;
         lastReport = System.nanoTime();
         long triangles = 0, vertexBytes = 0;
@@ -271,8 +316,14 @@ public final class WorldGeometryManager implements AutoCloseable {
         LOG.info("[RT] SOLID sections={} triangles={} vertexBytes={}",residents.size(),triangles,vertexBytes);
         LOG.info("[RT] CUTOUT sections={} quads={} triangles={} vertexBytes={} capturedSections={}; group=OPAQUE; CUTOUT_MIPPED=not a separate layer in 26.3",
                 cutoutResidents.size(),cutoutTriangles/2,cutoutTriangles,cutoutBytes,TerrainDrawCapture.cutoutDraws().size());
-        LOG.info("[RT] Scene: chunks | SOLID sections={} | CUTOUT sections={} | BLAS count={} | TLAS instances={} | RT triangles={}; CPU committed/enqueued, actual alpha execution in GPU HUD",
-                residents.size(),cutoutResidents.size(),residents.size()+cutoutResidents.size(),tlas==null?0:tlas.count,triangles+cutoutTriangles);
+        long translucentTriangles=0,translucentBytes=0;
+        for(var resident:translucentResidents.values()) { translucentTriangles+=resident.layout().triangles();translucentBytes+=resident.layout().vertexBytes(); }
+        LOG.info("[RT] TRANSLUCENT sections={} triangles={} vertexBytes={} capturedSections={}; indexed snapshots; camera-only index sorting does not rebuild BLAS",
+                translucentResidents.size(),translucentTriangles,translucentBytes,TerrainDrawCapture.translucentDraws().size());
+        LOG.info("[RT] TRANSLUCENT cache: builtSinceReport={} retiredSinceReport={} (deferred) reusedThisFrame={}",translucentBuildsSinceReport,translucentRetiresSinceReport,translucentReusedThisFrame);
+        translucentBuildsSinceReport=0;translucentRetiresSinceReport=0;
+        LOG.info("[RT] Scene: chunks | SOLID sections={} | CUTOUT sections={} | TRANSLUCENT sections={} | BLAS count={} | TLAS instances={} | RT triangles={}; CPU committed/enqueued, actual composition in GPU HUD",
+                residents.size(),cutoutResidents.size(),translucentResidents.size(),residents.size()+cutoutResidents.size()+translucentResidents.size(),tlas==null?0:tlas.count,triangles+cutoutTriangles+translucentTriangles);
         LOG.info("[RT] CUTOUT cache: builtSinceReport={} retiredSinceReport={} (deferred) reusedThisFrame={}",cutoutBuildsSinceReport,cutoutRetiresSinceReport,cutoutReusedThisFrame);
         cutoutBuildsSinceReport=0;cutoutRetiresSinceReport=0;
         LOG.info("[RT] Chunk cache: builtSinceReport={} retiredSinceReport={} (deferred) reusedThisFrame={}; section sample={}{}",
@@ -292,5 +343,6 @@ public final class WorldGeometryManager implements AutoCloseable {
         residents.values().forEach(section -> section.blas().close());
         residents = Map.of();
         cutoutResidents.values().forEach(section -> section.blas().close()); cutoutResidents=Map.of();
+        translucentResidents.values().forEach(section -> section.blas().close()); translucentResidents=Map.of();
     }
 }

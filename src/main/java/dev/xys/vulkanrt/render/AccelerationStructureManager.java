@@ -28,6 +28,9 @@ public final class AccelerationStructureManager {
             this.device = device; this.storage = storage; this.handle = handle; this.address = address;
             this.type = type; this.count = count;
         }
+        public int indexBytes() { return indexBytes; }
+        public long indexAddress() { return indices.address(); }
+        private int indexBytes; // original indexed TRANSLUCENT snapshot only
         public long handle() { return handle; }
         public long address() { return address; }
         /** Owned, unchanged interleaved chunk vertices; never the borrowed Uber allocation. */
@@ -43,9 +46,11 @@ public final class AccelerationStructureManager {
         }
     }
 
-    public record Instance(Structure blas, float x, float y, float z, int customIndex) {
+    public record Instance(Structure blas, float x, float y, float z, int customIndex, int mask) {
+        public Instance(Structure blas,float x,float y,float z,int customIndex) { this(blas,x,y,z,customIndex,0xff); }
         public Instance {
             if (blas.type != VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR || blas.handle() == 0) throw new IllegalArgumentException("Not a live BLAS");
+            if(mask<=0 || (mask&~0xff)!=0) throw new IllegalArgumentException("Invalid instance mask");
             if ((customIndex & ~0xffffff) != 0) throw new IllegalArgumentException("instanceCustomIndex is 24 bits");
             if (!Float.isFinite(x) || !Float.isFinite(y) || !Float.isFinite(z)) throw new IllegalArgumentException("Non-finite transform");
         }
@@ -143,6 +148,43 @@ public final class AccelerationStructureManager {
         } finally { MemoryUtil.memFree(indexBytes); }
     }
 
+    /** Original vertex AND sorted index bytes, GPU to GPU. A later index-only camera re-sort is
+     * merely a permutation of these same quads; this immutable snapshot stays geometrically valid. */
+    public Structure buildTranslucentBlas(CommandBatch batch,dev.xys.vulkanrt.geometry.TerrainDrawCapture.Draw draw) {
+        var layout=draw.layout();
+        var vertexFailure=dev.xys.vulkanrt.geometry.SectionGeometrySanity.rangeFailure(layout.indexCount(),false,layout.stride(),layout.positionOffset(),true,
+                draw.offset(),draw.buffer().size(),draw.buffer().vkBuffer(),draw.buffer().isClosed(),
+                (draw.buffer().usage()&com.mojang.renderpearl.api.buffers.GpuBuffer.USAGE_COPY_SRC)!=0);
+        if(vertexFailure!=dev.xys.vulkanrt.geometry.SectionGeometrySanity.Failure.OK) throw new IllegalArgumentException("TRANSLUCENT vertices before copy: "+vertexFailure);
+        if(!dev.xys.vulkanrt.geometry.SectionGeometrySanity.validIndexRange(layout.indexCount(),draw.indexBytes(),draw.indexOffset(),
+                draw.indexBuffer().size(),draw.indexBuffer().vkBuffer(),draw.indexBuffer().isClosed(),
+                (draw.indexBuffer().usage()&com.mojang.renderpearl.api.buffers.GpuBuffer.USAGE_COPY_SRC)!=0))
+            throw new IllegalArgumentException("Invalid TRANSLUCENT index slice before GPU copy");
+        if(Long.compareUnsigned(layout.triangles(),context.capabilities().maxPrimitiveCount())>0) throw new IllegalArgumentException("TRANSLUCENT primitive limit");
+        GpuBuffer vertices=null,indices=null; Structure result=null;
+        try(MemoryStack stack=MemoryStack.stackPush()) {
+            int usage=VK_BUFFER_USAGE_TRANSFER_DST_BIT|VK_BUFFER_USAGE_STORAGE_BUFFER_BIT|VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR;
+            vertices=new GpuBuffer(context,layout.vertexBytes(),usage,false,true);
+            indices=new GpuBuffer(context,(long)layout.indexCount()*draw.indexBytes(),usage,false,true);
+            memoryBarrier(batch.commands,VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT_KHR,VK_ACCESS_2_MEMORY_WRITE_BIT_KHR,
+                    VK_PIPELINE_STAGE_2_TRANSFER_BIT_KHR,VK_ACCESS_2_TRANSFER_READ_BIT_KHR);
+            vkCmdCopyBuffer(batch.commands,draw.buffer().vkBuffer(),vertices.handle(),VkBufferCopy.calloc(1,stack).srcOffset(draw.offset()).size(vertices.size));
+            vkCmdCopyBuffer(batch.commands,draw.indexBuffer().vkBuffer(),indices.handle(),VkBufferCopy.calloc(1,stack).srcOffset(draw.indexOffset()).size(indices.size));
+            var geometry=VkAccelerationStructureGeometryKHR.calloc(1,stack).sType$Default()
+                    .geometryType(VK_GEOMETRY_TYPE_TRIANGLES_KHR).flags(VK_GEOMETRY_NO_DUPLICATE_ANY_HIT_INVOCATION_BIT_KHR);
+            geometry.geometry().triangles().sType$Default().vertexFormat(VK_FORMAT_R32G32B32_SFLOAT)
+                    .vertexStride(layout.stride()).maxVertex(layout.vertexCount()-1).indexType(draw.indexBytes()==2?VK_INDEX_TYPE_UINT16:VK_INDEX_TYPE_UINT32);
+            geometry.geometry().triangles().vertexData().deviceAddress(vertices.address()+layout.positionOffset());
+            geometry.geometry().triangles().indexData().deviceAddress(indices.address());
+            result=allocateAndBuild(batch,geometry,VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR,layout.triangles(),null,false);
+            result.vertices=vertices; result.indices=indices; result.indexBytes=draw.indexBytes();
+            return result;
+        } catch(RuntimeException | Error failure) {
+            if(result!=null) result.close();
+            if(vertices!=null) vertices.close(); if(indices!=null) indices.close(); throw failure;
+        }
+    }
+
     public Structure buildTlas(CommandBatch batch, List<Instance> instances) { return writeTlas(batch, instances, null); }
 
     /** GPU-ordered update: writes a NEW instance input buffer, never overwrites an in-flight mapping.
@@ -166,7 +208,7 @@ public final class AccelerationStructureManager {
                 // VkTransformMatrixKHR is row-major 3x4, not JOML's column-major matrix storage.
                 record.transform().matrix(0, 1).matrix(5, 1).matrix(10, 1)
                         .matrix(3, instance.x()).matrix(7, instance.y()).matrix(11, instance.z());
-                record.instanceCustomIndex(instance.customIndex()).mask(0xff).instanceShaderBindingTableRecordOffset(0)
+                record.instanceCustomIndex(instance.customIndex()).mask(instance.mask()).instanceShaderBindingTableRecordOffset(0)
                         .flags(VK_GEOMETRY_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT_KHR)
                         .accelerationStructureReference(instance.blas().address());
             }

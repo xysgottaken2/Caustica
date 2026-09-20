@@ -21,13 +21,13 @@ final class ChunkMaterialTableTest {
         var bytes=ByteBuffer.allocate(2*ChunkMaterialTable.ROW_BYTES).order(ByteOrder.nativeOrder());
         long a=SectionPos.asLong(-2,4,4), b=SectionPos.asLong(-3,4,5);
         ChunkMaterialTable.pack(bytes,0,new ChunkMaterialTable.Entry(a,0x123456789abcdef0L,layout()));
-        ChunkMaterialTable.pack(bytes,80,new ChunkMaterialTable.Entry(b,0x10203040L,layout()));
+        ChunkMaterialTable.pack(bytes,96,new ChunkMaterialTable.Entry(b,0x10203040L,layout()));
         assertEquals(0x9abcdef0,bytes.getInt(0)); assertEquals(0x12345678,bytes.getInt(4));
         assertEquals(7,bytes.getInt(8)); assertEquals(4,bytes.getInt(12)); assertEquals(3,bytes.getInt(16));
         assertEquals(0,bytes.getLong(48)); assertEquals(0,bytes.getLong(64)); assertEquals(0,bytes.getInt(76));
         assertEquals(8,bytes.getInt(20)); assertEquals(4,bytes.getInt(24));
         assertEquals(-2,bytes.getInt(32)); assertEquals(4,bytes.getInt(36)); assertEquals(4,bytes.getInt(40));
-        assertEquals(-3,bytes.getInt(112)); assertEquals(5,bytes.getInt(120)); assertEquals(0,bytes.getInt(124));
+        assertEquals(-3,bytes.getInt(128)); assertEquals(5,bytes.getInt(136)); assertEquals(0,bytes.getInt(140));
     }
     @Test void comparisonModeChangesOnlyReservedMetadataWordNotGeometryOrUVLayout() {
         var texel=ByteBuffer.allocate(ChunkMaterialTable.ROW_BYTES).order(ByteOrder.nativeOrder());

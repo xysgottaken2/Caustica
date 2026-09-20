@@ -38,5 +38,32 @@ public final class BlockTintDiagnostics {
                 pos.toShortString(),state,quad.direction(),material.layer(),material.sprite().contents().name(),material.tintIndex(),
                 material.isTinted()?Integer.toHexString(vanillaTint):"NONE",minAlpha,maxAlpha,material.sprite().contents().transparency(),minU,minV,maxU,maxV,vertices);
     }
+    private record FluidProbe(BlockPos pos,BlockState state,net.minecraft.world.level.material.FluidState fluid,
+                              net.minecraft.client.renderer.block.FluidModel model) {}
+    private static final ThreadLocal<FluidProbe> FLUID=new ThreadLocal<>(); // section compilation is multithreaded
+    public static boolean fluidProbeEnabled() { return RtOptions.ENABLED && RtOptions.CHUNKS && PIN!=null; }
+    public static void beginFluid(BlockPos pos,BlockState state,net.minecraft.world.level.material.FluidState fluid,
+                                  net.minecraft.client.renderer.block.FluidStateModelSet models) {
+        if(!fluidProbeEnabled()) return;
+        FLUID.remove();
+        if(PIN.equals(pos) && COUNT.get()<64) FLUID.set(new FluidProbe(pos.immutable(),state,fluid,models.get(fluid)));
+    }
+    public static void endFluid() { if(fluidProbeEnabled()) FLUID.remove(); }
+    public static void fluidVertex(float x,float y,float z,int color,float u,float v,int light) {
+        if(!fluidProbeEnabled()) return;
+        var probe=FLUID.get();if(probe==null || COUNT.getAndIncrement()>=64) return;
+        var model=probe.model();
+        // UV-containing sprite candidates, NOT a claimed GPU texture sample or pixel readback.
+        var sprites=new StringBuilder();
+        fluidSprite(sprites,model.stillMaterial(),u,v);fluidSprite(sprites,model.flowingMaterial(),u,v);
+        if(model.overlayMaterial()!=null) fluidSprite(sprites,model.overlayMaterial(),u,v);
+        LOG.info("[RT][fluid-source] CPU emitted vertex, NOT GPU sample: block={} state={} fluid={} layer={} spriteCandidates={} localPosition=({},{},{}) UV=({},{}) preparedColorARGB={} vertexAlpha={} UV2={} tintSource={}; texture/final alpha and COMPOSE/CONTINUE only in GPU HUD",
+                probe.pos().toShortString(),probe.state(),probe.fluid(),model.layer(),sprites,x,y,z,u,v,Integer.toHexString(color),color>>>24,light,model.tintSource());
+    }
+    private static void fluidSprite(StringBuilder out,net.minecraft.client.resources.model.sprite.Material.Baked material,float u,float v) {
+        var sprite=material.sprite();
+        if(u>=sprite.getU0() && u<=sprite.getU1() && v>=sprite.getV0() && v<=sprite.getV1())
+            out.append(sprite.contents().name()).append(" transparency=").append(sprite.transparency()).append(" forceTranslucent=").append(material.forceTranslucent()).append(';');
+    }
     private BlockTintDiagnostics() {}
 }
