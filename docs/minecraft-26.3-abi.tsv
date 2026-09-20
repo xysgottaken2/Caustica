@@ -46,3 +46,15 @@ com/mojang/blaze3d/systems/RenderSystem	M	initRenderer	(Lcom/mojang/renderpearl/
 net/minecraft/client/renderer/fog/FogRenderer	M	endFrame	()V
 com/mojang/renderpearl/backend/vulkan/VulkanCommandEncoder	M	createFence	()Lcom/mojang/renderpearl/api/commands/GpuFence;
 com/mojang/renderpearl/api/commands/GpuFence	M	awaitCompletion	(J)Z
+net/minecraft/client/renderer/LevelRenderer	M	sectionRenderDispatcher	()Lnet/minecraft/client/renderer/chunk/SectionRenderDispatcher;
+net/minecraft/client/renderer/LevelRenderer	M	viewArea	()Lnet/minecraft/client/renderer/ViewArea;
+net/minecraft/client/renderer/ViewArea	M	getRenderSectionAt	(Lnet/minecraft/core/BlockPos;)Lnet/minecraft/client/renderer/chunk/SectionRenderDispatcher$RenderSection;
+net/minecraft/client/renderer/chunk/SectionRenderDispatcher	M	getRenderSectionSlice	(Lnet/minecraft/client/renderer/chunk/SectionMesh;Lnet/minecraft/client/renderer/chunk/ChunkSectionLayer;)Lnet/minecraft/client/renderer/chunk/SectionRenderDispatcher$RenderSectionBufferSlice;
+net/minecraft/client/renderer/chunk/SectionRenderDispatcher	M	lock	()V
+net/minecraft/client/renderer/chunk/SectionRenderDispatcher	M	unlock	()V
+net/minecraft/client/renderer/chunk/SectionRenderDispatcher$RenderSection	M	getSectionMesh	()Lnet/minecraft/client/renderer/chunk/SectionMesh;
+net/minecraft/client/renderer/chunk/SectionRenderDispatcher$RenderSectionBufferSlice	M	vertexBuffer	()Lcom/mojang/renderpearl/api/buffers/GpuBuffer;
+net/minecraft/client/renderer/chunk/SectionRenderDispatcher$RenderSectionBufferSlice	M	vertexBufferOffset	()J
+net/minecraft/client/renderer/chunk/SectionMesh	M	getSectionDraw	(Lnet/minecraft/client/renderer/chunk/ChunkSectionLayer;)Lnet/minecraft/client/renderer/chunk/SectionMesh$SectionDraw;
+net/minecraft/client/renderer/chunk/ChunkSectionLayer	M	vertexFormat	()Lcom/mojang/renderpearl/api/vertex/VertexFormat;
+com/mojang/renderpearl/backend/vulkan/VulkanGpuBuffer	M	vkBuffer	()J

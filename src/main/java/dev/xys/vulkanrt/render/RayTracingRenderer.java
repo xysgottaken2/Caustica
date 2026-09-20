@@ -4,7 +4,8 @@ import com.mojang.renderpearl.backend.vulkan.VulkanCommandEncoder;
 import com.mojang.renderpearl.api.device.GpuDeviceLossException;
 import com.mojang.renderpearl.backend.vulkan.VulkanDevice;
 import com.mojang.renderpearl.backend.vulkan.VulkanGpuTexture;
-import dev.xys.vulkanrt.geometry.GeometryInbox;
+import dev.xys.vulkanrt.geometry.ChunkCoordinates;
+import net.minecraft.client.Minecraft;
 import dev.xys.vulkanrt.geometry.TriangleMesh;
 import net.minecraft.client.renderer.GameRenderer;
 import org.joml.Matrix4f;
@@ -59,7 +60,7 @@ public final class RayTracingRenderer {
         }
     }
     public static void captureProjection(Matrix4fc projection) { PROJECTION.set(projection); projectionCaptured = true; }
-    public static void worldChanged() { GeometryInbox.reset(); resetRequested = true; }
+    public static void worldChanged() { resetRequested = true; }
 
     private static void waiting(String reason) {
         if (!reason.equals(lastGate)) { lastGate = reason; LOG.info("[RT] Pass waiting: {}", reason); }
@@ -104,9 +105,8 @@ public final class RayTracingRenderer {
                 AccelerationStructureManager.Structure nextTlas;
                 if (RtOptions.CHUNKS) {
                     stage = "prepare chunk acceleration structures";
-                    prepared = world.prepare(batch); nextTlas = prepared.tlas;
-                    float x = (float)(camera.pos.x - world.anchorX), y = (float)(camera.pos.y - world.anchorY), z = (float)(camera.pos.z - world.anchorZ);
-                    INVERSE.set(PROJECTION).mul(camera.viewRotationMatrix).translate(-x, -y, -z).invert();
+                    prepared = world.prepare(batch, Minecraft.getInstance().levelRenderer, camera.pos.x, camera.pos.y, camera.pos.z); nextTlas = prepared.tlas;
+                    ChunkCoordinates.inverse(INVERSE, PROJECTION, camera.viewRotationMatrix, prepared.anchor, camera.pos.x, camera.pos.y, camera.pos.z);
                 } else {
                     if (nextTestTlas == null) {
                         var mesh = TriangleMesh.testTriangle();
@@ -139,9 +139,9 @@ public final class RayTracingRenderer {
                     stage = "record vkCmdTraceRaysKHR";
                     nextOutput.beginTrace(batch.commands);
                     pipeline.trace(batch.commands, nextBindings, INVERSE,
-                            RtOptions.CHUNKS ? (float)(camera.pos.x - world.anchorX) : 0,
-                            RtOptions.CHUNKS ? (float)(camera.pos.y - world.anchorY) : 0,
-                            RtOptions.CHUNKS ? (float)(camera.pos.z - world.anchorZ) : 2,
+                            RtOptions.CHUNKS ? prepared.anchor.cameraX(camera.pos.x) : 0,
+                            RtOptions.CHUNKS ? prepared.anchor.cameraY(camera.pos.y) : 0,
+                            RtOptions.CHUNKS ? prepared.anchor.cameraZ(camera.pos.z) : 2,
                             target.width, target.height, !RtOptions.CHUNKS);
                     stage = "record RT image blit to Minecraft main target";
                     nextOutput.copyToMainTarget(batch.commands, color, recordProof ? nextProof : null);

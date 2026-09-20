@@ -8,9 +8,6 @@
     "VulkanDeviceMixin",
     "GameRendererMixin",
     "LevelRendererMixin",
-    "SectionCompilerMixin",
-    "CompiledSectionMeshMixin",
-    "RenderSectionMixin",
     "RenderSystemMixin",
     "VulkanCommandEncoderMixin"
   ],

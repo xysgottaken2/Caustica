@@ -80,6 +80,55 @@ public final class AccelerationStructureManager {
         } finally { MemoryUtil.memFree(vertexBytes); if (indexBytes != null) MemoryUtil.memFree(indexBytes); }
     }
 
+    /** Copy ONLY an accepted vanilla UberGpuBuffer section range, preserving its full vertex layout.
+     * Vanilla heaps have TRANSFER_SRC but not AS_BUILD_INPUT/BDA usage. They cannot be passed
+     * directly to the AS builder or retroactively given those flags. No CPU readback/tessellation.
+     * Caller holds the dispatcher lock; all GPU uploads/copies are ordered on the render thread. */
+    public Structure buildSectionBlas(CommandBatch batch,
+            com.mojang.renderpearl.backend.vulkan.VulkanGpuBuffer source, long sourceOffset,
+            dev.xys.vulkanrt.geometry.SectionGeometryLayout layout) {
+        long bytes = layout.vertexBytes();
+        if (source.isClosed() || (source.usage() & com.mojang.renderpearl.api.buffers.GpuBuffer.USAGE_COPY_SRC) == 0
+                || sourceOffset < 0 || sourceOffset > source.size() - bytes || (sourceOffset & 3) != 0)
+            throw new IllegalArgumentException("Invalid/non-copyable UberGpuBuffer section range");
+        if (Long.compareUnsigned(layout.triangles(), context.capabilities().maxPrimitiveCount()) > 0)
+            throw new IllegalArgumentException("Section exceeds AS primitive limit");
+        GpuBuffer vertices = null, indices = null;
+        Structure result = null;
+        ByteBuffer indexBytes = MemoryUtil.memAlloc(Math.multiplyExact(layout.indexCount(), 4));
+        try (MemoryStack stack = MemoryStack.stackPush()) {
+            vertices = new GpuBuffer(context, bytes, VK_BUFFER_USAGE_TRANSFER_DST_BIT
+                    | VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR, false, true);
+            memoryBarrier(batch.commands, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT_KHR, VK_ACCESS_2_MEMORY_WRITE_BIT_KHR,
+                    VK_PIPELINE_STAGE_2_TRANSFER_BIT_KHR, VK_ACCESS_2_TRANSFER_READ_BIT_KHR);
+            vkCmdCopyBuffer(batch.commands, source.vkBuffer(), vertices.handle(),
+                    VkBufferCopy.calloc(1, stack).srcOffset(sourceOffset).dstOffset(0).size(bytes));
+            // SOLID has no per-section index allocation: vanilla uses shared sequential QUADS.
+            // Reproduce that topology only, without changing/re-tessellating a single vertex.
+            var quads = indexBytes.asIntBuffer();
+            for (int v = 0; v < layout.vertexCount(); v += 4)
+                quads.put(v).put(v + 1).put(v + 2).put(v + 2).put(v + 3).put(v);
+            indices = GpuBuffer.upload(context, batch, indexBytes, VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR);
+            var geometry = VkAccelerationStructureGeometryKHR.calloc(1, stack).sType$Default()
+                    .geometryType(VK_GEOMETRY_TYPE_TRIANGLES_KHR).flags(VK_GEOMETRY_OPAQUE_BIT_KHR);
+            geometry.geometry().triangles().sType$Default().vertexFormat(VK_FORMAT_R32G32B32_SFLOAT)
+                    .vertexStride(layout.stride()).maxVertex(layout.vertexCount() - 1).indexType(VK_INDEX_TYPE_UINT32);
+            geometry.geometry().triangles().vertexData().deviceAddress(vertices.address() + layout.positionOffset());
+            geometry.geometry().triangles().indexData().deviceAddress(indices.address());
+            result = allocateAndBuild(batch, geometry, VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR, layout.triangles(), null, false);
+            result.vertices = vertices; result.indices = indices;
+            org.slf4j.LoggerFactory.getLogger("native_vulkan_rt").info(
+                    "[RT] Chunk BLAS buffers: vertex=0x{}, index=0x{}, triangles={}; original interleaved attributes retained",
+                    Long.toHexString(vertices.handle()), Long.toHexString(indices.handle()), layout.triangles());
+            return result;
+        } catch (RuntimeException | Error failure) {
+            if (result != null) result.close();
+            if (vertices != null) vertices.close();
+            if (indices != null) indices.close();
+            throw failure;
+        } finally { MemoryUtil.memFree(indexBytes); }
+    }
+
     public Structure buildTlas(CommandBatch batch, List<Instance> instances) { return writeTlas(batch, instances, null); }
 
     /** GPU-ordered update: writes a NEW instance input buffer, never overwrites an in-flight mapping.
