@@ -4,7 +4,7 @@ layout(set=0,binding=0) uniform accelerationStructureEXT scene;
 layout(set=0,binding=1,rgba8) uniform image2D outputImage;
 struct Hit { vec3 color; uint found; ivec3 section; uint primitive; vec2 uv; uint sampled; ivec2 atlasSize; vec2 quadSpan; uint mode; int levels; vec4 baseTint; vec4 overlayTint; vec4 sampleColor; vec2 baseUv; uint overlayState; uint face; uint layer; uvec4 alphaStats; vec4 cutoutSample; ivec4 cutoutSection; float distance; float alpha; uvec2 previous; uvec4 transStats; vec4 transSample; ivec4 transSection; uint entityRecord; vec3 position; vec3 normal; };
 layout(location=0) rayPayloadEXT Hit hit;
-struct ShadowPayload { uint active; uint blocked; uint discarded; uint translucentSkipped; };
+struct ShadowPayload { uint enabled; uint blocked; uint discarded; uint translucentSkipped; };
 layout(location=1) rayPayloadEXT ShadowPayload shadow;
 layout(set=0,binding=4,std430) buffer Probe { uvec4 state; ivec4 section; vec4 uv; vec4 color; uvec4 atlas; vec4 baseTint; vec4 overlayTint; vec4 sampleColor; vec4 tintInfo; uvec4 alphaStats; vec4 cutoutSample; ivec4 cutoutSection; uvec4 transStats; vec4 transSample; ivec4 transSection; uvec4 transState; vec4 transBlend; uvec4 entity; uvec4 shadowStats; uvec4 shadowReasons; } probe;
 layout(push_constant,std430) uniform Camera { mat4 inverseViewProjection; vec4 origin; uvec4 frame; } camera;
@@ -306,11 +306,11 @@ const float SHADOW_TMAX = 4096.0;
 bool traceSunShadow(vec3 position, vec3 normal, inout uvec4 stats, inout uvec4 reasons) {
     float nDotL=max(dot(normal,SUN_TO_SURFACE),0.0);
     if(nDotL<=0.0) return false;
-    shadow.active=1u; shadow.blocked=0u; shadow.discarded=0u; shadow.translucentSkipped=0u;
+    shadow.enabled=1u; shadow.blocked=0u; shadow.discarded=0u; shadow.translucentSkipped=0u;
     traceRayEXT(scene,gl_RayFlagsNoneEXT,0xff,0,0,0,position+normal*SHADOW_OFFSET,SHADOW_TMIN,SUN_TO_SURFACE,SHADOW_TMIN,SHADOW_TMAX,1);
     stats.x++; if(shadow.blocked!=0u) stats.y++; else stats.z++; stats.w++;
     reasons.x+=shadow.discarded; reasons.y+=shadow.translucentSkipped;
-    shadow.active=0u;
+    shadow.enabled=0u;
     return shadow.blocked==0u;
 }
 void main() {
@@ -340,7 +340,7 @@ void main() {
     hit.entityRecord=0xffffffffu; hit.position=vec3(0); hit.normal=vec3(0,1,0);
     hit.distance=4096.0;hit.alpha=1.0;hit.previous=uvec2(0xffffffffu);
     hit.transStats=uvec4(0u,0u,floatBitsToUint(1.0),floatBitsToUint(0.0));
-    shadow.active=0u; shadow.blocked=0u; shadow.discarded=0u; shadow.translucentSkipped=0u;
+    shadow.enabled=0u; shadow.blocked=0u; shadow.discarded=0u; shadow.translucentSkipped=0u;
     uvec4 shadowStats=uvec4(0u),shadowReasons=uvec4(0u);
     hit.transSample=vec4(-1);hit.transSection=ivec4(0,0,0,-1);
     traceRayEXT(scene,gl_RayFlagsNoneEXT,0xff,0,0,0,camera.origin.xyz,0.001,direction,4096.0,0);

@@ -4,7 +4,7 @@
 #extension GL_EXT_buffer_reference_uvec2 : require
 struct Hit { vec3 color; uint found; ivec3 section; uint primitive; vec2 uv; uint sampled; ivec2 atlasSize; vec2 quadSpan; uint mode; int levels; vec4 baseTint; vec4 overlayTint; vec4 sampleColor; vec2 baseUv; uint overlayState; uint face; uint layer; uvec4 alphaStats; vec4 cutoutSample; ivec4 cutoutSection; float distance; float alpha; uvec2 previous; uvec4 transStats; vec4 transSample; ivec4 transSection; uint entityRecord; vec3 position; vec3 normal; };
 layout(location=0) rayPayloadInEXT Hit hit;
-struct ShadowPayload { uint active; uint blocked; uint discarded; uint translucentSkipped; };
+struct ShadowPayload { uint enabled; uint blocked; uint discarded; uint translucentSkipped; };
 layout(location=1) rayPayloadInEXT ShadowPayload shadow;
 hitAttributeEXT vec2 barycentric;
 struct Material { uvec4 addressLayout; uvec4 attributes; ivec4 section; uvec4 overlay; uvec4 mapping; uvec4 indices; uvec4 entityMeta; uvec4 entityColors; uvec4 entityInfo; };
@@ -124,7 +124,7 @@ void main() {
     bool particle=(uint(m.section.w)&16u)!=0u;
     bool particleBlock=particle && m.entityMeta.z!=0u;
     bool translucent=(uint(m.section.w)&4u)!=0u;
-    if(shadow.active!=0u && translucent) { shadow.translucentSkipped++; ignoreIntersectionEXT; return; }
+    if(shadow.enabled!=0u && translucent) { shadow.translucentSkipped++; ignoreIntersectionEXT; return; }
     // A straight ray cannot legitimately intersect the same planar triangle twice.
     if(translucent && all(equal(hit.previous,uvec2(uint(gl_InstanceID),uint(gl_PrimitiveID))))) { ignoreIntersectionEXT; }
     uint primitive=uint(gl_PrimitiveID),base=(primitive/2u)*4u;
@@ -139,7 +139,7 @@ void main() {
         if(dot(cross(b-a,c-a),gl_ObjectRayDirectionEXT)*(entity && m.entityInfo.y!=0u?-1.0:1.0)>=0.0) { ignoreIntersectionEXT; }
     }
     if((entity || particle) && uintBitsToFloat(m.entityMeta.y)==0.0) {
-        if(shadow.active!=0u) { shadow.blocked=1u; terminateRayEXT; }
+        if(shadow.enabled!=0u) { shadow.blocked=1u; terminateRayEXT; }
         return; // opaque entity/particle; cull only
     }
     vec3 w=vec3(1.0-barycentric.x-barycentric.y,barycentric);
@@ -158,7 +158,7 @@ void main() {
     vec4 sampleColor=entity?entitySample(m.entityMeta.x,uv,m.attributes.w):particle?(particleBlock?(m.attributes.w==1u ? textureLod(blockAtlas,uv,0.0) : texelFetch(blockAtlas,texel,0)):particleSample(uv,m.attributes.w)):(m.attributes.w==1u ? textureLod(blockAtlas,uv,0.0) : texelFetch(blockAtlas,texel,0));
     float alpha=sampleColor.a*color.a;
     bool discardAlpha=isnan(alpha) || isinf(alpha) || (entity ? alpha<uintBitsToFloat(m.entityMeta.y) : (particle && !translucent ? alpha<uintBitsToFloat(m.entityMeta.y) : (translucent ? alpha<0.1 : alpha<0.5)));
-    if(shadow.active!=0u) {
+    if(shadow.enabled!=0u) {
         if(discardAlpha) { shadow.discarded++; ignoreIntersectionEXT; return; }
         shadow.blocked=1u; terminateRayEXT; return;
     }

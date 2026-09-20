@@ -5,7 +5,7 @@
 
 struct Hit { vec3 color; uint found; ivec3 section; uint primitive; vec2 uv; uint sampled; ivec2 atlasSize; vec2 quadSpan; uint mode; int levels; vec4 baseTint; vec4 overlayTint; vec4 sampleColor; vec2 baseUv; uint overlayState; uint face; uint layer; uvec4 alphaStats; vec4 cutoutSample; ivec4 cutoutSection; float distance; float alpha; uvec2 previous; uvec4 transStats; vec4 transSample; ivec4 transSection; uint entityRecord; vec3 position; vec3 normal; };
 layout(location=0) rayPayloadInEXT Hit hit;
-struct ShadowPayload { uint active; uint blocked; uint discarded; uint translucentSkipped; };
+struct ShadowPayload { uint enabled; uint blocked; uint discarded; uint translucentSkipped; };
 layout(location=1) rayPayloadInEXT ShadowPayload shadow;
 hitAttributeEXT vec2 barycentric;
 struct Material { uvec4 addressLayout; uvec4 attributes; ivec4 section; uvec4 overlay; uvec4 mapping; uvec4 indices; uvec4 entityMeta; uvec4 entityColors; uvec4 entityInfo; };
@@ -123,7 +123,7 @@ uvec3 triangleIndices(Material m,uint primitive) {
     return result;
 }
 void main() {
-    if(shadow.active!=0u) { shadow.blocked=1u; terminateRayEXT; return; }
+    if(shadow.enabled!=0u) { shadow.blocked=1u; terminateRayEXT; return; }
     // gl_InstanceID is the TLAS input row, independent of unchanged customIndex/SBT offsets.
     hit.entityRecord=0xffffffffu; hit.found=1u; hit.sampled=0u; hit.distance=gl_HitTEXT; hit.alpha=1.0; hit.layer=0u; hit.primitive=uint(gl_PrimitiveID);
     hit.color=vec3(1,0,1); // Invalid metadata must be visibly different from a successful atlas sample.
