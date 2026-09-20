@@ -1,0 +1,17 @@
+.gradle/
+# Ignore generated output, not source packages named dev/xys/vulkanrt/build.
+/build/
+/buildSrc/build/
+run/
+.idea/
+*.iml
+.classpath
+.project
+.settings/
+.vscode/
+# Local-only Minecraft decompilation, downloads and SDKs. Never redistribute.
+research/
+third_party/
+*.log
+hs_err_pid*
+replay_pid*

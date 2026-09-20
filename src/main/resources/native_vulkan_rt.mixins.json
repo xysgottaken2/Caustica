@@ -1,0 +1,16 @@
+{
+  "required": true,
+  "package": "dev.xys.vulkanrt.mixin",
+  "compatibilityLevel": "JAVA_25",
+  "client": [
+    "FrontendGpuDeviceAccessor",
+    "VulkanBackendMixin",
+    "VulkanDeviceMixin",
+    "GameRendererMixin",
+    "LevelRendererMixin",
+    "SectionCompilerMixin",
+    "CompiledSectionMeshMixin",
+    "RenderSectionMixin"
+  ],
+  "injectors": { "defaultRequire": 1 }
+}

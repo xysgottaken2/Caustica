@@ -1,0 +1,22 @@
+{
+  "schemaVersion": 1,
+  "id": "native_vulkan_rt",
+  "version": "${version}",
+  "name": "Native Vulkan RT \u2014 Experimental",
+  "description": "Experimental KHR ray tracing on the Minecraft 26.3 Vulkan device: test triangle and opaque chunk visibility. RUNTIME VERIFIED: NO.",
+  "license": "MIT",
+  "environment": "client",
+  "entrypoints": {
+    "client": [
+      "dev.xys.vulkanrt.RayTracingMod"
+    ]
+  },
+  "depends": {
+    "fabricloader": ">=${loader}",
+    "minecraft": "${minecraft}",
+    "java": ">=25"
+  },
+  "mixins": [
+    "native_vulkan_rt.mixins.json"
+  ]
+}

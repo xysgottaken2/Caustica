@@ -1,0 +1,145 @@
+import dev.xys.vulkanrt.build.VerifyMinecraftAbi
+import groovy.json.JsonSlurper
+import java.util.zip.ZipFile
+
+plugins {
+    // The no-remap plugin: 26.3 is distributed with official names.
+    id 'net.fabricmc.fabric-loom' version "${loom_version}"
+}
+
+version = project.mod_version
+group = project.maven_group
+base { archivesName = 'native-vulkan-rt' }
+
+repositories { mavenCentral() }
+
+loom {
+    // Client-only mod; keep the complete client JAR, including RenderPearl.
+    clientOnlyMinecraftJar()
+    runs {
+        client {
+            client()
+            runDir 'run'
+            vmArg '--enable-native-access=ALL-UNNAMED'
+            vmArg "-Dnativevulkanrt.enabled=${providers.gradleProperty('rt').getOrElse('false')}"
+            vmArg "-Dnativevulkanrt.scene=${providers.gradleProperty('rtScene').getOrElse('triangle')}"
+            if (providers.gradleProperty('rtValidation').getOrElse('false').toBoolean()) {
+                programArgs '--vulkanValidation', '--renderDebugLabels'
+            }
+            programArgs '--graphicsBackend', 'VULKAN'
+        }
+    }
+}
+
+sourceSets { shaderCompiler }
+def osName = System.getProperty('os.name').toLowerCase(Locale.ROOT)
+def cpuArch = System.getProperty('os.arch').toLowerCase(Locale.ROOT)
+def arm64 = cpuArch in ['aarch64', 'arm64']
+def lwjglNatives = osName.contains('win') ? (arm64 ? 'natives-windows-arm64' : 'natives-windows') :
+        osName.contains('mac') ? (arm64 ? 'natives-macos-arm64' : 'natives-macos') :
+        (arm64 ? 'natives-linux-arm64' : 'natives-linux')
+
+dependencies {
+    shaderCompilerImplementation 'org.lwjgl:lwjgl:3.4.3'
+    shaderCompilerImplementation 'org.lwjgl:lwjgl-shaderc:3.4.3'
+    shaderCompilerRuntimeOnly "org.lwjgl:lwjgl:3.4.3:${lwjglNatives}"
+    shaderCompilerRuntimeOnly "org.lwjgl:lwjgl-shaderc:3.4.3:${lwjglNatives}"
+
+    minecraft "com.mojang:minecraft:${project.minecraft_version}"
+    implementation "net.fabricmc:fabric-loader:${project.loader_version}"
+    // LWJGL/Vulkan/SDL/ShaderC/VMA are provided by Minecraft. Do not bundle a second copy.
+    // Fabric API is not needed: integration uses validated 26.3 Mixins directly.
+    testImplementation platform('org.junit:junit-bom:5.14.4')
+    testImplementation 'org.junit.jupiter:junit-jupiter'
+    testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+}
+
+java {
+    toolchain.languageVersion = JavaLanguageVersion.of(25)
+    withSourcesJar()
+}
+
+tasks.withType(JavaCompile).configureEach {
+    options.release = 25
+    options.encoding = 'UTF-8'
+}
+
+tasks.withType(AbstractArchiveTask).configureEach {
+    preserveFileTimestamps = false
+    reproducibleFileOrder = true
+}
+
+def shaderOutput = layout.buildDirectory.dir('generated/rt-shaders')
+tasks.register('compileRtShaders', JavaExec) {
+    group = 'build'
+    description = 'Compile the RT stages consumed by RayTracingPipeline using pinned ShaderC natives.'
+    dependsOn tasks.named('shaderCompilerClasses')
+    classpath = sourceSets.shaderCompiler.runtimeClasspath
+    mainClass = 'dev.xys.vulkanrt.build.CompileRtShaders'
+    javaLauncher = javaToolchains.launcherFor { languageVersion = JavaLanguageVersion.of(25) }
+    jvmArgs '--enable-native-access=ALL-UNNAMED'
+    inputs.files(fileTree('shaders') { include '*.rgen', '*.rmiss', '*.rchit' })
+    outputs.dir(shaderOutput)
+    args layout.projectDirectory.dir('shaders').asFile.absolutePath,
+            shaderOutput.get().dir('assets/native_vulkan_rt/spirv').asFile.absolutePath
+    doFirst { delete(shaderOutput) }
+}
+// Use the task provider so sourcesJar/processResources retain the producer dependency as well.
+sourceSets.main.resources.srcDir(tasks.named('compileRtShaders'))
+processResources {
+    dependsOn tasks.named('compileRtShaders')
+    def values = [version: project.version.toString(), minecraft: project.minecraft_version,
+                  loader: project.loader_version]
+    inputs.properties(values)
+    filesMatching('fabric.mod.json') { expand(values) }
+}
+
+jar {
+    from('LICENSE')
+}
+
+tasks.register('verifyMinecraftAbi', VerifyMinecraftAbi) {
+    group = 'verification'
+    description = 'Checks the researched 26.3 integration points against resolved classfiles; does not load Vulkan.'
+    minecraftClasspath.from(configurations.compileClasspath)
+    contractFile.set(layout.projectDirectory.file('docs/minecraft-26.3-abi.tsv'))
+    reportFile.set(layout.buildDirectory.file('reports/minecraft-abi.txt'))
+}
+
+tasks.register('verifyModJar') {
+    group = 'verification'
+    description = 'Checks client metadata, entrypoint and absence of bundled game/native code.'
+    dependsOn tasks.named('jar')
+    inputs.file(tasks.named('jar').flatMap { it.archiveFile })
+    doLast {
+        new ZipFile(tasks.named('jar').get().archiveFile.get().asFile).withCloseable { zip ->
+            def entry = zip.getEntry('fabric.mod.json')
+            if (entry == null) throw new GradleException('Missing fabric.mod.json')
+            def metadata = zip.getInputStream(entry).withCloseable { new JsonSlurper().parse(it) }
+            if (metadata.environment != 'client' || metadata.depends.minecraft != project.minecraft_version ||
+                    metadata.version != project.version.toString() || metadata.depends.java != '>=25' ||
+                    metadata.depends.fabricloader != ">=${project.loader_version}" ||
+                    metadata.entrypoints.client != ['dev.xys.vulkanrt.RayTracingMod']) {
+                throw new GradleException('Unexpected mod metadata')
+            }
+            if (zip.getEntry('dev/xys/vulkanrt/RayTracingMod.class') == null || zip.getEntry('LICENSE') == null) {
+                throw new GradleException('Missing compiled entrypoint or license')
+            }
+            ['primary.rgen.spv', 'primary.rmiss.spv', 'primary.rchit.spv'].each { shader ->
+                if (zip.getEntry("assets/native_vulkan_rt/spirv/${shader}") == null) {
+                    throw new GradleException("Missing executable RT shader ${shader}")
+                }
+            }
+            if (zip.getEntry('native_vulkan_rt.mixins.json') == null) throw new GradleException('Missing Vulkan integration mixins')
+            def forbidden = zip.entries().findAll {
+                it.name.startsWith('net/minecraft/') || it.name.startsWith('com/mojang/') ||
+                    it.name.startsWith('org/lwjgl/') || it.name.endsWith('.dll') || it.name.endsWith('.so')
+            }
+            if (!forbidden.empty) throw new GradleException("Unexpected bundled runtime: ${forbidden*.name}")
+        }
+    }
+}
+
+test { useJUnitPlatform() }
+check { dependsOn tasks.named('verifyMinecraftAbi'), tasks.named('verifyModJar') }
+tasks.named('runClient') { dependsOn tasks.named('verifyMinecraftAbi') }
