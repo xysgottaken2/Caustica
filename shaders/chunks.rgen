@@ -2,10 +2,12 @@
 #extension GL_EXT_ray_tracing : require
 layout(set=0,binding=0) uniform accelerationStructureEXT scene;
 layout(set=0,binding=1,rgba8) uniform image2D outputImage;
-struct Hit { vec3 color; uint found; ivec3 section; uint primitive; vec2 uv; uint sampled; ivec2 atlasSize; vec2 quadSpan; uint mode; int levels; vec4 baseTint; vec4 overlayTint; vec4 sampleColor; vec2 baseUv; uint overlayState; uint face; uint layer; uvec4 alphaStats; vec4 cutoutSample; ivec4 cutoutSection; float distance; float alpha; uvec2 previous; uvec4 transStats; vec4 transSample; ivec4 transSection; };
+struct Hit { vec3 color; uint found; ivec3 section; uint primitive; vec2 uv; uint sampled; ivec2 atlasSize; vec2 quadSpan; uint mode; int levels; vec4 baseTint; vec4 overlayTint; vec4 sampleColor; vec2 baseUv; uint overlayState; uint face; uint layer; uvec4 alphaStats; vec4 cutoutSample; ivec4 cutoutSection; float distance; float alpha; uvec2 previous; uvec4 transStats; vec4 transSample; ivec4 transSection; uint entityRecord; };
 layout(location=0) rayPayloadEXT Hit hit;
-layout(set=0,binding=4,std430) buffer Probe { uvec4 state; ivec4 section; vec4 uv; vec4 color; uvec4 atlas; vec4 baseTint; vec4 overlayTint; vec4 sampleColor; vec4 tintInfo; uvec4 alphaStats; vec4 cutoutSample; ivec4 cutoutSection; uvec4 transStats; vec4 transSample; ivec4 transSection; uvec4 transState; vec4 transBlend; } probe;
+layout(set=0,binding=4,std430) buffer Probe { uvec4 state; ivec4 section; vec4 uv; vec4 color; uvec4 atlas; vec4 baseTint; vec4 overlayTint; vec4 sampleColor; vec4 tintInfo; uvec4 alphaStats; vec4 cutoutSample; ivec4 cutoutSection; uvec4 transStats; vec4 transSample; ivec4 transSection; uvec4 transState; vec4 transBlend; uvec4 entity; } probe;
 layout(push_constant,std430) uniform Camera { mat4 inverseViewProjection; vec4 origin; uvec4 frame; } camera;
+struct EntityRecord { vec4 position; ivec4 state; uvec4 label[8]; };
+layout(set=0,binding=6,std430) readonly buffer EntityHud { uvec4 counts; uvec4 work; uvec4 ops; EntityRecord rows[]; } entityHud;
 // GPU-only center-ray telemetry. One optional 1x1 trace writes this probe, then a barrier precedes
 // the image trace/HUD. No vertex, image, UV or hit-record data is ever mapped/read by the CPU.
 uint glyph(int c) {
@@ -256,10 +258,46 @@ int text(int row,int col) {
  }
  return 32;
 }
+int entityChar(uint index,int ch) {
+ if(index>=uint(entityHud.rows.length()) || ch<0 || ch>=128) return 32;
+ uint word=uint(ch)/4u;uint packedWord=entityHud.rows[index].label[word/4u][word%4u];
+ uint c=(packedWord>>((uint(ch)&3u)*8u))&255u;return c==0u?32:int(c);
+}
+int entityText(int row,int col) {
+ if(row==0) { const int t[19]=int[](69,78,84,73,84,73,69,83,32,67,80,85,32,67,79,85,78,84,83);if(col<19) return t[col];return 32; }
+ if(row==1) { const int t[11]=int[](68,73,83,67,79,86,69,82,69,68,61);if(col<11) return t[col];return col<18?digit(entityHud.counts.x,col-11,7):32; }
+ if(row==2) { const int t[9]=int[](67,65,80,84,85,82,69,68,61);if(col<9) return t[col];return col<16?digit(entityHud.counts.y,col-9,7):32; }
+ if(row==3) { const int t[12]=int[](69,78,84,73,84,89,32,66,76,65,83,61);if(col<12) return t[col];return col<19?digit(entityHud.counts.z,col-12,7):32; }
+ if(row==4) { const int t[17]=int[](69,78,84,73,84,89,32,73,78,83,84,65,78,67,69,83,61);if(col<17) return t[col];return col<24?digit(entityHud.counts.w,col-17,7):32; }
+ if(row==5) { const int t[17]=int[](69,78,84,73,84,89,32,84,82,73,65,78,71,76,69,83,61);if(col<17) return t[col];return col<24?digit(entityHud.work.x,col-17,7):32; }
+ if(row==6) { const int t[16]=int[](82,69,85,83,69,68,32,71,69,79,77,69,84,82,89,61);if(col<16) return t[col];return col<23?digit(entityHud.work.y,col-16,7):32; }
+ if(row==7) { const int t[18]=int[](84,82,65,78,83,70,79,82,77,32,85,80,68,65,84,69,83,61);if(col<18) return t[col];return col<25?digit(entityHud.work.z,col-18,7):32; }
+ if(row==8) { const int t[15]=int[](70,65,76,76,73,78,71,32,66,76,79,67,75,83,61);if(col<15) return t[col];return col<22?digit(entityHud.work.w,col-15,7):32; }
+ if(row==9) { const int t[11]=int[](71,80,85,32,67,79,80,73,69,83,61);if(col<11) return t[col];return col<18?digit(entityHud.ops.y,col-11,7):32; }
+ if(row==10) { const int t[11]=int[](66,76,65,83,32,66,85,73,76,84,61);if(col<11) return t[col];return col<18?digit(entityHud.ops.x,col-11,7):32; }
+ if(row==11) { const int t[13]=int[](66,76,65,83,32,82,69,84,73,82,69,68,61);if(col<13) return t[col];return col<20?digit(entityHud.ops.z,col-13,7):32; }
+ if(probe.entity.x==0xffffffffu || probe.entity.x>=uint(entityHud.rows.length())) return 32;
+ if(row==12) { const int t[14]=int[](69,78,84,73,84,89,32,72,73,84,32,73,68,61);if(col<14) return t[col];return col<23?digit(uint(entityHud.rows[probe.entity.x].state.x),col-14,9):32; }
+ if(row==13) { const int t[5]=int[](84,89,80,69,61);if(col<5) return t[col];return col<37?entityChar(probe.entity.x,col-5):32; }
+ if(row>=14 && row<=16) { const int t[8]=int[](84,69,88,84,85,82,69,61);if(col<8) return t[col];return col<40?entityChar(probe.entity.x,32+(row-14)*32+col-8):32; }
+ if(row==17) { const int t[4]=int[](80,79,83,61);if(col<4) return t[col];int c=col-4;if(c>=32) return 32;int axis=c/11,part=c%11;
+    if(axis>2) return 32;int value=int(entityHud.rows[probe.entity.x].position[axis]);
+    if(part==0) return value<0?45:43;if(part==10) return 32;return digit(uint(abs(value)),part-1,9);
+ }
+ if(row==18) { const int t[12]=int[](71,80,85,32,83,65,77,80,76,69,68,61);if(col<12) return t[col]; return yesNo(probe.entity.y!=0u,col-12); }
+ if(row==19) { const int t[12]=int[](70,65,76,76,73,78,71,32,72,73,84,61);if(col<12) return t[col];return yesNo(entityHud.rows[probe.entity.x].state.y!=0,col-12); }
+ return 32;
+}
 void main() {
     bool probePass=(camera.frame.w&1u)!=0u;
     ivec2 pixel=ivec2(gl_LaunchIDEXT.xy);
     if(!probePass && (camera.frame.w&2u)!=0u) {
+        ivec2 entityPanel=pixel-ivec2(max(336,int(gl_LaunchSizeEXT.x)-392),8);
+        if(all(greaterThanEqual(entityPanel,ivec2(0))) && all(lessThan(entityPanel,ivec2(384,280)))) {
+            ivec2 ep=entityPanel/2;int ec=entityText(ep.y/7,ep.x/4);
+            bool ink=ep.x%4<3 && ep.y%7<5 && ((glyph(ec)>>uint((ep.y%7)*3+ep.x%4))&1u)!=0u;
+            imageStore(outputImage,pixel,vec4(ink?vec3(1,.9,.65):vec3(.015),1));return;
+        }
         ivec2 panel=pixel-ivec2(8,8);
         if(all(greaterThanEqual(panel,ivec2(0))) && all(lessThan(panel,ivec2(320,532)))) {
             ivec2 p=panel/2;
@@ -274,10 +312,12 @@ void main() {
     vec4 projected=camera.inverseViewProjection*vec4(uv*2.0-1.0,0.5,1.0);
     vec3 direction=normalize(projected.xyz/projected.w-camera.origin.xyz);
     hit.color=vec3(0); hit.found=0u; hit.section=ivec3(0); hit.primitive=0u; hit.uv=vec2(0); hit.sampled=0u; hit.atlasSize=ivec2(0); hit.quadSpan=vec2(0); hit.mode=0u; hit.levels=0; hit.baseTint=vec4(0); hit.overlayTint=vec4(0); hit.sampleColor=vec4(0); hit.baseUv=vec2(0); hit.overlayState=0u; hit.face=0u; hit.layer=0u; hit.alphaStats=uvec4(0u,0u,floatBitsToUint(1.0),floatBitsToUint(0.0)); hit.cutoutSample=vec4(-1); hit.cutoutSection=ivec4(0,0,0,-1);
+    hit.entityRecord=0xffffffffu;
     hit.distance=4096.0;hit.alpha=1.0;hit.previous=uvec2(0xffffffffu);
     hit.transStats=uvec4(0u,0u,floatBitsToUint(1.0),floatBitsToUint(0.0));hit.transSample=vec4(-1);hit.transSection=ivec4(0,0,0,-1);
     traceRayEXT(scene,gl_RayFlagsNoneEXT,0xff,0,0,0,camera.origin.xyz,0.001,direction,4096.0,0);
     if(probePass) {
+        probe.entity=uvec4(hit.entityRecord,hit.sampled,hit.layer,hit.primitive);
         probe.state=uvec4(hit.found,hit.primitive,hit.sampled,hit.layer);
         probe.alphaStats=hit.alphaStats; probe.cutoutSample=hit.cutoutSample; probe.cutoutSection=hit.cutoutSection;
         probe.section=ivec4(hit.section,0); probe.uv=vec4(hit.uv,hit.quadSpan); probe.color=vec4(hit.color,1);
@@ -289,6 +329,8 @@ void main() {
     vec3 composed=vec3(0);float remaining=1.0,nextT=0.001,firstAlpha=-1.0;
     uint layers=0u,overflow=0u,terminal=0u,firstAction=0u;
     for(uint step=0u;step<64u;step++) {
+        if(probePass && probe.entity.x==0xffffffffu && hit.entityRecord!=0xffffffffu)
+            probe.entity=uvec4(hit.entityRecord,hit.sampled,hit.layer,hit.primitive);
         if(hit.found==0u || hit.layer!=2u) {
             composed+=remaining*hit.color;terminal=hit.found;break;
         }

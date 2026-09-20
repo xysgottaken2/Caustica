@@ -25,7 +25,7 @@ public final class CompileRtShaders {
             Shaderc.shaderc_compile_options_set_warnings_as_errors(options);
             Map<String, Integer> stages = Map.of("rgen", Shaderc.shaderc_raygen_shader,
                     "rmiss", Shaderc.shaderc_miss_shader, "rchit", Shaderc.shaderc_closesthit_shader, "comp", Shaderc.shaderc_compute_shader, "rahit", Shaderc.shaderc_anyhit_shader);
-            for (String name : new String[]{"primary.rgen","primary.rmiss","primary.rchit","chunks.rgen","chunks.rmiss","chunks.rchit","chunks.rahit","overlay.comp"}) {
+            for (String name : new String[]{"primary.rgen","primary.rmiss","primary.rchit","chunks.rgen","chunks.rmiss","chunks.rchit","chunks.rahit","overlay.comp","entity-local.comp"}) {
                 String stage=name.substring(name.lastIndexOf('.')+1);
                 long result = Shaderc.shaderc_compile_into_spv(compiler, Files.readString(source.resolve(name)), stages.get(stage), name, "main", options);
                 if (result == 0) throw new IllegalStateException("ShaderC returned no result for " + name);

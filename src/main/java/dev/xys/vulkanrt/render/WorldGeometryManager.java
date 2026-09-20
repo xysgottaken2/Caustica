@@ -32,6 +32,8 @@ public final class WorldGeometryManager implements AutoCloseable {
     private AccelerationStructureManager.Structure tlas;
     private ChunkCoordinates.Anchor anchor;
     private ChunkMaterialTable materials;
+    private List<AccelerationStructureManager.Instance> lastSceneInstances=List.of();
+    private List<ChunkMaterialTable.Entry> lastSceneMaterials=List.of();
     private CoplanarOverlayMapper overlayMapper;
     private Map<Long,CoplanarOverlayMapper.Overlay> overlays=Map.of();
     private int overlayBuildsSinceReport, overlayRetiresSinceReport;
@@ -62,6 +64,9 @@ public final class WorldGeometryManager implements AutoCloseable {
         private final int cutoutBuilt;
         private final Map<Long,Resident> nextTranslucents;
         private final int translucentBuilt;
+        public EntityGeometryManager.Frame entities;
+        private List<AccelerationStructureManager.Instance> sceneInstances;
+        private List<ChunkMaterialTable.Entry> sceneMaterials;
         private boolean committed;
         private Prepared(AccelerationStructureManager.Structure tlas, Map<Long, Resident> next,
                          ChunkCoordinates.Anchor anchor, int built, ChunkMaterialTable materials, Map<Long,CoplanarOverlayMapper.Overlay> nextOverlays, int overlayBuilt, Map<Long,Resident> nextCutouts, int cutoutBuilt, Map<Long,Resident> nextTranslucents,int translucentBuilt) {
@@ -88,7 +93,10 @@ public final class WorldGeometryManager implements AutoCloseable {
             translucentResidents=nextTranslucents; translucentBuildsSinceReport+=translucentBuilt;
             residents = next; WorldGeometryManager.this.tlas = tlas; WorldGeometryManager.this.anchor = anchor;
             buildsSinceReport += built; retiresSinceReport += retired;
-            report(emptyTransition, next.size()-built, nextCutouts.size()-cutoutBuilt,nextTranslucents.size()-translucentBuilt);
+            if(sceneInstances!=null) {
+                lastSceneInstances=sceneInstances;lastSceneMaterials=sceneMaterials;
+                report(emptyTransition, next.size()-built, nextCutouts.size()-cutoutBuilt,nextTranslucents.size()-translucentBuilt);
+            }
         }
     }
 
@@ -208,29 +216,9 @@ public final class WorldGeometryManager implements AutoCloseable {
                 nextTranslucents.put(node,new Resident(node,receipt.owner(),receipt.mesh(),receipt.buffer(),receipt.offset(),layout,blas));
             }
             if (detail && (detailed > 0 || cutoutDetailed>0 || translucentDetailed>0)) lastDetail = System.nanoTime();
-            var action = SectionResidency.tlasAction(residents.size()+cutoutResidents.size()+translucentResidents.size(), next.size()+nextCutouts.size()+nextTranslucents.size(), diff.changed() || cutoutDiff.changed() || translucentDiff.changed(), !nextAnchor.equals(anchor));
-            var nextTlas = tlas;
-            if (action != SectionResidency.TlasAction.REUSE) {
-                var instances = new ArrayList<AccelerationStructureManager.Instance>(next.size()+nextCutouts.size()+nextTranslucents.size());
-                for (var section : next.values()) {
-                    long node = section.section();
-                    instances.add(new AccelerationStructureManager.Instance(section.blas(), nextAnchor.sectionX(node),
-                            nextAnchor.sectionY(node), nextAnchor.sectionZ(node), 0)); // Existing hit group/material convention.
-                }
-                // All SOLID rows first, then CUTOUT rows, in the exact same order as material entries.
-                for(var section : nextCutouts.values()) {
-                    long node=section.section();
-                    instances.add(new AccelerationStructureManager.Instance(section.blas(),nextAnchor.sectionX(node),nextAnchor.sectionY(node),nextAnchor.sectionZ(node),0));
-                }
-                for(var section:nextTranslucents.values()) {
-                    long node=section.section();
-                    instances.add(new AccelerationStructureManager.Instance(section.blas(),nextAnchor.sectionX(node),nextAnchor.sectionY(node),nextAnchor.sectionZ(node),0,2));
-                }
-                if (action == SectionResidency.TlasAction.BUILD) nextTlas = batch.own(acceleration.buildTlas(batch, instances));
-                else acceleration.updateTlas(batch, tlas, instances);
-                LOG.debug("[RT] TLAS {}: {} instances; BLAS built={}, reused={}, retired={}; anchor=({}, {}, {})",
-                        action, instances.size(), diff.build().size()+cutoutDiff.build().size()+translucentDiff.build().size(), diff.reuse().size()+cutoutDiff.reuse().size()+translucentDiff.reuse().size(), diff.retire().size()+cutoutDiff.retire().size()+translucentDiff.retire().size(), nextAnchor.x(), nextAnchor.y(), nextAnchor.z());
-            }
+            // Keep the early terrain copies/builds exactly here. Scene assembly waits until the
+            // entity feature uploads/draws complete, then updates the ONE combined TLAS once.
+            var nextTlas=tlas;
             // Independent material cache. The validated coplanar path still shades SOLID deterministically even if its opaque hit wins a depth tie.
             var nextOverlays=new TreeMap<Long,CoplanarOverlayMapper.Overlay>();
             int overlayBuilt=0;
@@ -252,21 +240,40 @@ public final class WorldGeometryManager implements AutoCloseable {
                 }
                 nextOverlays.put(section.section(),cached);
             }
-            boolean overlaysChanged=overlayBuilt>0 || nextOverlays.size()!=overlays.size();
-            var nextMaterials = materials;
-            if (diff.changed() || cutoutDiff.changed() || translucentDiff.changed() || overlaysChanged) {
-                var entries = new ArrayList<ChunkMaterialTable.Entry>(next.size()+nextCutouts.size()+nextTranslucents.size());
-                for (var section : next.values()) entries.add(new ChunkMaterialTable.Entry(section.section(),section.blas().vertexAddress(),section.layout(),nextOverlays.get(section.section())));
-                int cutoutFlags=ChunkMaterialTable.CUTOUT | (ChunkSectionLayer.CUTOUT.pipeline(false).isCull() ? ChunkMaterialTable.CULL_BACK : 0);
-                for(var section : nextCutouts.values()) entries.add(new ChunkMaterialTable.Entry(section.section(),section.blas().vertexAddress(),section.layout(),null,cutoutFlags));
-                int transFlags=ChunkMaterialTable.TRANSLUCENT | (ChunkSectionLayer.TRANSLUCENT.pipeline(false).isCull()?ChunkMaterialTable.CULL_BACK:0);
-                for(var section:nextTranslucents.values()) entries.add(new ChunkMaterialTable.Entry(section.section(),section.blas().vertexAddress(),section.layout(),null,transFlags,section.blas().indexAddress(),section.blas().indexBytes()));
-                nextMaterials = batch.own(new ChunkMaterialTable(context,batch,entries));
-                LOG.debug("[RT] Material rows={} in TLAS instance order; no vertex readback", entries.size());
-            }
+            var nextMaterials=materials;
             waitReason = null;
             return new Prepared(nextTlas, next, nextAnchor, diff.build().size(), nextMaterials,nextOverlays,overlayBuilt,nextCutouts,cutoutDiff.build().size(),nextTranslucents,translucentDiff.build().size());
         } finally { dispatcher.unlock(); }
+    }
+
+    /** Single scene finalization after the original entity feature draws, before vkCmdTraceRaysKHR. */
+    public Prepared compose(CommandBatch batch,EntityGeometryManager.Frame entities) {
+        var instances=new ArrayList<AccelerationStructureManager.Instance>();var entries=new ArrayList<ChunkMaterialTable.Entry>();
+        for(var section:residents.values()) {
+            long node=section.section();instances.add(new AccelerationStructureManager.Instance(section.blas(),anchor.sectionX(node),anchor.sectionY(node),anchor.sectionZ(node),0));
+            entries.add(new ChunkMaterialTable.Entry(node,section.blas().vertexAddress(),section.layout(),overlays.get(node)));
+        }
+        int cutoutFlags=ChunkMaterialTable.CUTOUT|(ChunkSectionLayer.CUTOUT.pipeline(false).isCull()?ChunkMaterialTable.CULL_BACK:0);
+        for(var section:cutoutResidents.values()) {
+            long node=section.section();instances.add(new AccelerationStructureManager.Instance(section.blas(),anchor.sectionX(node),anchor.sectionY(node),anchor.sectionZ(node),0));
+            entries.add(new ChunkMaterialTable.Entry(node,section.blas().vertexAddress(),section.layout(),null,cutoutFlags));
+        }
+        int transFlags=ChunkMaterialTable.TRANSLUCENT|(ChunkSectionLayer.TRANSLUCENT.pipeline(false).isCull()?ChunkMaterialTable.CULL_BACK:0);
+        for(var section:translucentResidents.values()) {
+            long node=section.section();instances.add(new AccelerationStructureManager.Instance(section.blas(),anchor.sectionX(node),anchor.sectionY(node),anchor.sectionZ(node),0,2));
+            entries.add(new ChunkMaterialTable.Entry(node,section.blas().vertexAddress(),section.layout(),null,transFlags,section.blas().indexAddress(),section.blas().indexBytes()));
+        }
+        instances.addAll(entities.instances());entries.addAll(entities.materials());
+        var nextTlas=tlas;var nextMaterials=materials;
+        if(instances.isEmpty()) { nextTlas=null;nextMaterials=null; }
+        else {
+            if(tlas==null || tlas.count!=instances.size()) nextTlas=batch.own(acceleration.buildTlas(batch,instances));
+            else if(!instances.equals(lastSceneInstances)) acceleration.updateTlas(batch,tlas,instances);
+            if(materials==null || !entries.equals(lastSceneMaterials)) nextMaterials=batch.own(new ChunkMaterialTable(context,batch,entries));
+        }
+        var result=new Prepared(nextTlas,residents,anchor,0,nextMaterials,overlays,0,cutoutResidents,0,translucentResidents,0);
+        result.entities=entities;result.sceneInstances=List.copyOf(instances);result.sceneMaterials=List.copyOf(entries);
+        return result;
     }
 
     private static String validateCutout(net.minecraft.client.renderer.chunk.SectionRenderDispatcher dispatcher,TerrainDrawCapture.Draw receipt) {
@@ -304,7 +311,7 @@ public final class WorldGeometryManager implements AutoCloseable {
     }
     private Prepared empty(ChunkCoordinates.Anchor nextAnchor, String reason) {
         if (!reason.equals(waitReason)) { waitReason = reason; LOG.info("[RT] Chunks: {}", reason); }
-        return new Prepared(null, Map.of(), nextAnchor, 0, null, Map.of(), 0, Map.of(), 0, Map.of(), 0);
+        return new Prepared(tlas, Map.of(), nextAnchor, 0, materials, Map.of(), 0, Map.of(), 0, Map.of(), 0);
     }
     private void report(boolean force, int reusedThisFrame, int cutoutReusedThisFrame,int translucentReusedThisFrame) {
         if (!force && System.nanoTime()-lastReport < 2_000_000_000L) return;
@@ -322,7 +329,7 @@ public final class WorldGeometryManager implements AutoCloseable {
                 translucentResidents.size(),translucentTriangles,translucentBytes,TerrainDrawCapture.translucentDraws().size());
         LOG.info("[RT] TRANSLUCENT cache: builtSinceReport={} retiredSinceReport={} (deferred) reusedThisFrame={}",translucentBuildsSinceReport,translucentRetiresSinceReport,translucentReusedThisFrame);
         translucentBuildsSinceReport=0;translucentRetiresSinceReport=0;
-        LOG.info("[RT] Scene: chunks | SOLID sections={} | CUTOUT sections={} | TRANSLUCENT sections={} | BLAS count={} | TLAS instances={} | RT triangles={}; CPU committed/enqueued, actual composition in GPU HUD",
+        LOG.info("[RT] Scene: chunks | SOLID sections={} | CUTOUT sections={} | TRANSLUCENT sections={} | terrain BLAS count={} | TOTAL TLAS instances={} | terrain RT triangles={}; entity subtotals logged separately; CPU committed/enqueued, actual composition in GPU HUD",
                 residents.size(),cutoutResidents.size(),translucentResidents.size(),residents.size()+cutoutResidents.size()+translucentResidents.size(),tlas==null?0:tlas.count,triangles+cutoutTriangles+translucentTriangles);
         LOG.info("[RT] CUTOUT cache: builtSinceReport={} retiredSinceReport={} (deferred) reusedThisFrame={}",cutoutBuildsSinceReport,cutoutRetiresSinceReport,cutoutReusedThisFrame);
         cutoutBuildsSinceReport=0;cutoutRetiresSinceReport=0;

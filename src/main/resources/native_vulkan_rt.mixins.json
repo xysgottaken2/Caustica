@@ -12,7 +12,21 @@
     "FluidRendererMixin",
     "ChunkSectionsToRenderMixin",
     "RenderSystemMixin",
-    "VulkanCommandEncoderMixin"
+    "VulkanCommandEncoderMixin",
+    "EntityBuilderAccessor",
+    "EntityDispatcherMixin",
+    "EntityDrawAccessor",
+    "EntityItemFeatureMixin",
+    "EntityModelFeatureMixin",
+    "EntityModelPartMixin",
+    "EntityMovingFeatureMixin",
+    "EntityPreparedTypeMixin",
+    "EntityRenderTypeFeatureMixin",
+    "EntityRenderTypeMixin",
+    "EntityRendererMixin",
+    "EntityStagedAccessor",
+    "EntityStagedMixin",
+    "EntitySubmitMixin"
   ],
   "injectors": {
     "defaultRequire": 1

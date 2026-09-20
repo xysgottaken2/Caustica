@@ -128,7 +128,7 @@ tasks.register('verifyModJar') {
             if (zip.getEntry('dev/xys/vulkanrt/RayTracingMod.class') == null || zip.getEntry('LICENSE') == null) {
                 throw new GradleException('Missing compiled entrypoint or license')
             }
-            ['primary.rgen.spv', 'primary.rmiss.spv', 'primary.rchit.spv', 'chunks.rgen.spv', 'chunks.rmiss.spv', 'chunks.rchit.spv', 'chunks.rahit.spv', 'overlay.comp.spv'].each { shader ->
+            ['primary.rgen.spv', 'primary.rmiss.spv', 'primary.rchit.spv', 'chunks.rgen.spv', 'chunks.rmiss.spv', 'chunks.rchit.spv', 'chunks.rahit.spv', 'overlay.comp.spv', 'entity-local.comp.spv'].each { shader ->
                 if (zip.getEntry("assets/native_vulkan_rt/spirv/${shader}") == null) {
                     throw new GradleException("Missing executable RT shader ${shader}")
                 }

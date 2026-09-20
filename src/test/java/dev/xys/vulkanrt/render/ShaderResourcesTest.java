@@ -21,13 +21,14 @@ final class ShaderResourcesTest {
         for (String family : new String[]{"primary","chunks"}) for (String stage : new String[]{"rgen","rmiss","rchit"})
             shader(family+"."+stage);
         shader("overlay.comp");
+        shader("entity-local.comp");
         shader("chunks.rahit");
     }
     @Test void physicalVertexReadsDoNotRequireShaderInt64OrDescriptorIndexing() throws Exception {
         var words=shader("chunks.rchit");
         var capabilities=new HashSet<Integer>();
         var bindings=new HashSet<Integer>();
-        boolean rowsStride96=false;
+        boolean rowsStride144=false;
         for (int i=20;i<words.limit();) {
             int head=words.getInt(i), count=head>>>16, opcode=head&0xffff;
             assertTrue(count>0); assertTrue(i+count*4<=words.limit());
@@ -35,17 +36,17 @@ final class ShaderResourcesTest {
             if(opcode==71 && count==4) { // OpDecorate
                 int decoration=words.getInt(i+8), value=words.getInt(i+12);
                 if(decoration==33) bindings.add(value); // Binding
-                if(decoration==6 && value==96) rowsStride96=true; // ArrayStride
+                if(decoration==6 && value==144) rowsStride144=true; // ArrayStride
             }
             i+=count*4;
         }
         assertTrue(capabilities.contains(5347),"PhysicalStorageBufferAddresses");
         assertFalse(capabilities.contains(11),"shaderInt64 is not enabled/required");
         assertFalse(capabilities.contains(5301),"ShaderNonUniform indexing is not enabled/required");
-        assertEquals(java.util.Set.of(2,3),bindings);
-        assertTrue(rowsStride96,"Material std430 row must match Java packer");
+        assertEquals(java.util.Set.of(2,3,5),bindings);
+        assertTrue(rowsStride144,"Material std430 row must match Java packer");
     }
-    @Test void bothComparisonPathsSampleViewMipZeroAndDiagnosticProbeHasSeventeenVectors() throws Exception {
+    @Test void bothComparisonPathsSampleViewMipZeroAndDiagnosticProbeHasEighteenVectors() throws Exception {
         var words=shader("chunks.rchit");
         var zeroConstants=new HashSet<Integer>();
         var lods=new java.util.ArrayList<Integer>();
@@ -73,11 +74,12 @@ final class ShaderResourcesTest {
                 offsets.computeIfAbsent(raygen.getInt(i+4),k->new java.util.HashMap<>()).put(raygen.getInt(i+8),raygen.getInt(i+16));
             i+=count*4;
         }
-        assertTrue(offsets.values().stream().anyMatch(m->m.size()==17 && java.util.stream.IntStream.range(0,17).allMatch(i->java.util.Objects.equals(m.get(i),i*16))));
-        assertEquals(272,ChunkTextureSampling.PROBE_BYTES);
+        assertTrue(offsets.values().stream().anyMatch(m->m.size()==18 && java.util.stream.IntStream.range(0,18).allMatch(i->java.util.Objects.equals(m.get(i),i*16))));
+        assertEquals(288,ChunkTextureSampling.PROBE_BYTES);
     }
     @Test void overlayComputeIsOfflineCompiledWithBoundedInterfaceAndNoExtraDescriptors() throws Exception {
         var words=shader("overlay.comp");
+        shader("entity-local.comp");
         var capabilities=new HashSet<Integer>();
         boolean compute=false,atomicExchange=false,localSize=false,pushEnd=false;
         for(int i=20;i<words.limit();) {
@@ -110,12 +112,12 @@ final class ShaderResourcesTest {
             if(op==43 && count==4 && words.getInt(i+12)==Float.floatToIntBits(0.1f)) transCutoff=true;
             if(op==71 && count==4) {
                 if(words.getInt(i+8)==33) bindings.add(words.getInt(i+12));
-                if(words.getInt(i+8)==6 && words.getInt(i+12)==96) stride=true;
+                if(words.getInt(i+8)==6 && words.getInt(i+12)==144) stride=true;
             }
             i+=count*4;
         }
         assertTrue(anyHit);assertTrue(ignore);assertTrue(fetch);assertTrue(cutoff);assertTrue(transCutoff);assertTrue(stride);
-        assertEquals(java.util.Set.of(2,3),bindings);assertFalse(capabilities.contains(11));
+        assertEquals(java.util.Set.of(2,3,5),bindings);assertFalse(capabilities.contains(11));
         var raygen=shader("chunks.rgen");var zeros=new HashSet<Integer>();var flags=new java.util.ArrayList<Integer>();
         for(int i=20;i<raygen.limit();) {
             int h=raygen.getInt(i),n=h>>>16,op=h&0xffff;assertTrue(n>0);

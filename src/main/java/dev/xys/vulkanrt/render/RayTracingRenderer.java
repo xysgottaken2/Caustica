@@ -49,11 +49,21 @@ public final class RayTracingRenderer {
         catch (RuntimeException failure) { disable(failure); }
     }
 
+    private static EntityGeometryManager entities;
+    private static java.util.List<TerrainAtlasCapture.Atlas> boundEntityTextures=java.util.List.of();
+    private static GpuBuffer boundEntityHud;
+    public static void uploadEntities(java.util.List<dev.xys.vulkanrt.geometry.EntityCapture.Upload> uploads) {
+        if(!chunkCaptureEnabled() || context==null) return;
+        stage="entity staging GPU capture / local BLAS";
+        try { if(entities==null) entities=new EntityGeometryManager(context);entities.upload(uploads); }
+        catch(VulkanRayTracingContext.VulkanFailure failure) { handleFailure(failure); }
+        catch(RuntimeException failure) { disable(failure); }
+    }
     public static void beginFrame() {
         if (!RtOptions.ENABLED) return;
         if (!frameLogged) { frameLogged = true; LOG.info("[RT] GameRenderer.render frame hook reached"); }
         projectionCaptured = false;
-        if (RtOptions.CHUNKS) { chunkScene = null; TerrainDrawCapture.beginFrame(); TerrainAtlasCapture.beginFrame(); }
+        if (RtOptions.CHUNKS) { chunkScene = null; TerrainDrawCapture.beginFrame(); TerrainAtlasCapture.beginFrame(); dev.xys.vulkanrt.geometry.EntityCapture.beginFrame(); if(entities!=null) entities.beginFrame(); }
         if (resetRequested) { resetRequested = false; retireScene(); }
         if (!failed) {
             if (context == null) deviceReady(); // explicit recovery path if initRenderer was already called
@@ -159,7 +169,9 @@ public final class RayTracingRenderer {
                 AccelerationStructureManager.Structure nextTlas;
                 if (RtOptions.CHUNKS) {
                     stage = "prepare chunk acceleration structures";
-                    prepared = chunkScene; nextTlas = prepared.tlas;
+                    if(entities==null) entities=new EntityGeometryManager(context);
+                    var entityFrame=entities.frame(batch,chunkScene.anchor,camera.pos.x,camera.pos.y,camera.pos.z);
+                    prepared = world.compose(batch,entityFrame); nextTlas = prepared.tlas;
                     ChunkCoordinates.inverse(INVERSE, PROJECTION, camera.viewRotationMatrix, prepared.anchor, camera.pos.x, camera.pos.y, camera.pos.z);
                 } else {
                     if (nextTestTlas == null) {
@@ -182,8 +194,8 @@ public final class RayTracingRenderer {
                 var nextBindings = bindings;
                 if (nextTlas == null) nextBindings = null;
                 else if (nextBindings == null || boundTlas != nextTlas || nextOutput != output
-                        || (RtOptions.CHUNKS && (boundMaterials != prepared.materials || !atlas.equals(boundAtlas))))
-                    nextBindings = batch.own(RtOptions.CHUNKS ? pipeline.bind(nextTlas,nextOutput,prepared.materials,atlas) : pipeline.bind(nextTlas,nextOutput));
+                        || (RtOptions.CHUNKS && (boundMaterials != prepared.materials || !atlas.equals(boundAtlas) || !prepared.entities.textures().equals(boundEntityTextures) || prepared.entities.hud()!=boundEntityHud)))
+                    nextBindings = batch.own(RtOptions.CHUNKS ? pipeline.bind(nextTlas,nextOutput,prepared.materials,atlas,prepared.entities) : pipeline.bind(nextTlas,nextOutput));
                 TriangleReadback nextProof = proof;
                 boolean recordProof = !RtOptions.CHUNKS && nextProof == null;
                 if (recordProof) {
@@ -206,7 +218,7 @@ public final class RayTracingRenderer {
                 // Transfer persistent ownership immediately after successful enqueue.
                 var oldBindings = bindings; var oldOutput = output;
                 output = nextOutput; bindings = nextBindings; boundTlas = nextTlas;
-                if (RtOptions.CHUNKS) { boundMaterials = prepared.materials; boundAtlas = atlas; }
+                if (RtOptions.CHUNKS) { prepared.commit();boundMaterials = prepared.materials; boundAtlas = atlas;boundEntityTextures=prepared.entities.textures();boundEntityHud=prepared.entities.hud(); }
                 testBlas = nextTestBlas; testTlas = nextTestTlas; proof = nextProof;
                 if (oldBindings != null && oldBindings != nextBindings) context.retire(oldBindings);
                 if (oldOutput != null && oldOutput != nextOutput) context.retire(oldOutput);
@@ -251,10 +263,12 @@ public final class RayTracingRenderer {
             if (bindings != null) context.retire(bindings);
             if (proof != null) context.retire(proof);
             if (world != null) context.retire(world);
+            if (entities != null) context.retire(entities);
             if (testTlas != null) context.retire(testTlas);
             if (testBlas != null) context.retire(testBlas);
             if (output != null) context.retire(output);
         }
+        entities=null;boundEntityTextures=java.util.List.of();boundEntityHud=null;
         bindings = null; boundTlas = null; boundMaterials = null; boundAtlas = null; world = null; chunkScene = null; testTlas = null; testBlas = null; output = null; proof = null;
         traceLogged = false; tracePending = false; submitLogged = false;
     }

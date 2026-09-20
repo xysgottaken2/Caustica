@@ -134,3 +134,26 @@ net/minecraft/client/renderer/block/FluidStateModelSet	M	get	(Lnet/minecraft/wor
 net/minecraft/client/renderer/block/FluidModel	M	layer	()Lnet/minecraft/client/renderer/chunk/ChunkSectionLayer;
 net/minecraft/client/renderer/RenderPipelines	F	TRANSLUCENT_TERRAIN	Lcom/mojang/renderpearl/api/pipeline/RenderPipeline;
 net/minecraft/client/renderer/RenderPipelines	F	TRANSLUCENT_TERRAIN_MULTIDRAW	Lcom/mojang/renderpearl/api/pipeline/RenderPipeline;
+
+# Entity normal feature pipeline, 26.3. No SectionMesh assumptions.
+net/minecraft/client/renderer/entity/EntityRenderer	M	extractRenderState	(Lnet/minecraft/world/entity/Entity;Lnet/minecraft/client/renderer/entity/state/EntityRenderState;F)V
+net/minecraft/client/renderer/entity/EntityRenderDispatcher	M	submit	(Lnet/minecraft/client/renderer/entity/state/EntityRenderState;Lnet/minecraft/client/renderer/state/level/CameraRenderState;DDDLcom/mojang/blaze3d/vertex/PoseStack;Lnet/minecraft/client/renderer/SubmitNodeCollector;)V
+net/minecraft/client/model/geom/ModelPart	M	compile	(Lcom/mojang/blaze3d/vertex/PoseStack$Pose;Lcom/mojang/blaze3d/vertex/VertexConsumer;III)V
+net/minecraft/client/model/geom/ModelPart	F	cubes	Ljava/util/List;
+net/minecraft/client/renderer/feature/ModelFeatureRenderer	M	prepareModel	(Lnet/minecraft/client/renderer/feature/ModelFeatureRenderer$Submit;)V
+net/minecraft/client/renderer/feature/ItemFeatureRenderer	M	prepareSubmit	(Lnet/minecraft/client/renderer/feature/ItemFeatureRenderer$Submit;)V
+net/minecraft/client/renderer/feature/ItemFeatureRenderer	M	prepareMainSubmit	(Lnet/minecraft/client/renderer/feature/ItemFeatureRenderer$Submit;)V
+net/minecraft/client/renderer/feature/MovingBlockFeatureRenderer	M	buildGroup	(Lnet/minecraft/client/renderer/feature/FeatureFrameContext;Ljava/util/List;)V
+net/minecraft/client/renderer/feature/MovingBlockFeatureRenderer	M	putBakedQuad	(Lcom/mojang/blaze3d/vertex/PoseStack;FFFLnet/minecraft/client/resources/model/geometry/BakedQuad;Lcom/mojang/blaze3d/vertex/QuadInstance;Lnet/minecraft/client/renderer/chunk/ChunkSectionLayer;I)V
+net/minecraft/client/renderer/feature/RenderTypeFeatureRenderer	M	getVertexBuilder	(Lnet/minecraft/client/renderer/rendertype/RenderType;)Lcom/mojang/blaze3d/vertex/VertexConsumer;
+net/minecraft/client/renderer/StagedVertexBuffer	F	draws	Ljava/util/List;
+net/minecraft/client/renderer/StagedVertexBuffer	M	getVertexBuilder	(Lnet/minecraft/client/renderer/StagedVertexBuffer$Draw;)Lcom/mojang/blaze3d/vertex/VertexConsumer;
+net/minecraft/client/renderer/StagedVertexBuffer	M	uploadDrawsToBuffers	(Lcom/mojang/renderpearl/api/device/GpuDevice;Ljava/util/List;Lcom/mojang/renderpearl/api/buffers/GpuBuffer;Lcom/mojang/renderpearl/api/buffers/GpuBuffer;II)V
+net/minecraft/client/renderer/StagedVertexBuffer$Draw	F	vertexOffset	I
+net/minecraft/client/renderer/StagedVertexBuffer$Draw	F	vertexCount	I
+net/minecraft/client/renderer/StagedVertexBuffer$Draw	F	format	Lcom/mojang/renderpearl/api/vertex/VertexFormat;
+net/minecraft/client/renderer/StagedVertexBuffer$Draw	F	primitiveTopology	Lcom/mojang/renderpearl/api/pipeline/PrimitiveTopology;
+com/mojang/blaze3d/vertex/BufferBuilder	F	vertices	I
+com/mojang/blaze3d/vertex/VertexConsumer	M	putBakedQuad	(Lcom/mojang/blaze3d/vertex/PoseStack$Pose;Lnet/minecraft/client/resources/model/geometry/BakedQuad;Lcom/mojang/blaze3d/vertex/QuadInstance;)V
+net/minecraft/client/renderer/rendertype/RenderType	M	prepare	()Lnet/minecraft/client/renderer/rendertype/PreparedRenderType;
+net/minecraft/client/renderer/rendertype/PreparedRenderType	M	draw	(Lnet/minecraft/client/renderer/StagedVertexBuffer$ExecuteInfo;Lcom/mojang/renderpearl/api/commands/RenderPass;Lcom/mojang/renderpearl/api/pipeline/RenderPipeline;)V

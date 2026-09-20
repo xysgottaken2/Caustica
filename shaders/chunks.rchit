@@ -3,19 +3,91 @@
 #extension GL_EXT_buffer_reference2 : require
 #extension GL_EXT_buffer_reference_uvec2 : require
 
-struct Hit { vec3 color; uint found; ivec3 section; uint primitive; vec2 uv; uint sampled; ivec2 atlasSize; vec2 quadSpan; uint mode; int levels; vec4 baseTint; vec4 overlayTint; vec4 sampleColor; vec2 baseUv; uint overlayState; uint face; uint layer; uvec4 alphaStats; vec4 cutoutSample; ivec4 cutoutSection; float distance; float alpha; uvec2 previous; uvec4 transStats; vec4 transSample; ivec4 transSection; };
+struct Hit { vec3 color; uint found; ivec3 section; uint primitive; vec2 uv; uint sampled; ivec2 atlasSize; vec2 quadSpan; uint mode; int levels; vec4 baseTint; vec4 overlayTint; vec4 sampleColor; vec2 baseUv; uint overlayState; uint face; uint layer; uvec4 alphaStats; vec4 cutoutSample; ivec4 cutoutSection; float distance; float alpha; uvec2 previous; uvec4 transStats; vec4 transSample; ivec4 transSection; uint entityRecord; };
 layout(location=0) rayPayloadInEXT Hit hit;
 hitAttributeEXT vec2 barycentric;
-struct Material { uvec4 addressLayout; uvec4 attributes; ivec4 section; uvec4 overlay; uvec4 mapping; uvec4 indices; };
+struct Material { uvec4 addressLayout; uvec4 attributes; ivec4 section; uvec4 overlay; uvec4 mapping; uvec4 indices; uvec4 entityMeta; uvec4 entityColors; uvec4 entityInfo; };
 layout(set=0,binding=2,std430) readonly buffer Materials { Material rows[]; } materials;
 layout(set=0,binding=3) uniform sampler2D blockAtlas;
 layout(buffer_reference,std430,buffer_reference_align=4) readonly buffer Vertices { uint words[]; };
 
+// Literal descriptor indices: no descriptor indexing / non-uniform sampler feature is required.
+layout(set=0,binding=5) uniform sampler2D entityTextures[12];
+vec4 readEntitySampler(sampler2D tex,vec2 uv,uint mode) {
+ ivec2 size=textureSize(tex,0);
+ ivec2 p=clamp(ivec2(floor(clamp(uv,0.0,1.0)*vec2(size))),ivec2(0),size-1);
+ return mode==0u?texelFetch(tex,p,0):textureLod(tex,uv,0.0);
+}
+vec4 entitySample(uint slot,vec2 uv,uint mode) {
+ switch(slot) {
+ case 0u: return readEntitySampler(entityTextures[0],uv,mode);
+ case 1u: return readEntitySampler(entityTextures[1],uv,mode);
+ case 2u: return readEntitySampler(entityTextures[2],uv,mode);
+ case 3u: return readEntitySampler(entityTextures[3],uv,mode);
+ case 4u: return readEntitySampler(entityTextures[4],uv,mode);
+ case 5u: return readEntitySampler(entityTextures[5],uv,mode);
+ case 6u: return readEntitySampler(entityTextures[6],uv,mode);
+ case 7u: return readEntitySampler(entityTextures[7],uv,mode);
+ case 8u: return readEntitySampler(entityTextures[8],uv,mode);
+ case 9u: return readEntitySampler(entityTextures[9],uv,mode);
+ case 10u: return readEntitySampler(entityTextures[10],uv,mode);
+ case 11u: return readEntitySampler(entityTextures[11],uv,mode);
+ } return vec4(1,0,1,1);
+}
+ivec2 entitySize(uint slot) {
+ switch(slot) {
+ case 0u: return textureSize(entityTextures[0],0);
+ case 1u: return textureSize(entityTextures[1],0);
+ case 2u: return textureSize(entityTextures[2],0);
+ case 3u: return textureSize(entityTextures[3],0);
+ case 4u: return textureSize(entityTextures[4],0);
+ case 5u: return textureSize(entityTextures[5],0);
+ case 6u: return textureSize(entityTextures[6],0);
+ case 7u: return textureSize(entityTextures[7],0);
+ case 8u: return textureSize(entityTextures[8],0);
+ case 9u: return textureSize(entityTextures[9],0);
+ case 10u: return textureSize(entityTextures[10],0);
+ case 11u: return textureSize(entityTextures[11],0);
+ } return ivec2(1);
+}
+int entityLevels(uint slot) {
+ switch(slot) {
+ case 0u: return textureQueryLevels(entityTextures[0]);
+ case 1u: return textureQueryLevels(entityTextures[1]);
+ case 2u: return textureQueryLevels(entityTextures[2]);
+ case 3u: return textureQueryLevels(entityTextures[3]);
+ case 4u: return textureQueryLevels(entityTextures[4]);
+ case 5u: return textureQueryLevels(entityTextures[5]);
+ case 6u: return textureQueryLevels(entityTextures[6]);
+ case 7u: return textureQueryLevels(entityTextures[7]);
+ case 8u: return textureQueryLevels(entityTextures[8]);
+ case 9u: return textureQueryLevels(entityTextures[9]);
+ case 10u: return textureQueryLevels(entityTextures[10]);
+ case 11u: return textureQueryLevels(entityTextures[11]);
+ } return 1;
+}
+vec4 entityOverlay(uint slot,ivec2 p) {
+ switch(slot) {
+ case 0u: return texelFetch(entityTextures[0],clamp(p,ivec2(0),textureSize(entityTextures[0],0)-1),0);
+ case 1u: return texelFetch(entityTextures[1],clamp(p,ivec2(0),textureSize(entityTextures[1],0)-1),0);
+ case 2u: return texelFetch(entityTextures[2],clamp(p,ivec2(0),textureSize(entityTextures[2],0)-1),0);
+ case 3u: return texelFetch(entityTextures[3],clamp(p,ivec2(0),textureSize(entityTextures[3],0)-1),0);
+ case 4u: return texelFetch(entityTextures[4],clamp(p,ivec2(0),textureSize(entityTextures[4],0)-1),0);
+ case 5u: return texelFetch(entityTextures[5],clamp(p,ivec2(0),textureSize(entityTextures[5],0)-1),0);
+ case 6u: return texelFetch(entityTextures[6],clamp(p,ivec2(0),textureSize(entityTextures[6],0)-1),0);
+ case 7u: return texelFetch(entityTextures[7],clamp(p,ivec2(0),textureSize(entityTextures[7],0)-1),0);
+ case 8u: return texelFetch(entityTextures[8],clamp(p,ivec2(0),textureSize(entityTextures[8],0)-1),0);
+ case 9u: return texelFetch(entityTextures[9],clamp(p,ivec2(0),textureSize(entityTextures[9],0)-1),0);
+ case 10u: return texelFetch(entityTextures[10],clamp(p,ivec2(0),textureSize(entityTextures[10],0)-1),0);
+ case 11u: return texelFetch(entityTextures[11],clamp(p,ivec2(0),textureSize(entityTextures[11],0)-1),0);
+ } return vec4(0,0,0,1);
+}
 vec2 uvAt(Vertices vertices, Material m, uint index) {
     uint offset=index*m.addressLayout.z+m.addressLayout.w;
     return vec2(uintBitsToFloat(vertices.words[offset]),uintBitsToFloat(vertices.words[offset+1u]));
 }
 vec4 colorAt(Vertices vertices, Material m, uint index) {
+    if((uint(m.section.w)&8u)!=0u) return unpackUnorm4x8(m.entityColors[index&3u]);
     return unpackUnorm4x8(vertices.words[index*m.addressLayout.z+m.attributes.x]);
 }
 vec4 sampleAtlas(vec2 uv,uint mode) {
@@ -43,10 +115,12 @@ uvec3 triangleIndices(Material m,uint primitive) {
 }
 void main() {
     // gl_InstanceID is the TLAS input row, independent of unchanged customIndex/SBT offsets.
-    hit.found=1u; hit.sampled=0u; hit.distance=gl_HitTEXT; hit.alpha=1.0; hit.layer=0u; hit.primitive=uint(gl_PrimitiveID);
+    hit.entityRecord=0xffffffffu; hit.found=1u; hit.sampled=0u; hit.distance=gl_HitTEXT; hit.alpha=1.0; hit.layer=0u; hit.primitive=uint(gl_PrimitiveID);
     hit.color=vec3(1,0,1); // Invalid metadata must be visibly different from a successful atlas sample.
     if (gl_InstanceID >= materials.rows.length()) return;
     Material m=materials.rows[gl_InstanceID];
+    bool entity=(uint(m.section.w)&8u)!=0u;
+    if(entity) hit.entityRecord=m.entityMeta.w;
     hit.section=m.section.xyz; hit.layer=(uint(m.section.w)&4u)!=0u ? 2u : uint(m.section.w)&1u;
     if (uint(gl_PrimitiveID)>=m.attributes.z) return;
     uvec3 indices=triangleIndices(m,uint(gl_PrimitiveID));
@@ -60,11 +134,11 @@ void main() {
     // (0.5.0) omitted its texel-position correction, softening magnified pixel-art textures.
     // Reference/correction: read the actual mip-0 texel of the SAME view, bypassing filtering.
     // This is not a replacement for vanilla's derivative-based minification/RGSS.
-    hit.atlasSize=textureSize(blockAtlas,0);
+    hit.atlasSize=entity?entitySize(m.entityMeta.x):textureSize(blockAtlas,0);
     hit.mode=m.attributes.w;
     if (any(isnan(hit.uv)) || any(isinf(hit.uv)) || any(lessThanEqual(hit.atlasSize,ivec2(0)))) return;
     ivec2 texel=clamp(ivec2(floor(clamp(hit.uv,0.0,1.0)*vec2(hit.atlasSize))),ivec2(0),hit.atlasSize-1);
-    vec4 albedo=hit.mode==1u ? textureLod(blockAtlas,hit.uv,0.0) : texelFetch(blockAtlas,texel,0);
+    vec4 albedo=entity?entitySample(m.entityMeta.x,hit.uv,hit.mode):(hit.mode==1u ? textureLod(blockAtlas,hit.uv,0.0) : texelFetch(blockAtlas,texel,0));
     hit.baseTint=color; hit.overlayTint=vec4(0); hit.baseUv=hit.uv; hit.overlayState=0u;
     if(any(notEqual(m.mapping.xy,uvec2(0)))) {
         Vertices mapping=Vertices(m.mapping.xy);
@@ -90,6 +164,10 @@ void main() {
     hit.previous=uvec2(uint(gl_InstanceID),uint(gl_PrimitiveID));
     hit.sampleColor=albedo;
     hit.color=albedo.rgb*color.rgb;
+    if(entity && m.entityInfo.x!=0xffffffffu) {
+        vec4 overlayColor=entityOverlay(m.entityInfo.x,ivec2(m.entityMeta.z&65535u,m.entityMeta.z>>16u));
+        hit.color=mix(overlayColor.rgb,hit.color,overlayColor.a);
+    }
     hit.sampled=1u;
     // Extra UV reads/queries ONLY for the optional single center-ray probe, never every image ray.
     if (all(equal(gl_LaunchSizeEXT.xy,uvec2(1)))) {
@@ -100,6 +178,6 @@ void main() {
         vec2 a=uvAt(vertices,m,base), b=uvAt(vertices,m,base+1u);
         vec2 c=uvAt(vertices,m,base+2u), d=uvAt(vertices,m,base+3u);
         hit.quadSpan=(max(max(a,b),max(c,d))-min(min(a,b),min(c,d)))*vec2(hit.atlasSize);
-        hit.levels=textureQueryLevels(blockAtlas);
+        hit.levels=entity?entityLevels(m.entityMeta.x):textureQueryLevels(blockAtlas);
     }
 }

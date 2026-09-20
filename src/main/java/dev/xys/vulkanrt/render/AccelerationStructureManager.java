@@ -46,9 +46,12 @@ public final class AccelerationStructureManager {
         }
     }
 
-    public record Instance(Structure blas, float x, float y, float z, int customIndex, int mask) {
-        public Instance(Structure blas,float x,float y,float z,int customIndex) { this(blas,x,y,z,customIndex,0xff); }
+    public record Instance(Structure blas, float x, float y, float z, int customIndex, int mask, org.joml.Matrix4fc transform) {
+        public Instance(Structure blas,float x,float y,float z,int customIndex) { this(blas,x,y,z,customIndex,0xff,null); }
+        public Instance(Structure blas,float x,float y,float z,int customIndex,int mask) { this(blas,x,y,z,customIndex,mask,null); }
+        public Instance(Structure blas,org.joml.Matrix4fc transform,int mask) { this(blas,0,0,0,0,mask,new org.joml.Matrix4f(transform)); }
         public Instance {
+            if(transform!=null && (!transform.isFinite() || Math.abs(transform.determinant())<1e-10f)) throw new IllegalArgumentException("Invalid entity transform");
             if (blas.type != VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR || blas.handle() == 0) throw new IllegalArgumentException("Not a live BLAS");
             if(mask<=0 || (mask&~0xff)!=0) throw new IllegalArgumentException("Invalid instance mask");
             if ((customIndex & ~0xffffff) != 0) throw new IllegalArgumentException("instanceCustomIndex is 24 bits");
@@ -105,6 +108,10 @@ public final class AccelerationStructureManager {
     public Structure buildSectionBlas(CommandBatch batch,
             com.mojang.renderpearl.backend.vulkan.VulkanGpuBuffer source, long sourceOffset,
             dev.xys.vulkanrt.geometry.SectionGeometryLayout layout, boolean cutout) {
+        return buildCapturedBlas(batch,source,sourceOffset,layout,cutout,null,null);
+    }
+    public Structure buildCapturedBlas(CommandBatch batch,com.mojang.renderpearl.backend.vulkan.VulkanGpuBuffer source,long sourceOffset,
+            dev.xys.vulkanrt.geometry.SectionGeometryLayout layout,boolean cutout,EntityVertexNormalizer normalizer,org.joml.Matrix4fc inversePose) {
         long bytes = layout.vertexBytes();
         if (source.isClosed() || (source.usage() & com.mojang.renderpearl.api.buffers.GpuBuffer.USAGE_COPY_SRC) == 0
                 || sourceOffset < 0 || sourceOffset > source.size() - bytes || (sourceOffset & 3) != 0)
@@ -121,6 +128,10 @@ public final class AccelerationStructureManager {
                     VK_PIPELINE_STAGE_2_TRANSFER_BIT_KHR, VK_ACCESS_2_TRANSFER_READ_BIT_KHR);
             vkCmdCopyBuffer(batch.commands, source.vkBuffer(), vertices.handle(),
                     VkBufferCopy.calloc(1, stack).srcOffset(sourceOffset).dstOffset(0).size(bytes));
+            if(normalizer!=null) {
+                if(layout.positionOffset()!=0) throw new IllegalArgumentException("Entity position must be byte0");
+                normalizer.normalize(batch,vertices,layout.stride(),layout.vertexCount(),inversePose);
+            }
             // SOLID and CUTOUT have no per-section index allocation: vanilla uses shared sequential QUADS.
             // Reproduce that topology only, without changing/re-tessellating a single vertex.
             var quads = indexBytes.asIntBuffer();
@@ -137,7 +148,7 @@ public final class AccelerationStructureManager {
             result.vertices = vertices; result.indices = indices;
             org.slf4j.LoggerFactory.getLogger("native_vulkan_rt").info(
                     "[RT] Chunk BLAS buffers: layer={} vertex=0x{}, index=0x{}, triangles={}; original interleaved attributes retained",
-                    cutout ? "CUTOUT (non-opaque/any-hit)" : "SOLID (opaque)",
+                    normalizer!=null?"ENTITY (local geometry; non-opaque permits per-material culling/test)":cutout ? "CUTOUT (non-opaque/any-hit)" : "SOLID (opaque)",
                     Long.toHexString(vertices.handle()), Long.toHexString(indices.handle()), layout.triangles());
             return result;
         } catch (RuntimeException | Error failure) {
@@ -208,6 +219,12 @@ public final class AccelerationStructureManager {
                 // VkTransformMatrixKHR is row-major 3x4, not JOML's column-major matrix storage.
                 record.transform().matrix(0, 1).matrix(5, 1).matrix(10, 1)
                         .matrix(3, instance.x()).matrix(7, instance.y()).matrix(11, instance.z());
+                if(instance.transform()!=null) {
+                    var m=instance.transform();
+                    record.transform().matrix(0,m.m00()).matrix(1,m.m10()).matrix(2,m.m20()).matrix(3,m.m30())
+                        .matrix(4,m.m01()).matrix(5,m.m11()).matrix(6,m.m21()).matrix(7,m.m31())
+                        .matrix(8,m.m02()).matrix(9,m.m12()).matrix(10,m.m22()).matrix(11,m.m32());
+                }
                 record.instanceCustomIndex(instance.customIndex()).mask(instance.mask()).instanceShaderBindingTableRecordOffset(0)
                         .flags(VK_GEOMETRY_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT_KHR)
                         .accelerationStructureReference(instance.blas().address());
