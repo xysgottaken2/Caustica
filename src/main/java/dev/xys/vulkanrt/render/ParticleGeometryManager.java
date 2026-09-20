@@ -6,7 +6,6 @@ import com.mojang.renderpearl.backend.vulkan.VulkanGpuBuffer;
 import dev.xys.vulkanrt.geometry.ChunkCoordinates;
 import dev.xys.vulkanrt.geometry.ParticleCapture;
 import dev.xys.vulkanrt.geometry.SectionGeometryLayout;
-import net.minecraft.client.renderer.RenderType;
 import net.minecraft.client.renderer.rendertype.PreparedRenderType;
 import java.util.*;
 

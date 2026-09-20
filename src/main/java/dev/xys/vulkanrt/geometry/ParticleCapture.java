@@ -11,7 +11,7 @@ import com.mojang.renderpearl.backend.vulkan.VulkanGpuBuffer;
 import dev.xys.vulkanrt.mixin.EntityDrawAccessor;
 import dev.xys.vulkanrt.mixin.EntityStagedAccessor;
 import dev.xys.vulkanrt.render.RayTracingRenderer;
-import net.minecraft.client.renderer.RenderType;
+import net.minecraft.client.renderer.rendertype.RenderType;
 import com.mojang.blaze3d.systems.RenderSystem;
 import net.minecraft.client.renderer.StagedVertexBuffer;
 import net.minecraft.client.renderer.rendertype.PreparedRenderType;
