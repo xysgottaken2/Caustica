@@ -1,6 +1,7 @@
 package dev.xys.vulkanrt.render;
 
 import com.mojang.renderpearl.backend.vulkan.VulkanCommandEncoder;
+import com.mojang.renderpearl.api.device.GpuDeviceLossException;
 import com.mojang.renderpearl.backend.vulkan.VulkanDevice;
 import com.mojang.renderpearl.backend.vulkan.VulkanGpuTexture;
 import dev.xys.vulkanrt.geometry.GeometryInbox;
@@ -179,6 +180,12 @@ public final class RayTracingRenderer {
         disable(failure);
     }
     private static void disable(RuntimeException failure) {
+        // Vanilla command allocation/fence polling translates VK_ERROR_DEVICE_LOST to this type.
+        // Never swallow it as an optional RT failure on the shared Minecraft device.
+        if (failure instanceof GpuDeviceLossException) {
+            LOG.error("[RT] Shared Vulkan device lost at '{}'; vanilla fallback is not safe", stage, failure);
+            throw failure;
+        }
         failed = true;
         LOG.error("[RT] Integration failed at '{}'; RT disabled, retaining vanilla renderer. RUNTIME NOT VERIFIED", stage, failure);
         retireScene();
