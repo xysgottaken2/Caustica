@@ -80,7 +80,7 @@ tasks.register('compileRtShaders', JavaExec) {
     mainClass = 'dev.xys.vulkanrt.build.CompileRtShaders'
     javaLauncher = javaToolchains.launcherFor { languageVersion = JavaLanguageVersion.of(25) }
     jvmArgs '--enable-native-access=ALL-UNNAMED'
-    inputs.files(fileTree('shaders') { include '*.rgen', '*.rmiss', '*.rchit' })
+    inputs.files(fileTree('shaders') { include '*.rgen', '*.rmiss', '*.rchit', '*.comp' })
     outputs.dir(shaderOutput)
     args layout.projectDirectory.dir('shaders').asFile.absolutePath,
             shaderOutput.get().dir('assets/native_vulkan_rt/spirv').asFile.absolutePath
@@ -128,7 +128,7 @@ tasks.register('verifyModJar') {
             if (zip.getEntry('dev/xys/vulkanrt/RayTracingMod.class') == null || zip.getEntry('LICENSE') == null) {
                 throw new GradleException('Missing compiled entrypoint or license')
             }
-            ['primary.rgen.spv', 'primary.rmiss.spv', 'primary.rchit.spv', 'chunks.rgen.spv', 'chunks.rmiss.spv', 'chunks.rchit.spv'].each { shader ->
+            ['primary.rgen.spv', 'primary.rmiss.spv', 'primary.rchit.spv', 'chunks.rgen.spv', 'chunks.rmiss.spv', 'chunks.rchit.spv', 'overlay.comp.spv'].each { shader ->
                 if (zip.getEntry("assets/native_vulkan_rt/spirv/${shader}") == null) {
                     throw new GradleException("Missing executable RT shader ${shader}")
                 }

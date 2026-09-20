@@ -19,7 +19,7 @@ import java.util.stream.Collectors;
 /** One cached BLAS per actual SOLID section draw; a single TLAS contains the entire valid set.
  * Capture, lifetime validation and enqueue all precede vanilla's later heap uploads/reuse.
  * No compiler interception, CPU vertex readback or second terrain mesher.
- * Geometry/cache user-verified with 444 sections in 0.5.0; texture-quality correction pending runtime validation. */
+ * Geometry/cache user-verified with 444 sections in 0.5.0; TEXEL sharpness user-verified in 0.5.1; new coplanar overlay shading pending runtime validation. */
 public final class WorldGeometryManager implements AutoCloseable {
     private static final Logger LOG = LoggerFactory.getLogger("native_vulkan_rt");
     private final VulkanRayTracingContext context;
@@ -28,6 +28,9 @@ public final class WorldGeometryManager implements AutoCloseable {
     private AccelerationStructureManager.Structure tlas;
     private ChunkCoordinates.Anchor anchor;
     private ChunkMaterialTable materials;
+    private CoplanarOverlayMapper overlayMapper;
+    private Map<Long,CoplanarOverlayMapper.Overlay> overlays=Map.of();
+    private int overlayBuildsSinceReport, overlayRetiresSinceReport;
     private String waitReason, invalidReason;
     private long lastReport, lastDetail;
     private int buildsSinceReport, retiresSinceReport;
@@ -49,10 +52,12 @@ public final class WorldGeometryManager implements AutoCloseable {
         public final ChunkMaterialTable materials;
         private final Map<Long, Resident> next;
         private final int built;
+        private final Map<Long,CoplanarOverlayMapper.Overlay> nextOverlays;
+        private final int overlayBuilt;
         private boolean committed;
         private Prepared(AccelerationStructureManager.Structure tlas, Map<Long, Resident> next,
-                         ChunkCoordinates.Anchor anchor, int built, ChunkMaterialTable materials) {
-            this.tlas = tlas; this.next = next; this.anchor = anchor; this.built = built; this.materials = materials;
+                         ChunkCoordinates.Anchor anchor, int built, ChunkMaterialTable materials, Map<Long,CoplanarOverlayMapper.Overlay> nextOverlays, int overlayBuilt) {
+            this.tlas = tlas; this.next = next; this.anchor = anchor; this.built = built; this.materials = materials; this.nextOverlays=nextOverlays; this.overlayBuilt=overlayBuilt;
         }
         /** Only after enqueue: old TLAS/BLAS remain alive through all earlier GPU consumers. */
         public void commit() {
@@ -65,6 +70,8 @@ public final class WorldGeometryManager implements AutoCloseable {
                 context.retire(WorldGeometryManager.this.materials);
             WorldGeometryManager.this.materials = materials;
             int retired = SectionResidency.retireReplaced(residents, next, section -> context.retire(section.blas()));
+            overlayRetiresSinceReport+=SectionResidency.retireReplaced(overlays,nextOverlays,context::retire);
+            overlays=nextOverlays; overlayBuildsSinceReport+=overlayBuilt;
             residents = next; WorldGeometryManager.this.tlas = tlas; WorldGeometryManager.this.anchor = anchor;
             buildsSinceReport += built; retiresSinceReport += retired;
             report(emptyTransition, next.size()-built);
@@ -79,8 +86,11 @@ public final class WorldGeometryManager implements AutoCloseable {
         if (draws.size() != residents.size() || !nextAnchor.equals(anchor)) return null;
         for (var receipt : draws.values()) {
             if (!liveReceipt(receipt) || !matches(residents.get(receipt.section()), receipt)) return null;
+            var cutout=TerrainDrawCapture.cutout(receipt.section());
+            var cached=overlays.get(receipt.section());
+            if(cutout==null ? cached!=null : !liveReceipt(cutout) || cached==null || !cached.same(cutout,residents.get(receipt.section()).blas().vertexAddress())) return null;
         }
-        return new Prepared(tlas, residents, anchor, 0, materials);
+        return new Prepared(tlas, residents, anchor, 0, materials, overlays, 0);
     }
 
     public Prepared prepare(CommandBatch batch, LevelRenderer level, double x, double y, double z) {
@@ -153,15 +163,37 @@ public final class WorldGeometryManager implements AutoCloseable {
                 LOG.debug("[RT] TLAS {}: {} instances; BLAS built={}, reused={}, retired={}; anchor=({}, {}, {})",
                         action, next.size(), diff.build().size(), diff.reuse().size(), diff.retire().size(), nextAnchor.x(), nextAnchor.y(), nextAnchor.z());
             }
+            // Independent material cache. CUTOUT heap changes must NOT rebuild SOLID BLAS/TLAS.
+            var nextOverlays=new TreeMap<Long,CoplanarOverlayMapper.Overlay>();
+            int overlayBuilt=0;
+            for(var section : next.values()) {
+                var receipt=TerrainDrawCapture.cutout(section.section());
+                if(receipt==null || !liveReceipt(receipt) || receipt.mesh()!=section.mesh() || receipt.owner()!=section.owner()) continue;
+                var slice=dispatcher.getRenderSectionSlice(receipt.mesh(),ChunkSectionLayer.CUTOUT);
+                var sanity=SectionGeometrySanity.inspect(receipt.owner(),receipt.section(),receipt.mesh(),slice,
+                        ChunkSectionLayer.CUTOUT.pipeline(false).getVertexFormatBinding(0),ChunkSectionLayer.CUTOUT);
+                if(sanity!=SectionGeometrySanity.Failure.OK || slice.vertexBuffer()!=receipt.buffer() || slice.vertexBufferOffset()!=receipt.offset()) {
+                    LOG.debug("[RT] CUTOUT material receipt invalidated before GPU copy: section={} sanity={}",coordinates(receipt.section()),sanity);
+                    continue;
+                }
+                var cached=overlays.get(section.section());
+                if(cached==null || !cached.same(receipt,section.blas().vertexAddress())) {
+                    if(overlayMapper==null) overlayMapper=new CoplanarOverlayMapper(context);
+                    cached=batch.own(overlayMapper.build(batch,receipt,section.blas().vertexAddress(),section.layout()));
+                    overlayBuilt++;
+                }
+                nextOverlays.put(section.section(),cached);
+            }
+            boolean overlaysChanged=overlayBuilt>0 || nextOverlays.size()!=overlays.size();
             var nextMaterials = materials;
-            if (diff.changed()) {
+            if (diff.changed() || overlaysChanged) {
                 var entries = new ArrayList<ChunkMaterialTable.Entry>(next.size());
-                for (var section : next.values()) entries.add(new ChunkMaterialTable.Entry(section.section(),section.blas().vertexAddress(),section.layout()));
+                for (var section : next.values()) entries.add(new ChunkMaterialTable.Entry(section.section(),section.blas().vertexAddress(),section.layout(),nextOverlays.get(section.section())));
                 nextMaterials = batch.own(new ChunkMaterialTable(context,batch,entries));
                 LOG.debug("[RT] Material rows={} in TLAS instance order; no vertex readback", entries.size());
             }
             waitReason = null;
-            return new Prepared(nextTlas, next, nextAnchor, diff.build().size(), nextMaterials);
+            return new Prepared(nextTlas, next, nextAnchor, diff.build().size(), nextMaterials,nextOverlays,overlayBuilt);
         } finally { dispatcher.unlock(); }
     }
 
@@ -181,7 +213,7 @@ public final class WorldGeometryManager implements AutoCloseable {
     }
     private Prepared empty(ChunkCoordinates.Anchor nextAnchor, String reason) {
         if (!reason.equals(waitReason)) { waitReason = reason; LOG.info("[RT] Chunks: {}", reason); }
-        return new Prepared(null, Map.of(), nextAnchor, 0, null);
+        return new Prepared(null, Map.of(), nextAnchor, 0, null, Map.of(), 0);
     }
     private void report(boolean force, int reusedThisFrame) {
         if (!force && System.nanoTime()-lastReport < 2_000_000_000L) return;
@@ -193,12 +225,17 @@ public final class WorldGeometryManager implements AutoCloseable {
         LOG.info("[RT] Chunk cache: builtSinceReport={} retiredSinceReport={} (deferred) reusedThisFrame={}; section sample={}{}",
                 buildsSinceReport, retiresSinceReport, reusedThisFrame, residents.keySet().stream().limit(8).map(WorldGeometryManager::coordinates).collect(Collectors.joining(", ")),
                 residents.size() > 8 ? ", ..." : "");
+        LOG.info("[RT] Coplanar material cache: sections={} buildsSinceReport={} retiredSinceReport={} (deferred); no additional BLAS/TLAS; GPU lookup truncation is shown in the hit HUD",
+                overlays.size(),overlayBuildsSinceReport,overlayRetiresSinceReport);
+        overlayBuildsSinceReport=0; overlayRetiresSinceReport=0;
         buildsSinceReport = 0; retiresSinceReport = 0;
     }
     private static String coordinates(long node) { return "("+SectionPos.x(node)+","+SectionPos.y(node)+","+SectionPos.z(node)+")"; }
     @Override public void close() {
         if (tlas != null) { tlas.close(); tlas = null; }
         if (materials != null) { materials.close(); materials = null; }
+        overlays.values().forEach(CoplanarOverlayMapper.Overlay::close); overlays=Map.of();
+        if(overlayMapper!=null) { overlayMapper.close();overlayMapper=null; }
         residents.values().forEach(section -> section.blas().close());
         residents = Map.of();
     }

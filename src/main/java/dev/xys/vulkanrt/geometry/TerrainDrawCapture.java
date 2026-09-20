@@ -30,27 +30,54 @@ public final class TerrainDrawCapture {
     private static double cameraX, cameraY, cameraZ;
     private static Map<Long, Draw> draws = new TreeMap<>(), previous = Map.of();
     private static VertexFormat previousFormat;
-    private static String firstRejected, configurationFailure;
+    private static Map<Long, Draw> cutouts = new TreeMap<>(), previousCutouts = Map.of();
+    private static String firstRejected, configurationFailure, firstCutoutRejected;
+    private static int cutoutCalls, cutoutRejected;
+    private static VertexFormat cutoutFormat,previousCutoutFormat;
 
     public static void beginFrame() {
         frame++; started = false; completed = false; level = null; dispatcher = null;
+        previousCutoutFormat=cutoutFormat;
+        previousCutouts=cutouts; cutouts=new TreeMap<>();
         previous = draws; draws = new TreeMap<>(); previousFormat = format;
+        cutoutCalls=0;cutoutRejected=0;firstCutoutRejected=null;
         sections = 0; solidCalls = 0; valid = 0; sawPin = false; firstRejected = null;
         Arrays.fill(rejected, 0);
     }
     public static void begin(LevelRenderer owner, SectionRenderDispatcher source, double x, double y, double z) {
         started = true; completed = false; level = owner; dispatcher = source;
-        draws.clear(); sections = 0; solidCalls = 0; valid = 0; sawPin = false; firstRejected = null;
+        cutoutCalls=0;cutoutRejected=0;firstCutoutRejected=null;
+        cutouts.clear(); draws.clear(); sections = 0; solidCalls = 0; valid = 0; sawPin = false; firstRejected = null;
         Arrays.fill(rejected, 0);
         cameraX = x; cameraY = y; cameraZ = z;
         try { pinned = ChunkCoordinates.parseSection(System.getProperty("nativevulkanrt.section")); configurationFailure = null; }
         catch (IllegalArgumentException badOption) { configurationFailure = badOption.getMessage(); }
         format = ChunkSectionLayer.SOLID.pipeline(false).getVertexFormatBinding(0);
+        cutoutFormat=ChunkSectionLayer.CUTOUT.pipeline(false).getVertexFormatBinding(0);
     }
     public static void sawSection() { sections++; }
     public static void observe(SectionRenderDispatcher source, SectionRenderDispatcher.RenderSection section,
                                SectionMesh mesh, ChunkSectionLayer layer, SectionRenderDispatcher.RenderSectionBufferSlice slice) {
-        if (!started || source != dispatcher || layer != ChunkSectionLayer.SOLID) return;
+        if (!started || source != dispatcher) return;
+        if (layer == ChunkSectionLayer.CUTOUT) {
+            long node=section == null ? 0 : section.getSectionNode();
+            cutoutCalls++;
+            var failure=SectionGeometrySanity.inspect(section,node,mesh,slice,cutoutFormat,layer);
+            if(failure!=SectionGeometrySanity.Failure.OK) {
+                cutoutRejected++;
+                if(firstCutoutRejected==null) firstCutoutRejected="section="+SectionPos.x(node)+","+SectionPos.y(node)+","+SectionPos.z(node)+" reason="+failure;
+                return;
+            }
+            if (configurationFailure == null && (pinned == null || pinned == node)) {
+                var draw=mesh.getSectionDraw(layer);
+                var old=previousCutouts.get(node);
+                var layout=old != null && previousCutoutFormat==cutoutFormat && old.mesh()==mesh && old.layout().indexCount()==draw.indexCount()
+                        ? old.layout() : SectionGeometryLayout.solidQuads(cutoutFormat,draw.indexCount());
+                cutouts.put(node,new Draw(frame,node,section,mesh,(VulkanGpuBuffer)slice.vertexBuffer(),slice.vertexBufferOffset(),layout));
+            }
+            return;
+        }
+        if (layer != ChunkSectionLayer.SOLID) return;
         solidCalls++;
         long node = section == null ? 0 : section.getSectionNode();
         if (section != null && pinned != null && pinned == node) sawPin = true;
@@ -79,6 +106,7 @@ public final class TerrainDrawCapture {
     public static void finish(LevelRenderer owner) { if (level == owner) completed = true; }
     public static boolean ready(LevelRenderer owner, SectionRenderDispatcher source) { return started && completed && level == owner && source == dispatcher; }
     public static Map<Long, Draw> draws() { return Collections.unmodifiableMap(draws); }
+    public static Draw cutout(long section) { return cutouts.get(section); }
     public static int validSections() { return draws.size(); }
     public static boolean current(Draw draw) { return draw != null && draw.frame() == frame && completed; }
     public static String failure() {
@@ -99,6 +127,7 @@ public final class TerrainDrawCapture {
         log.info("[RT][chunks-diag] stage=extractSectionDrawGroups frame={} started={} completed={} sections={} SOLID calls={} valid={} validSections={} pinSeen={} camera=({}, {}, {}) cameraSection=({}, {}, {})",
                 frame, started, completed, sections, solidCalls, valid, draws.size(), sawPin, cameraX, cameraY, cameraZ,
                 (int)Math.floor(cameraX/16), (int)Math.floor(cameraY/16), (int)Math.floor(cameraZ/16));
+        log.info("[RT][coplanar-diag] CUTOUT calls={} accepted={} rejected={} firstRejection={}; auxiliary shading data only, not AS geometry",cutoutCalls,cutouts.size(),cutoutRejected,firstCutoutRejected);
         for (var failure : SectionGeometrySanity.Failure.values()) if (rejected[failure.ordinal()] > 0)
             log.info("[RT][chunks-diag] rejected {}: {}", failure, rejected[failure.ordinal()]);
         if (firstRejected != null) log.info("[RT][chunks-diag] rejected sample: {}", firstRejected);

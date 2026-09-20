@@ -88,3 +88,22 @@ com/mojang/renderpearl/api/textures/GpuSampler	M	getMaxAnisotropy	()I
 com/mojang/renderpearl/api/textures/GpuSampler	M	getMaxLod	()Ljava/util/OptionalDouble;
 net/minecraft/client/renderer/state/WindowRenderState	F	width	I
 net/minecraft/client/renderer/state/WindowRenderState	F	height	I
+
+# Coplanar overlay compute uses the SAME vanilla graphics queue; CPU tint probe only observes prepared quads.
+com/mojang/renderpearl/backend/vulkan/VulkanQueue	M	queueFamilyIndex	()I
+net/minecraft/client/renderer/block/ModelBlockRenderer	M	putQuadWithTint	(Lnet/minecraft/client/renderer/block/BlockQuadOutput;FFFLnet/minecraft/world/level/BlockAndTintGetter;Lnet/minecraft/world/level/block/state/BlockState;Lnet/minecraft/core/BlockPos;Lnet/minecraft/client/resources/model/geometry/BakedQuad;)V
+net/minecraft/client/renderer/block/ModelBlockRenderer	F	tintCacheValue	I
+net/minecraft/client/renderer/block/ModelBlockRenderer	F	quadInstance	Lcom/mojang/blaze3d/vertex/QuadInstance;
+net/minecraft/client/renderer/block/BlockQuadOutput	M	put	(FFFLnet/minecraft/client/resources/model/geometry/BakedQuad;Lcom/mojang/blaze3d/vertex/QuadInstance;)V
+com/mojang/blaze3d/vertex/QuadInstance	M	getColor	(I)I
+net/minecraft/client/resources/model/geometry/BakedQuad	M	packedUV	(I)J
+net/minecraft/client/resources/model/geometry/BakedQuad	M	direction	()Lnet/minecraft/core/Direction;
+net/minecraft/client/resources/model/geometry/BakedQuad	M	materialInfo	()Lnet/minecraft/client/resources/model/geometry/BakedQuad$MaterialInfo;
+net/minecraft/client/resources/model/geometry/BakedQuad$MaterialInfo	M	isTinted	()Z
+net/minecraft/client/resources/model/geometry/BakedQuad$MaterialInfo	M	layer	()Lnet/minecraft/client/renderer/chunk/ChunkSectionLayer;
+net/minecraft/client/resources/model/geometry/BakedQuad$MaterialInfo	M	tintIndex	()I
+net/minecraft/client/resources/model/geometry/BakedQuad$MaterialInfo	M	sprite	()Lnet/minecraft/client/renderer/texture/TextureAtlasSprite;
+net/minecraft/client/renderer/texture/TextureAtlasSprite	M	contents	()Lnet/minecraft/client/renderer/texture/SpriteContents;
+net/minecraft/client/renderer/texture/SpriteContents	M	name	()Lnet/minecraft/resources/Identifier;
+net/minecraft/client/model/geom/builders/UVPair	M	unpackU	(J)F
+net/minecraft/client/model/geom/builders/UVPair	M	unpackV	(J)F

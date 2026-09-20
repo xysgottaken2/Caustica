@@ -3,10 +3,10 @@
 #extension GL_EXT_buffer_reference2 : require
 #extension GL_EXT_buffer_reference_uvec2 : require
 
-struct Hit { vec3 color; uint found; ivec3 section; uint primitive; vec2 uv; uint sampled; ivec2 atlasSize; vec2 quadSpan; uint mode; int levels; };
+struct Hit { vec3 color; uint found; ivec3 section; uint primitive; vec2 uv; uint sampled; ivec2 atlasSize; vec2 quadSpan; uint mode; int levels; vec4 baseTint; vec4 overlayTint; vec4 sampleColor; vec2 baseUv; uint overlayState; uint face; };
 layout(location=0) rayPayloadInEXT Hit hit;
 hitAttributeEXT vec2 barycentric;
-struct Material { uvec4 addressLayout; uvec4 attributes; ivec4 section; };
+struct Material { uvec4 addressLayout; uvec4 attributes; ivec4 section; uvec4 overlay; uvec4 mapping; };
 layout(set=0,binding=2,std430) readonly buffer Materials { Material rows[]; } materials;
 layout(set=0,binding=3) uniform sampler2D blockAtlas;
 layout(buffer_reference,std430,buffer_reference_align=4) readonly buffer Vertices { uint words[]; };
@@ -17,6 +17,15 @@ vec2 uvAt(Vertices vertices, Material m, uint index) {
 }
 vec4 colorAt(Vertices vertices, Material m, uint index) {
     return unpackUnorm4x8(vertices.words[index*m.addressLayout.z+m.attributes.x]);
+}
+vec4 sampleAtlas(vec2 uv,uint mode) {
+    ivec2 size=textureSize(blockAtlas,0);
+    ivec2 texel=clamp(ivec2(floor(clamp(uv,vec2(0),vec2(1))*vec2(size))),ivec2(0),size-ivec2(1));
+    return mode==0u ? texelFetch(blockAtlas,texel,0) : textureLod(blockAtlas,uv,0.0);
+}
+vec3 positionAt(Vertices vertices,Material m,uint index) {
+    uint b=index*m.addressLayout.z+m.mapping.w;
+    return vec3(uintBitsToFloat(vertices.words[b]),uintBitsToFloat(vertices.words[b+1u]),uintBitsToFloat(vertices.words[b+2u]));
 }
 void main() {
     // gl_InstanceID is the TLAS input row, independent of unchanged customIndex/SBT offsets.
@@ -44,10 +53,36 @@ void main() {
     if (any(isnan(hit.uv)) || any(isinf(hit.uv)) || any(lessThanEqual(hit.atlasSize,ivec2(0)))) return;
     ivec2 texel=clamp(ivec2(floor(clamp(hit.uv,0.0,1.0)*vec2(hit.atlasSize))),ivec2(0),hit.atlasSize-1);
     vec4 albedo=hit.mode==1u ? textureLod(blockAtlas,hit.uv,0.0) : texelFetch(blockAtlas,texel,0);
+    hit.baseTint=color; hit.overlayTint=vec4(0); hit.baseUv=hit.uv; hit.overlayState=0u;
+    if(any(notEqual(m.mapping.xy,uvec2(0)))) {
+        Vertices mapping=Vertices(m.mapping.xy);
+        uint mapped=mapping.words[base];
+        if(mapped==0xfffffffeu) hit.overlayState=3u;
+        else if(mapped!=0xffffffffu) {
+            Vertices overlay=Vertices(m.overlay.xy);
+            Material om=m; om.addressLayout.zw=m.overlay.zw; om.attributes.x=m.mapping.z;
+            uint oi0=mapping.words[indices.x],oi1=mapping.words[indices.y],oi2=mapping.words[indices.z];
+            vec2 overlayUv=uvAt(overlay,om,oi0)*w.x+uvAt(overlay,om,oi1)*w.y+uvAt(overlay,om,oi2)*w.z;
+            vec4 overlayColor=colorAt(overlay,om,oi0)*w.x+colorAt(overlay,om,oi1)*w.y+colorAt(overlay,om,oi2)*w.z;
+            if(!any(isnan(overlayUv)) && !any(isinf(overlayUv))) {
+                vec4 overlaySample=sampleAtlas(overlayUv,hit.mode);
+                hit.overlayTint=overlayColor; hit.overlayState=1u;
+                // Vanilla CUTOUT_TERRAIN: sample * Color alpha, cutoff .5; overwrite, NOT blend.
+                if(overlaySample.a*overlayColor.a>=0.5) {
+                    hit.uv=overlayUv; color=overlayColor; albedo=overlaySample; hit.overlayState=2u;
+                }
+            }
+        }
+    }
+    hit.sampleColor=albedo;
     hit.color=albedo.rgb*color.rgb;
     hit.sampled=1u;
     // Extra UV reads/queries ONLY for the optional single center-ray probe, never every image ray.
     if (all(equal(gl_LaunchSizeEXT.xy,uvec2(1)))) {
+        vec3 normal=cross(positionAt(vertices,m,indices.y)-positionAt(vertices,m,indices.x),positionAt(vertices,m,indices.z)-positionAt(vertices,m,indices.x));
+        if(dot(normal,gl_ObjectRayDirectionEXT)>0.0) normal=-normal;
+        vec3 axis=abs(normal);
+        hit.face=axis.y>=axis.x && axis.y>=axis.z ? (normal.y>=0.0?1u:0u) : axis.x>=axis.z ? (normal.x>=0.0?5u:4u) : (normal.z>=0.0?3u:2u);
         vec2 a=uvAt(vertices,m,base), b=uvAt(vertices,m,base+1u);
         vec2 c=uvAt(vertices,m,base+2u), d=uvAt(vertices,m,base+3u);
         hit.quadSpan=(max(max(a,b),max(c,d))-min(min(a,b),min(c,d)))*vec2(hit.atlasSize);

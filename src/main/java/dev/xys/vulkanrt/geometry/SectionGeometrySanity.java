@@ -10,23 +10,27 @@ import net.minecraft.client.renderer.chunk.*;
 public final class SectionGeometrySanity {
     public enum Failure {
         OK, SECTION_NOT_FOUND, SECTION_NODE_CHANGED, MESH_NOT_ACCEPTED, UNCOMPILED_MESH, EMPTY_MESH,
-        SOLID_DRAW_MISSING, VERTEX_UPLOAD_PENDING, INDEX_UPLOAD_PENDING, SLICE_MISSING,
+        SOLID_DRAW_MISSING, LAYER_DRAW_MISSING, VERTEX_UPLOAD_PENDING, INDEX_UPLOAD_PENDING, SLICE_MISSING,
         NOT_VULKAN_BUFFER, CUSTOM_INDICES_UNSUPPORTED, INVALID_INDEX_COUNT, POSITION_FORMAT_UNSUPPORTED,
         INVALID_VERTEX_LAYOUT, VERTEX_RANGE_EMPTY, SECTION_TOO_LARGE, ZERO_BUFFER_HANDLE,
         BUFFER_CLOSED, COPY_SRC_MISSING, MISALIGNED_OFFSET, RANGE_OUT_OF_BOUNDS
     }
     public static Failure inspect(SectionRenderDispatcher.RenderSection section, long expectedNode, SectionMesh mesh,
                                   SectionRenderDispatcher.RenderSectionBufferSlice slice, VertexFormat format) {
+        return inspect(section,expectedNode,mesh,slice,format,ChunkSectionLayer.SOLID);
+    }
+    public static Failure inspect(SectionRenderDispatcher.RenderSection section, long expectedNode, SectionMesh mesh,
+                                  SectionRenderDispatcher.RenderSectionBufferSlice slice, VertexFormat format, ChunkSectionLayer layer) {
         if (section == null) return Failure.SECTION_NOT_FOUND;
         if (section.getSectionNode() != expectedNode) return Failure.SECTION_NODE_CHANGED;
         if (mesh == null || section.getSectionMesh() != mesh) return Failure.MESH_NOT_ACCEPTED;
         if (mesh == CompiledSectionMesh.UNCOMPILED) return Failure.UNCOMPILED_MESH;
         if (mesh == CompiledSectionMesh.EMPTY) return Failure.EMPTY_MESH;
-        var draw = mesh.getSectionDraw(ChunkSectionLayer.SOLID);
-        if (draw == null) return Failure.SOLID_DRAW_MISSING;
+        var draw = mesh.getSectionDraw(layer);
+        if (draw == null) return layer == ChunkSectionLayer.SOLID ? Failure.SOLID_DRAW_MISSING : Failure.LAYER_DRAW_MISSING;
         if (mesh instanceof CompiledSectionMesh compiled) {
-            if (!compiled.isVertexBufferUploaded(ChunkSectionLayer.SOLID)) return Failure.VERTEX_UPLOAD_PENDING;
-            if (!compiled.isIndexBufferUploaded(ChunkSectionLayer.SOLID)) return Failure.INDEX_UPLOAD_PENDING;
+            if (!compiled.isVertexBufferUploaded(layer)) return Failure.VERTEX_UPLOAD_PENDING;
+            if (!compiled.isIndexBufferUploaded(layer)) return Failure.INDEX_UPLOAD_PENDING;
         }
         if (slice == null) return Failure.SLICE_MISSING;
         if (!(slice.vertexBuffer() instanceof VulkanGpuBuffer buffer)) return Failure.NOT_VULKAN_BUFFER;

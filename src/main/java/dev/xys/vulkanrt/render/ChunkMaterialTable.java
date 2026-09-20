@@ -10,8 +10,10 @@ import static org.lwjgl.vulkan.VK10.VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
 /** Immutable rows in exactly the TLAS input order (gl_InstanceID, not custom index/SBT offset).
  * Only CPU-known addresses/layout/section metadata are uploaded. Vertex bytes stay on the GPU. */
 public final class ChunkMaterialTable implements AutoCloseable {
-    public static final int ROW_BYTES = 48;
-    public record Entry(long section, long vertexAddress, SectionGeometryLayout layout) {}
+    public static final int ROW_BYTES = 80;
+    public record Entry(long section, long vertexAddress, SectionGeometryLayout layout, CoplanarOverlayMapper.Overlay overlay) {
+        public Entry(long section,long vertexAddress,SectionGeometryLayout layout) { this(section,vertexAddress,layout,null); }
+    }
     public final GpuBuffer buffer;
     public final int count;
     private static String lastLayout;
@@ -52,6 +54,11 @@ public final class ChunkMaterialTable implements AutoCloseable {
         bytes.putInt(offset+16,color).putInt(offset+20,layout.vertexCount()).putInt(offset+24,layout.triangles()).putInt(offset+28,sampling.shaderId);
         bytes.putInt(offset+32,SectionPos.x(entry.section())).putInt(offset+36,SectionPos.y(entry.section()))
                 .putInt(offset+40,SectionPos.z(entry.section())).putInt(offset+44,0);
+        var overlay=entry.overlay();
+        bytes.putLong(offset+48,overlay==null?0:overlay.vertices.address());
+        bytes.putInt(offset+56,overlay==null?0:overlay.format.stride()/4).putInt(offset+60,overlay==null?0:attribute(overlay.format,"UV0","RG32_FLOAT",8));
+        bytes.putLong(offset+64,overlay==null?0:overlay.matches.address());
+        bytes.putInt(offset+72,overlay==null?0:attribute(overlay.format,"Color","RGBA8_UNORM",4)).putInt(offset+76,layout.positionOffset()/4);
     }
     @Override public void close() { buffer.close(); }
 }
