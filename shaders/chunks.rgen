@@ -260,7 +260,7 @@ int text(int row,int col) {
  }
  if(row==38) { const int label[6]=int[](76,73,71,72,84,61);if(col<6) return label[col];return yesNo(probe.shadowStats.z!=0u,col-6); }
  if(row==39) { const int label[7]=int[](83,72,65,68,79,87,61);if(col<7) return label[col];
-    const int names[16]=int[](79,80,69,78,32,32,66,76,79,75,69,68,32,32,32);
+    const int names[16]=int[](79,80,69,78,32,32,66,76,79,75,69,68,32,32,32,32);
     return col<15?names[(probe.shadowStats.y!=0u?1:0)*8+col-7]:32;
  }
  if(row==40) { const int label[7]=int[](83,45,68,82,79,80,61);if(col<7) return label[col];return col<16?digit(probe.shadowReasons.x,col-7,9):32; }
@@ -299,20 +299,10 @@ int entityText(int row,int col) {
  if(row==19) { const int t[12]=int[](70,65,76,76,73,78,71,32,72,73,84,61);if(col<12) return t[col];return yesNo(entityHud.rows[probe.entity.x].state.y!=0,col-12); }
  return 32;
 }
-const vec3 SUN_TO_SURFACE = normalize(vec3(-0.45, 0.82, -0.35));
+const vec3 SUN_TO_SURFACE = vec3(-0.45, 0.82, -0.35);
 const float SHADOW_OFFSET = 0.002;
 const float SHADOW_TMIN = 0.002;
 const float SHADOW_TMAX = 4096.0;
-bool traceSunShadow(vec3 position, vec3 normal, inout uvec4 stats, inout uvec4 reasons) {
-    float nDotL=max(dot(normal,SUN_TO_SURFACE),0.0);
-    if(nDotL<=0.0) return false;
-    shadow.enabled=1u; shadow.blocked=0u; shadow.discarded=0u; shadow.translucentSkipped=0u;
-    traceRayEXT(scene,gl_RayFlagsNoneEXT,0xff,0,0,0,position+normal*SHADOW_OFFSET,SHADOW_TMIN,SUN_TO_SURFACE,SHADOW_TMIN,SHADOW_TMAX,1);
-    stats.x++; if(shadow.blocked!=0u) stats.y++; else stats.z++; stats.w++;
-    reasons.x+=shadow.discarded; reasons.y+=shadow.translucentSkipped;
-    shadow.enabled=0u;
-    return shadow.blocked==0u;
-}
 void main() {
     bool probePass=(camera.frame.w&1u)!=0u;
     ivec2 pixel=ivec2(gl_LaunchIDEXT.xy);
@@ -361,8 +351,18 @@ void main() {
         if(probePass && probe.entity.x==0xffffffffu && hit.entityRecord!=0xffffffffu)
             probe.entity=uvec4(hit.entityRecord,hit.sampled,hit.layer,hit.primitive);
         bool lit=false;
-        if(hit.found!=0u && hit.sampled!=0u) lit=traceSunShadow(hit.position,normalize(hit.normal),shadowStats,shadowReasons);
-        float diffuse=max(dot(normalize(hit.normal),SUN_TO_SURFACE),0.0);
+        vec3 lightDirection=normalize(SUN_TO_SURFACE);
+        if(hit.found!=0u && hit.sampled!=0u) {
+            float nDotL=max(dot(normalize(hit.normal),lightDirection),0.0);
+            if(nDotL>0.0) {
+                shadow.enabled=1u; shadow.blocked=0u; shadow.discarded=0u; shadow.translucentSkipped=0u;
+                traceRayEXT(scene,gl_RayFlagsNoneEXT,0xff,0,0,0,hit.position+normalize(hit.normal)*SHADOW_OFFSET,SHADOW_TMIN,lightDirection,SHADOW_TMAX,1);
+                shadowStats.x++; if(shadow.blocked!=0u) shadowStats.y++; else shadowStats.z++; shadowStats.w++;
+                shadowReasons.x+=shadow.discarded; shadowReasons.y+=shadow.translucentSkipped;
+                lit=shadow.blocked==0u; shadow.enabled=0u;
+            }
+        }
+        float diffuse=max(dot(normalize(hit.normal),lightDirection),0.0);
         vec3 shaded=hit.color*(0.22+(lit?0.78*diffuse:0.0));
         if(hit.found==0u || hit.layer!=2u) {
             composed+=remaining*shaded;terminal=hit.found;break;
