@@ -79,6 +79,7 @@ final class ShaderResourcesTest {
         }
         assertTrue(offsets.values().stream().anyMatch(m->m.size()==20 && java.util.stream.IntStream.range(0,20).allMatch(i->java.util.Objects.equals(m.get(i),i*16))));
         assertEquals(320,ChunkTextureSampling.PROBE_BYTES);
+        assertEquals(160,RayTracingPipeline.PUSH_BYTES);
     }
     @Test void entityGpuUnposeHasNoDescriptorsAndHudHeaderMatchesJava() throws Exception {
         var words=shader("entity-local.comp");var caps=new HashSet<Integer>();
