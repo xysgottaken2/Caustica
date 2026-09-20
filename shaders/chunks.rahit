@@ -2,7 +2,7 @@
 #extension GL_EXT_ray_tracing : require
 #extension GL_EXT_buffer_reference2 : require
 #extension GL_EXT_buffer_reference_uvec2 : require
-struct Hit { vec3 color; uint found; ivec3 section; uint primitive; vec2 uv; uint sampled; ivec2 atlasSize; vec2 quadSpan; uint mode; int levels; vec4 baseTint; vec4 overlayTint; vec4 sampleColor; vec2 baseUv; uint overlayState; uint face; uint layer; uvec4 alphaStats; };
+struct Hit { vec3 color; uint found; ivec3 section; uint primitive; vec2 uv; uint sampled; ivec2 atlasSize; vec2 quadSpan; uint mode; int levels; vec4 baseTint; vec4 overlayTint; vec4 sampleColor; vec2 baseUv; uint overlayState; uint face; uint layer; uvec4 alphaStats; vec4 cutoutSample; ivec4 cutoutSection; };
 layout(location=0) rayPayloadInEXT Hit hit;
 hitAttributeEXT vec2 barycentric;
 struct Material { uvec4 addressLayout; uvec4 attributes; ivec4 section; uvec4 overlay; uvec4 mapping; };
@@ -37,15 +37,22 @@ void main() {
     }
     vec3 w=vec3(1.0-barycentric.x-barycentric.y,barycentric);
     vec2 uv=uvAt(v,m,indices.x)*w.x+uvAt(v,m,indices.y)*w.y+uvAt(v,m,indices.z)*w.z;
-    if(any(isnan(uv)) || any(isinf(uv))) { ignoreIntersectionEXT; }
     vec4 color=colorAt(v,m,indices.x)*w.x+colorAt(v,m,indices.y)*w.y+colorAt(v,m,indices.z)*w.z;
+    bool probe=all(equal(gl_LaunchSizeEXT.xy,uvec2(1)));
+    if(probe) {
+        // Last TESTED candidate in traversal order, not necessarily the closest/final hit.
+        hit.cutoutSection=ivec4(m.section.xyz,int(primitive));
+        hit.cutoutSample=vec4(uv,-1.0,color.a);
+    }
+    if(any(isnan(uv)) || any(isinf(uv))) { ignoreIntersectionEXT; }
     ivec2 size=textureSize(blockAtlas,0);
     ivec2 texel=clamp(ivec2(floor(clamp(uv,0.0,1.0)*vec2(size))),ivec2(0),size-1);
     // Same atlas view, sampling mode and LOD as the closest-hit; not a second sampler/atlas.
     vec4 sampleColor=m.attributes.w==1u ? textureLod(blockAtlas,uv,0.0) : texelFetch(blockAtlas,texel,0);
     float alpha=sampleColor.a*color.a;
     bool discardAlpha=isnan(alpha) || isinf(alpha) || alpha<0.5;
-    if(all(equal(gl_LaunchSizeEXT.xy,uvec2(1)))) {
+    if(probe) {
+        hit.cutoutSample.z=sampleColor.a;
         hit.alphaStats.x++;
         if(discardAlpha) hit.alphaStats.y++;
         if(!isnan(alpha) && !isinf(alpha)) {

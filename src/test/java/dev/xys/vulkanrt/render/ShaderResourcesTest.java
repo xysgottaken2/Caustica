@@ -45,7 +45,7 @@ final class ShaderResourcesTest {
         assertEquals(java.util.Set.of(2,3),bindings);
         assertTrue(rowsStride80,"Material std430 row must match Java packer");
     }
-    @Test void bothComparisonPathsSampleViewMipZeroAndDiagnosticProbeHasTenVectors() throws Exception {
+    @Test void bothComparisonPathsSampleViewMipZeroAndDiagnosticProbeHasTwelveVectors() throws Exception {
         var words=shader("chunks.rchit");
         var zeroConstants=new HashSet<Integer>();
         var lods=new java.util.ArrayList<Integer>();
@@ -73,8 +73,8 @@ final class ShaderResourcesTest {
                 offsets.computeIfAbsent(raygen.getInt(i+4),k->new java.util.HashMap<>()).put(raygen.getInt(i+8),raygen.getInt(i+16));
             i+=count*4;
         }
-        assertTrue(offsets.values().stream().anyMatch(m->m.equals(java.util.Map.of(0,0,1,16,2,32,3,48,4,64,5,80,6,96,7,112,8,128,9,144))));
-        assertEquals(160,ChunkTextureSampling.PROBE_BYTES);
+        assertTrue(offsets.values().stream().anyMatch(m->m.size()==12 && java.util.stream.IntStream.range(0,12).allMatch(i->java.util.Objects.equals(m.get(i),i*16))));
+        assertEquals(192,ChunkTextureSampling.PROBE_BYTES);
     }
     @Test void overlayComputeIsOfflineCompiledWithBoundedInterfaceAndNoExtraDescriptors() throws Exception {
         var words=shader("overlay.comp");
