@@ -63,7 +63,7 @@ public final class ChunkMaterialTable implements AutoCloseable {
         bytes.putInt(offset+16,color).putInt(offset+20,layout.vertexCount()).putInt(offset+24,layout.triangles()).putInt(offset+28,sampling.shaderId);
         bytes.putInt(offset+32,SectionPos.x(entry.section())).putInt(offset+36,SectionPos.y(entry.section()))
                 .putInt(offset+40,SectionPos.z(entry.section())).putInt(offset+44,entry.flags());
-        if((entry.flags()&TRANSLUCENT)!=0 && (entry.flags()&(ENTITY|PARTICLE))==0 && (entry.indexAddress()==0 || (entry.indexAddress()&3)!=0 || (entry.indexBytes()!=2 && entry.indexBytes()!=4)))
+        if((entry.flags()&TRANSLUCENT)!=0 && (entry.flags()&(ENTITY|PARTICLE|VIEWMODEL))==0 && (entry.indexAddress()==0 || (entry.indexAddress()&3)!=0 || (entry.indexBytes()!=2 && entry.indexBytes()!=4)))
             throw new IllegalArgumentException("Missing/invalid TRANSLUCENT index snapshot");
         bytes.putLong(offset+80,entry.indexAddress()).putInt(offset+88,entry.indexBytes()).putInt(offset+92,entry.indexAddress()==0?0:layout.indexCount());
         for(int i=96;i<ROW_BYTES;i+=4) bytes.putInt(offset+i,0);
