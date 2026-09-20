@@ -112,7 +112,8 @@ public final class WorldGeometryManager implements AutoCloseable {
 
     /** No extra GPU command buffer, copies or AS work for an unchanged set, even if draw order changes. */
     public Prepared reuseUnchangedDraws(LevelRenderer level, double x, double y, double z) {
-        if (!TerrainDrawCapture.ready(level, level.sectionRenderDispatcher()) || (residents.isEmpty() && cutoutResidents.isEmpty() && translucentResidents.isEmpty())) return null;
+        // Empty terrain is also reusable: entity-only views need no empty terrain command batch.
+        if (!TerrainDrawCapture.ready(level, level.sectionRenderDispatcher())) return null;
         var draws = TerrainDrawCapture.draws();
         var nextAnchor = ChunkCoordinates.Anchor.near(x,y,z);
         if (draws.size() != residents.size() || TerrainDrawCapture.cutoutDraws().size()!=cutoutResidents.size() || TerrainDrawCapture.translucentDraws().size()!=translucentResidents.size() || !nextAnchor.equals(anchor)) return null;
