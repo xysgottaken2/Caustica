@@ -91,7 +91,7 @@ net/minecraft/client/renderer/state/WindowRenderState	F	height	I
 
 # Coplanar overlay compute uses the SAME vanilla graphics queue; CPU tint probe only observes prepared quads.
 com/mojang/renderpearl/backend/vulkan/VulkanQueue	M	queueFamilyIndex	()I
-net/minecraft/client/renderer/block/ModelBlockRenderer	M	putQuadWithTint	(Lnet/minecraft/client/renderer/block/BlockQuadOutput;FFFLnet/minecraft/world/level/BlockAndTintGetter;Lnet/minecraft/world/level/block/state/BlockState;Lnet/minecraft/core/BlockPos;Lnet/minecraft/client/resources/model/geometry/BakedQuad;)V
+net/minecraft/client/renderer/block/ModelBlockRenderer	M	putQuadWithTint	(Lnet/minecraft/client/renderer/block/BlockQuadOutput;FFFLnet/minecraft/client/renderer/block/BlockAndTintGetter;Lnet/minecraft/world/level/block/state/BlockState;Lnet/minecraft/core/BlockPos;Lnet/minecraft/client/resources/model/geometry/BakedQuad;)V
 net/minecraft/client/renderer/block/ModelBlockRenderer	F	tintCacheValue	I
 net/minecraft/client/renderer/block/ModelBlockRenderer	F	quadInstance	Lcom/mojang/blaze3d/vertex/QuadInstance;
 net/minecraft/client/renderer/block/BlockQuadOutput	M	put	(FFFLnet/minecraft/client/resources/model/geometry/BakedQuad;Lcom/mojang/blaze3d/vertex/QuadInstance;)V
