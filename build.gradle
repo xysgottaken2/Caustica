@@ -52,6 +52,8 @@ dependencies {
     testImplementation platform('org.junit:junit-bom:5.14.4')
     testImplementation 'org.junit.jupiter:junit-jupiter'
     testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+    // Native struct-layout tests use LWJGL core memory allocation, not a GPU/Vulkan loader.
+    testRuntimeOnly "org.lwjgl:lwjgl:3.4.3:${lwjglNatives}"
 }
 
 java {
@@ -152,6 +154,9 @@ tasks.register('verifyModJar') {
     }
 }
 
-test { useJUnitPlatform() }
+test {
+    useJUnitPlatform()
+    jvmArgs '--enable-native-access=ALL-UNNAMED'
+}
 check { dependsOn tasks.named('verifyMinecraftAbi'), tasks.named('verifyModJar') }
 tasks.named('runClient') { dependsOn tasks.named('verifyMinecraftAbi') }

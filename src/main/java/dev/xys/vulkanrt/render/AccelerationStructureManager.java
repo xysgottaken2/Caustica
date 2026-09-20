@@ -4,7 +4,6 @@ import org.lwjgl.system.MemoryStack;
 import org.lwjgl.system.MemoryUtil;
 import org.lwjgl.vulkan.*;
 import java.nio.ByteBuffer;
-import java.nio.ByteOrder;
 import java.util.List;
 
 import static org.lwjgl.vulkan.VK10.*;
@@ -116,17 +115,35 @@ public final class AccelerationStructureManager {
         } finally { MemoryUtil.memFree(bytes); }
     }
 
+    /** The same descriptor is used for BOTH size query and build/update recording.
+     * LWJGL 3.4.3 pGeometries sets only the pointer: geometryCount is NOT inferred,
+     * because Vulkan also permits ppGeometries. Leaving the calloc default of zero
+     * constructs an empty AS and causes the triangle diagnostic to return only misses. */
+    static VkAccelerationStructureBuildGeometryInfoKHR.Buffer singleGeometryBuildInfo(
+            MemoryStack stack, VkAccelerationStructureGeometryKHR.Buffer geometry,
+            int type, boolean update, boolean allowUpdate) {
+        if (geometry.remaining() != 1)
+            throw new IllegalArgumentException("This builder supplies exactly one geometry and one build range");
+        if (update && !allowUpdate) throw new IllegalArgumentException("UPDATE requires ALLOW_UPDATE");
+        return VkAccelerationStructureBuildGeometryInfoKHR.calloc(1, stack).sType$Default().type(type)
+                .flags(VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR
+                        | (allowUpdate ? VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_UPDATE_BIT_KHR : 0))
+                .mode(update ? VK_BUILD_ACCELERATION_STRUCTURE_MODE_UPDATE_KHR : VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR)
+                .geometryCount(geometry.remaining()).pGeometries(geometry);
+    }
+
     private Structure allocateAndBuild(CommandBatch batch, VkAccelerationStructureGeometryKHR.Buffer geometry,
                                        int type, int primitives, Structure existing, boolean allowUpdate) {
         Structure result = existing;
         GpuBuffer storage = null;
         long createdHandle = 0;
         try (MemoryStack stack = MemoryStack.stackPush()) {
-            var info = VkAccelerationStructureBuildGeometryInfoKHR.calloc(1, stack).sType$Default().type(type)
-                    .flags(VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR | (allowUpdate ? VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_UPDATE_BIT_KHR : 0))
-                    .mode(existing == null ? VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR : VK_BUILD_ACCELERATION_STRUCTURE_MODE_UPDATE_KHR)
-                    .pGeometries(geometry);
+            var info = singleGeometryBuildInfo(stack, geometry, type, existing != null, allowUpdate);
             var sizes = VkAccelerationStructureBuildSizesInfoKHR.calloc(stack).sType$Default();
+            if (!RtOptions.CHUNKS) org.slf4j.LoggerFactory.getLogger("native_vulkan_rt").info(
+                    "[RT] {} build input: geometryCount={}, primitiveCount={}, mode={}",
+                    type == VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR ? "BLAS" : "TLAS",
+                    info.geometryCount(), primitives, existing == null ? "BUILD" : "UPDATE");
             vkGetAccelerationStructureBuildSizesKHR(context.device(), VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR,
                     info.get(0), stack.ints(primitives), sizes);
             if (result == null) {
