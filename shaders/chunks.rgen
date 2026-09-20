@@ -249,9 +249,9 @@ int text(int row,int col) {
     const int label[8]=int[](84,65,67,84,73,79,78,61);if(col<8) return label[col];
     // Action for the displayed TRANSLUCENT sample, never an assertion based on CPU enqueue.
     // NONE / DROP / TESTED (candidate only) / CONTINUE / STOP (alpha1).
-    int action=probe.transState.z==1u ? (probe.transBlend.x<1.0?3:4)
+    int action=probe.transState.z==1u ? int(probe.transBlend.w)
         : probe.transSample.z<0.0 ? 0 : probe.transSample.z*probe.transSample.w<0.1 ? 1 : 2;
-    const int names[40]=int[](78,79,78,69,32,32,32,32,68,82,79,80,32,32,32,32,84,69,83,84,69,68,32,32,67,79,78,84,73,78,85,69,83,84,79,80,32,32,32,32);
+    const int names[48]=int[](78,79,78,69,32,32,32,32,68,82,79,80,32,32,32,32,84,69,83,84,69,68,32,32,67,79,78,84,73,78,85,69,83,84,79,80,32,32,32,32,76,73,77,73,84,32,32,32);
     return col<16?names[action*8+col-8]:32;
  }
  return 32;
@@ -287,7 +287,7 @@ void main() {
     }
     // Ordered closest-hit continuation, never unordered any-hit blending or recursive trace calls.
     vec3 composed=vec3(0);float remaining=1.0,nextT=0.001,firstAlpha=-1.0;
-    uint layers=0u,overflow=0u,terminal=0u;
+    uint layers=0u,overflow=0u,terminal=0u,firstAction=0u;
     for(uint step=0u;step<64u;step++) {
         if(hit.found==0u || hit.layer!=2u) {
             composed+=remaining*hit.color;terminal=hit.found;break;
@@ -298,11 +298,11 @@ void main() {
         }
         composed+=remaining*hit.alpha*hit.color;
         remaining*=1.0-hit.alpha; layers++;
-        if(remaining==0.0) { terminal=2u;break; }
+        if(remaining==0.0) { terminal=2u;if(layers==1u) firstAction=4u;break; }
         // Same origin/direction and absolute t throughout: one positive-float ULP, NOT a world-space
         // epsilon that skips thin panes. The previous triangle is additionally rejected in any-hit.
         nextT=uintBitsToFloat(floatBitsToUint(hit.distance)+1u);
-        if(nextT>=4096.0) { composed+=remaining*vec3(0.018,0.025,0.045);terminal=3u;break; }
+        if(nextT>=4096.0) { composed+=remaining*vec3(0.018,0.025,0.045);terminal=3u;if(layers==1u) firstAction=5u;break; }
         if(step==63u) {
             // With vanilla alpha>=.1, residual weight is <=.9^64 (~.00118). Bound work and retain
             // the opaque/CUTOUT background rather than making overflow a black/opaque surface.
@@ -311,6 +311,7 @@ void main() {
             composed+=remaining*hit.color;terminal=hit.found;break;
         }
         traceRayEXT(scene,gl_RayFlagsNoneEXT,0xff,0,0,0,camera.origin.xyz,nextT,direction,4096.0,0);
+        if(layers==1u) firstAction=3u; // actual continuation returned, not inferred from alpha alone
     }
     if(probePass) {
         probe.color=vec4(composed,1);
@@ -318,6 +319,6 @@ void main() {
         probe.transStats=hit.transStats;
         if(layers==0u) { probe.transSample=hit.transSample;probe.transSection=hit.transSection; }
         probe.transState=uvec4(layers,overflow,layers>0u?1u:0u,terminal);
-        probe.transBlend=vec4(firstAlpha,remaining,nextT,0);
+        probe.transBlend=vec4(firstAlpha,remaining,nextT,float(firstAction));
     } else imageStore(outputImage,pixel,vec4(composed,1));
 }
