@@ -26,6 +26,7 @@ com/mojang/renderpearl/backend/vulkan/VulkanGpuSurface	M	present	()V
 com/mojang/renderpearl/frontend/FrontendGpuDevice	F	backend	Lcom/mojang/renderpearl/backend/api/GpuDeviceBackend;
 net/minecraft/client/renderer/GameRenderer	M	render	()V
 net/minecraft/client/renderer/GameRenderer	M	renderLevel	()V
+net/minecraft/client/renderer/GameRenderer	M	renderItemInHand	(Lnet/minecraft/client/renderer/state/level/CameraRenderState;Lnet/minecraft/client/renderer/state/level/PlayerRenderState;Lcom/mojang/renderpearl/api/textures/GpuTextureView;)V
 net/minecraft/client/renderer/GameRenderer	M	mainRenderTarget	()Lcom/mojang/blaze3d/pipeline/RenderTarget;
 net/minecraft/client/renderer/LevelRenderer	M	render	(Lcom/mojang/blaze3d/resource/GraphicsResourceAllocator;ZLnet/minecraft/client/renderer/state/level/CameraRenderState;Lcom/mojang/renderpearl/api/buffers/GpuBufferSlice;Lorg/joml/Vector4f;ZZ)V
 net/minecraft/client/renderer/chunk/SectionRenderDispatcher	M	uploadTerrainBuffersToGpu	()V
@@ -140,6 +141,7 @@ net/minecraft/client/renderer/entity/EntityRenderer	M	extractRenderState	(Lnet/m
 net/minecraft/client/renderer/entity/EntityRenderDispatcher	M	submit	(Lnet/minecraft/client/renderer/entity/state/EntityRenderState;Lnet/minecraft/client/renderer/state/level/CameraRenderState;DDDLcom/mojang/blaze3d/vertex/PoseStack;Lnet/minecraft/client/renderer/SubmitNodeCollector;)V
 net/minecraft/client/model/geom/ModelPart	M	compile	(Lcom/mojang/blaze3d/vertex/PoseStack$Pose;Lcom/mojang/blaze3d/vertex/VertexConsumer;III)V
 net/minecraft/client/model/geom/ModelPart	F	cubes	Ljava/util/List;
+net/minecraft/client/renderer/FirstPersonHandsAndItemsRenderer	M	submitHandsWithItems	(FLcom/mojang/blaze3d/vertex/PoseStack;Lnet/minecraft/client/renderer/SubmitNodeCollector;Lnet/minecraft/client/renderer/state/level/PlayerRenderState;Lnet/minecraft/client/renderer/state/level/FirstPersonHandsAndItemsRenderState;)V
 net/minecraft/client/renderer/feature/ModelFeatureRenderer	M	prepareModel	(Lnet/minecraft/client/renderer/feature/ModelFeatureRenderer$Submit;)V
 net/minecraft/client/renderer/feature/ItemFeatureRenderer	M	prepareSubmit	(Lnet/minecraft/client/renderer/feature/ItemFeatureRenderer$Submit;)V
 net/minecraft/client/renderer/feature/ItemFeatureRenderer	M	prepareMainSubmit	(Lnet/minecraft/client/renderer/feature/ItemFeatureRenderer$Submit;)V

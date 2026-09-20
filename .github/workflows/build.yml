@@ -131,9 +131,23 @@ jobs:
         run: |
           set -o pipefail
           ./gradlew --no-daemon assemble verifyMinecraftAbi verifyModJar 2>&1 | tee build-output-windows.log
+      - name: Locate the Windows mod JAR (exclude sources and javadoc)
+        id: windows_jar
+        run: |
+          python3 - <<'PYTHON'
+          import os
+          from pathlib import Path
+          jars = sorted(p for p in Path('build/libs').glob('native-vulkan-rt-*.jar')
+                        if p.is_file() and not p.name.endswith(('-sources.jar', '-javadoc.jar')))
+          if len(jars) != 1:
+              raise SystemExit(f'Expected exactly one main mod JAR, found: {jars}')
+          print(f'Windows main JAR: {jars[0]}')
+          with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as output:
+              output.write(f'path={jars[0].as_posix()}\n')
+          PYTHON
       - name: Upload Windows experimental mod (GPU runtime unverified)
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: native-vulkan-rt-experimental-windows
-          path: build/libs/native-vulkan-rt-*.jar
+          path: ${{ steps.windows_jar.outputs.path }}
           if-no-files-found: error

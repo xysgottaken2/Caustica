@@ -101,6 +101,7 @@ Os nomes abaixo foram encontrados na árvore 26.3 acima. Pacotes abreviados:
 | Terrain draw | `R.LevelRenderer.extractSectionDrawGroups`, `prepareChunkRenders`, `prepareChunkRendersIndirect`, `isChunkRenderingUsingMultiDrawIndirect` | Draw groups têm baseVertex/firstIndex/sectionInfo; não confundir draw index com section ID |
 | Entidades / block entities | `R.extract.LevelExtractor.extractVisibleEntities/extractVisibleBlockEntities`; `R.LevelRenderer.submitEntities/submitBlockEntities`; `R.feature.FeatureRenderDispatcher.prepareFrame` | Consumir estados extraídos, sem ler mundo mutável da thread de render |
 | Partículas | `R.LevelRenderer.submitFeatures` → `levelRenderState.particlesRenderState.submit`; `R.feature.QuadParticleFeatureRenderer` | Geometria dinâmica e alpha exigem tratamento separado |
+| Primeira pessoa | `R.GameRenderer.renderItemInHand(CameraRenderState,PlayerRenderState,GpuTextureView)` → `R.FirstPersonHandsAndItemsRenderer.submitHandsWithItems(float,PoseStack,SubmitNodeCollector,PlayerRenderState,FirstPersonHandsAndItemsRenderState)` → `ItemStackRenderState.submit` → `FeatureRenderDispatcher.prepareFrame/renderAllFeatures` | Passo separado `Item in hand`; não é `EntityRenderDispatcher` nem geometria mundial |
 
 ### Contrato de captura instalado nesta etapa
 
@@ -135,6 +136,55 @@ o formato, topologia, textura ou draw não coincide. Os contadores
 shader continua sendo a única fonte de hit/interseção RT, inclusive quando o
 row selecionado é uma instância de partícula no TLAS compartilhado.
 
+### Caminho de viewmodel confirmado em 26.3
+
+A fonte 26.3 fixada em `mc-dataminning/build-changes` confirma que o método
+`GameRenderer.renderItemInHand` cria o `PoseStack` da câmera, aplica
+`CameraRenderState.viewRotationMatrix`, bob de dano/visão e FOV HUD, então chama
+`FirstPersonHandsAndItemsRenderer.submitHandsWithItems`. Este último escolhe
+main hand/offhand conforme `HandRenderSelection`, preserva os
+`ItemStackRenderState` resolvidos pelo `ItemModelResolver` e submete braço,
+modelos de item e modelos especiais ao mesmo `SubmitNodeCollector`. Em seguida
+`FeatureRenderDispatcher.prepareFrame` faz o upload do `StagedVertexBuffer` e
+`renderAllFeatures` executa o render pass vanilla chamado `Item in hand`.
+
+`FirstPersonHandsAndItemsRendererMixin` registra exatamente a fronteira de
+emissão, e `ViewmodelCapture` observa builders, cópias e `PreparedRenderType.draw`
+dentro da janela de `renderItemInHand`. O snapshot preserva item principal,
+offhand, seleção de mãos, alturas de troca, rotações/bobbing e estado de
+scoping; nenhum atlas, material ou tesselação paralelo é criado. A textura e
+o material continuam sendo os objetos vanilla e o caminho de textura RT,
+quando aplicável, permanece `textureSampling=texel`.
+
+A captura permanece deliberadamente isolada: o RT do mundo é gravado antes do
+passo vanilla `Item in hand`, o viewmodel não é adicionado ao `EntityGeometryManager`,
+não vira entidade/BLAS/TLAS mundial e não é presumido como bloqueador de
+sombras. O resultado mostrado pelos receipts de `ViewmodelCapture` é CPU/
+enqueue/draw vanilla, não um hit GPU; a composição visual final das mãos e
+itens continua sendo feita pelo pass vanilla. Isso evita gerar sombra mundial
+sem uma confirmação de integração do comportamento vanilla, preservando FOV,
+transformações, animações, escala, UV, Color, alpha e texturas especiais.
+
+### Sombras por ray tracing
+
+Depois de cada hit primário válido, `chunks.rgen` calcula uma fonte direcional
+fixa equivalente ao Sol e lança um segundo `traceRayEXT` contra o **mesmo**
+`scene`/TLAS, com offset normal de `0.002` e `rayTMin=0.002`. O payload
+secundário usa `terminateRayEXT` no primeiro bloqueador aceito: SOLID bloqueia
+no closest-hit mesmo quando o BLAS é opaco; CUTOUT passa pelo any-hit existente,
+usa a mesma amostra de atlas/cor e mantém `discard`/alpha test antes de bloquear;
+entidades podem bloquear pelo mesmo caminho. O resultado aplica apenas
+iluminação direta e hard shadow, sem GI, bounce, caustics ou soft shadow.
+
+TRANSLUCENT não é convertido silenciosamente em opaco: o any-hit do shadow ray
+ignora a camada translúcida e conta esse motivo. A composição translúcida já
+existente continua no raygen; composição completa de transparência para sombras
+fica explicitamente fora deste marco. No probe GPU opcional, `shadowStats`
+registra rays lançados/bloqueados/livres/superfícies sombreadas e
+`shadowReasons` registra candidatos CUTOUT descartados e camadas translúcidas
+ignoradas. O HUD `LIGHT`/`SHADOW` só é escrito após essa execução GPU do
+center-ray; diagnósticos CPU não são promovidos a hit RT.
+
 | Transparência | `R.LevelRenderer.prepareTranslucents/executeOit/executeClassicTransparency/executeOitWaterMask` | Não substituir OIT por simples alpha no closest-hit |
 | Sky / fog | `R.SkyRenderer.extractRenderState/render`; `R.fog.FogRenderer.updateBuffer/getBuffer`; `CameraRenderState.fogData` | Consumir ambiente por dimensão, não fixar sol Overworld |
 | Pós-processamento | `R.GameRenderer.preparePostEffects/applyPostEffects`; `R.PostChain.process/addToFrame` | Efeitos podem exigir depth consistente |
@@ -143,7 +193,7 @@ row selecionado é uma instância de partícula no TLAS compartilhado.
 | Apresentação | `Minecraft.renderFrame(boolean)` → blit do main target → encoder `submit()` → surface `present()` | Compor no target antes da apresentação vanilla |
 | Janela / resize / fullscreen | `com.mojang.blaze3d.platform.Window.handleEvent(SDL_Event)`, `queryFramebufferSize`, `updateFullscreenIfChanged` | Não criar outra janela nem superfície |
 
-O contrato `minecraft-26.3-abi.tsv` seleciona **33 assinaturas críticas**, não
+O contrato `minecraft-26.3-abi.tsv` seleciona **35 assinaturas críticas**, não
 todo esse mapa. Verifica existência e descritor; não garante semântica,
 visibilidade adequada, locals de Mixin ou ordem de execução.
 
@@ -183,10 +233,12 @@ locations do raster e locations dos ray payloads não são a mesma interface.
 ## 5. Decisão de avanço
 
 A infraestrutura de partículas agora está isolada em `ParticleCapture` e
-`ParticleGeometryManager`; não há alteração em `FallingBlockEntity`, nos caches
-de mobs/player/itens ou nos caminhos de terreno/material já aceitos. O próximo
-gate é `verifyMinecraftAbi`, compilação Java/ShaderC/SPIR-V e execução no cliente
-26.3. CI valida apenas build, ABI, testes CPU e SPIR-V; **CI não equivale a
-validação visual** de billboard, alpha, lifetime, OIT ou hit RT. A validação
-final deve executar no jogo os cenários de breaking block/item, fumaça, fogo,
-redstone, corações, dano, poção, água, lava e explosão.
+`ParticleGeometryManager`; não há alteração em `ParticleCapture`, `ParticleGeometryManager`
+ou `FallingBlockEntity` nesta etapa. Sombras compartilham o TLAS existente e o
+viewmodel permanece no pass vanilla separado, sem ser entidade ou geometria
+mundial. O gate é `verifyMinecraftAbi`, compilação Java/ShaderC/SPIR-V e
+execução no cliente 26.3. CI valida apenas build, ABI, testes CPU e SPIR-V;
+**CI não equivale a validação visual** de sombras, alpha/OIT, FOV, troca de
+item, animação, offhand, especial, transparência ou hit RT. A validação final
+deve executar no jogo esses cenários, incluindo SOLID/CUTOUT/entidades
+bloqueando e TRANSLUCENT não-opaco.

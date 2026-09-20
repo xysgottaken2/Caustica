@@ -189,7 +189,7 @@ Opcional `-Dnativevulkanrt.entityDiagnostics=true` (ou HUD compartilhado com
   seleção é o raio central, podendo encontrar entidade atrás de transparência.
   Sem hit não preenche uma entidade como se fosse vista. Labels são truncados.
 
-ABI GPU: material 144, probe 288, HUD header 64 / record 160, compute push 80 bytes.
+ABI GPU: material 144, probe 320 (including shadowStats/shadowReasons), HUD header 64 / record 160, compute push 80 bytes.
 O HUD é GPU-only: nenhum hit é lido no CPU. Sem diagnóstico, usa SSBO vazio
 persistente, sem alocar/copiar o buffer de labels a cada frame.
 

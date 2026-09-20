@@ -46,7 +46,7 @@ final class ShaderResourcesTest {
         assertEquals(java.util.Set.of(2,3,5,7),bindings);
         assertTrue(rowsStride144,"Material std430 row must match Java packer");
     }
-    @Test void bothComparisonPathsSampleViewMipZeroAndDiagnosticProbeHasEighteenVectors() throws Exception {
+    @Test void bothComparisonPathsSampleViewMipZeroAndDiagnosticProbeHasTwentyVectors() throws Exception {
         var words=shader("chunks.rchit");
         var zeroConstants=new HashSet<Integer>();
         var lods=new java.util.ArrayList<Integer>();
@@ -74,8 +74,8 @@ final class ShaderResourcesTest {
                 offsets.computeIfAbsent(raygen.getInt(i+4),k->new java.util.HashMap<>()).put(raygen.getInt(i+8),raygen.getInt(i+16));
             i+=count*4;
         }
-        assertTrue(offsets.values().stream().anyMatch(m->m.size()==18 && java.util.stream.IntStream.range(0,18).allMatch(i->java.util.Objects.equals(m.get(i),i*16))));
-        assertEquals(288,ChunkTextureSampling.PROBE_BYTES);
+        assertTrue(offsets.values().stream().anyMatch(m->m.size()==20 && java.util.stream.IntStream.range(0,20).allMatch(i->java.util.Objects.equals(m.get(i),i*16))));
+        assertEquals(320,ChunkTextureSampling.PROBE_BYTES);
     }
     @Test void entityGpuUnposeHasNoDescriptorsAndHudHeaderMatchesJava() throws Exception {
         var words=shader("entity-local.comp");var caps=new HashSet<Integer>();
@@ -160,7 +160,9 @@ final class ShaderResourcesTest {
             String value=source.substring(source.indexOf("struct Hit {"),source.indexOf("};")+2);
             if(payload==null) payload=value;else assertEquals(payload,value,stage);
             if(stage.equals("rgen")) {
-                assertTrue(source.contains("composed+=remaining*hit.alpha*hit.color"));
+                assertTrue(source.contains("composed+=remaining*hit.alpha*shaded"));
+                assertTrue(source.contains("traceSunShadow"));
+                assertTrue(source.contains("SHADOW_OFFSET"));
                 assertTrue(source.contains("remaining*=1.0-hit.alpha"));
                 assertTrue(source.contains("floatBitsToUint(hit.distance)+1u"));
                 assertTrue(source.contains("step<64u"));assertTrue(source.contains("0x01"));

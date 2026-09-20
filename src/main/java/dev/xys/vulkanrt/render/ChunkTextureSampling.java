@@ -5,7 +5,7 @@ import java.util.Locale;
 /** Restart-selected A/B modes on the SAME borrowed vanilla atlas. No sampler/texture allocation. */
 public enum ChunkTextureSampling {
     TEXEL(0), LINEAR(1);
-    public static final int PROBE_BYTES = 288; // eighteen std430 16-byte vectors in chunks.rgen
+    public static final int PROBE_BYTES = 320; // twenty std430 16-byte vectors in chunks.rgen (includes GPU shadow diagnostics)
     public final int shaderId;
     ChunkTextureSampling(int shaderId) { this.shaderId = shaderId; }
     public static ChunkTextureSampling parse(String value) {

@@ -1,7 +1,10 @@
 # Progressão RT e critérios de aceitação
 
-Nenhuma feature RT deste documento está implementada. Ordem solicitada
-preservada; não iniciar fases seguintes para esconder gates não aprovados.
+A infraestrutura RT existente já possui o trace primário de SOLID/CUTOUT/
+TRANSLUCENT/entidades no TLAS compartilhado. Nesta etapa foram adicionados
+sombras diretas hard-shadow por shadow ray serial no mesmo TLAS e uma captura
+isolada do caminho vanilla de primeira pessoa. A entrega continua experimental:
+compilação/ABI/SPIR-V não substituem validação visual dentro do jogo.
 
 | Fase | Entrega e gate |
 |---|---|
@@ -18,7 +21,7 @@ preservada; não iniciar fases seguintes para esconder gates não aprovados.
 | 10 | Uma mesh Minecraft real, preservando transformação e UV |
 | 11 | Streaming e revisões de chunks; edição/load/unload sem reconstrução global |
 | 12 | Materiais vanilla, atlas, cutout; ABI testada; resource reload seguro |
-| 13 | Sombras por rays: primeiro sol, depois fontes emissivas/block lights |
+| 13 | Sombras por rays: Sol direcional + hard shadow no TLAS compartilhado; block lights/emissivas continuam fora |
 | 14 | Reflexão de um bounce; configuração 1–4 limitada pelo shader e device |
 | 15 | GI simples com pesos/pdf corretos; nenhum ReSTIR de fachada |
 | 16 | Histórico, câmera anterior, jitter, motion vectors e validação de disocclusion |
@@ -27,6 +30,30 @@ preservada; não iniciar fases seguintes para esconder gates não aprovados.
 | 19 | Validar Overworld/Nether/End e ambientes configuráveis por dimensão |
 | 20 | Resolução interna e native upscale primeiro; FSR/XeSS/DLSS opcionais posteriores |
 | 21 | Otimização medida com timestamps GPU, memória e validação de regressão |
+
+## Sombras e primeira pessoa desta etapa
+
+`chunks.rgen` lança um shadow ray depois de cada hit de superfície iluminada,
+com direção fixa equivalente ao Sol, offset de normal e `rayTMin` positivos,
+contra o binding 0 `scene` já usado pelo trace primário. O any-hit mantém o
+alpha test/discard de CUTOUT e termina no primeiro SOLID/CUTOUT/entidade aceito.
+TRANSLUCENT é ignorado como bloqueador e essa limitação é exposta na
+instrumentação; não há shadow map, CPU tracing, readback ou segundo TLAS.
+
+`GameRenderer.renderItemInHand` foi confirmado na fonte 26.3 como uma passagem
+separada antes da composição de GUI: ele chama
+`FirstPersonHandsAndItemsRenderer.submitHandsWithItems`, que emite braços,
+main hand, offhand, itens e modelos especiais via `ItemStackRenderState` e
+`SubmitNodeCollector`, preservando transform/FOV/material vanilla. O hook de
+captura só observa o estado e os receipts do buffer/draw nessa passagem; não
+reclassifica o viewmodel como entidade, não o inclui em shadow rays e deixa o
+pass vanilla compor as mãos. Os receipts são diagnóstico CPU/enqueue, nunca
+`LIGHT`/`SHADOW`; esses labels vêm exclusivamente do probe GPU do raygen.
+
+O HUD opcional do center-ray mostra `LIGHT` e `SHADOW` a partir de
+`shadowStats` escrito pelo shader depois do shadow trace. `shadowStats` também
+separa rays lançados, bloqueados, livres e superfícies sombreadas; razões
+CUTOUT descartado e TRANSLUCENT ignorado ficam em `shadowReasons`.
 
 ## Primeiro trace: não confundir shader com feature
 

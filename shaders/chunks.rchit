@@ -3,8 +3,10 @@
 #extension GL_EXT_buffer_reference2 : require
 #extension GL_EXT_buffer_reference_uvec2 : require
 
-struct Hit { vec3 color; uint found; ivec3 section; uint primitive; vec2 uv; uint sampled; ivec2 atlasSize; vec2 quadSpan; uint mode; int levels; vec4 baseTint; vec4 overlayTint; vec4 sampleColor; vec2 baseUv; uint overlayState; uint face; uint layer; uvec4 alphaStats; vec4 cutoutSample; ivec4 cutoutSection; float distance; float alpha; uvec2 previous; uvec4 transStats; vec4 transSample; ivec4 transSection; uint entityRecord; };
+struct Hit { vec3 color; uint found; ivec3 section; uint primitive; vec2 uv; uint sampled; ivec2 atlasSize; vec2 quadSpan; uint mode; int levels; vec4 baseTint; vec4 overlayTint; vec4 sampleColor; vec2 baseUv; uint overlayState; uint face; uint layer; uvec4 alphaStats; vec4 cutoutSample; ivec4 cutoutSection; float distance; float alpha; uvec2 previous; uvec4 transStats; vec4 transSample; ivec4 transSection; uint entityRecord; vec3 position; vec3 normal; };
 layout(location=0) rayPayloadInEXT Hit hit;
+struct ShadowPayload { uint active; uint blocked; uint discarded; uint translucentSkipped; };
+layout(location=1) rayPayloadInEXT ShadowPayload shadow;
 hitAttributeEXT vec2 barycentric;
 struct Material { uvec4 addressLayout; uvec4 attributes; ivec4 section; uvec4 overlay; uvec4 mapping; uvec4 indices; uvec4 entityMeta; uvec4 entityColors; uvec4 entityInfo; };
 layout(set=0,binding=2,std430) readonly buffer Materials { Material rows[]; } materials;
@@ -121,6 +123,7 @@ uvec3 triangleIndices(Material m,uint primitive) {
     return result;
 }
 void main() {
+    if(shadow.active!=0u) { shadow.blocked=1u; terminateRayEXT; return; }
     // gl_InstanceID is the TLAS input row, independent of unchanged customIndex/SBT offsets.
     hit.entityRecord=0xffffffffu; hit.found=1u; hit.sampled=0u; hit.distance=gl_HitTEXT; hit.alpha=1.0; hit.layer=0u; hit.primitive=uint(gl_PrimitiveID);
     hit.color=vec3(1,0,1); // Invalid metadata must be visibly different from a successful atlas sample.
@@ -173,6 +176,11 @@ void main() {
     hit.previous=uvec2(uint(gl_InstanceID),uint(gl_PrimitiveID));
     hit.sampleColor=albedo;
     hit.color=albedo.rgb*color.rgb;
+    vec3 localNormal=normalize(cross(positionAt(vertices,m,indices.y)-positionAt(vertices,m,indices.x),positionAt(vertices,m,indices.z)-positionAt(vertices,m,indices.x)));
+    vec3 worldNormal=normalize(gl_ObjectToWorldEXT*vec4(localNormal,0.0));
+    if(dot(worldNormal,gl_WorldRayDirectionEXT)>0.0) worldNormal=-worldNormal;
+    hit.position=gl_WorldRayOriginEXT+gl_HitTEXT*gl_WorldRayDirectionEXT;
+    hit.normal=worldNormal;
     if(entity && m.entityInfo.x!=0xffffffffu) {
         vec4 overlayColor=entityOverlay(m.entityInfo.x,ivec2(m.entityMeta.z&65535u,m.entityMeta.z>>16u));
         hit.color=mix(overlayColor.rgb,hit.color,overlayColor.a);

@@ -196,7 +196,8 @@ public final class RayTracingPipeline implements AutoCloseable {
             var hit = VkStridedDeviceAddressRegionKHR.calloc(stack).deviceAddress(hitAddress).stride(stride).size(stride);
             var callable = VkStridedDeviceAddressRegionKHR.calloc(stack);
             if (chunks) {
-                // Includes copied vertices/table, vanilla atlas uploads/animation and prior probe readers.
+                // Includes copied vertices/table, vanilla atlas uploads/animation, prior probe readers,
+                // and the serial shadow-ray payloads launched by chunks.rgen.
                 VulkanRayTracingContext.memoryBarrier(cmd,VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT_KHR,
                         VK_ACCESS_2_MEMORY_WRITE_BIT_KHR | VK_ACCESS_2_MEMORY_READ_BIT_KHR,
                         VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR,VK_ACCESS_2_SHADER_READ_BIT_KHR | VK_ACCESS_2_SHADER_WRITE_BIT_KHR);
