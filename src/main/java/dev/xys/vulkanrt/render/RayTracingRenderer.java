@@ -63,7 +63,7 @@ public final class RayTracingRenderer {
         if (!RtOptions.ENABLED) return;
         if (!frameLogged) { frameLogged = true; LOG.info("[RT] GameRenderer.render frame hook reached"); }
         projectionCaptured = false;
-        if (RtOptions.CHUNKS) { chunkScene = null; TerrainDrawCapture.beginFrame(); TerrainAtlasCapture.beginFrame(); dev.xys.vulkanrt.geometry.EntityCapture.beginFrame(); if(entities!=null) entities.beginFrame(); }
+        if (RtOptions.CHUNKS) { chunkScene = null; TerrainDrawCapture.beginFrame(); TerrainAtlasCapture.beginFrame(); dev.xys.vulkanrt.geometry.EntityCapture.beginFrame(); if(entities!=null) entities.beginFrame(); if(world!=null) world.beginFrame(); }
         if (resetRequested) { resetRequested = false; retireScene(); }
         if (!failed) {
             if (context == null) deviceReady(); // explicit recovery path if initRenderer was already called
@@ -228,7 +228,7 @@ public final class RayTracingRenderer {
                 if (nextTlas != null) tracePending = true;
                 if (nextTlas != null && !traceLogged) {
                     traceLogged = true;
-                    LOG.info("[RT] vkCmdTraceRaysKHR + main-target blit recorded and queued; awaiting vanilla queue submission ({})", RtOptions.CHUNKS ? "opaque chunks" : "test triangle");
+                    LOG.info("[RT] vkCmdTraceRaysKHR + main-target blit recorded and queued; awaiting vanilla queue submission ({})", RtOptions.CHUNKS ? "shared terrain + entities" : "test triangle");
                 }
             }
         } catch (VulkanRayTracingContext.VulkanFailure failure) { handleFailure(failure); }

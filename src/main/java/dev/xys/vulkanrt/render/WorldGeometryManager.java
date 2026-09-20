@@ -35,7 +35,12 @@ public final class WorldGeometryManager implements AutoCloseable {
     private ChunkMaterialTable materials;
     private List<AccelerationStructureManager.Instance> lastSceneInstances=List.of();
     private List<ChunkMaterialTable.Entry> lastSceneMaterials=List.of();
-    private int pendingSolidBuilt,pendingCutoutBuilt,pendingTransBuilt,entityBlasCount;
+    private int entityBlasCount;
+    private Map<Long,Resident> frameSolid=Map.of(),frameCutout=Map.of(),frameTranslucent=Map.of();
+    public void beginFrame() { frameSolid=residents;frameCutout=cutoutResidents;frameTranslucent=translucentResidents; }
+    private static int reused(Map<Long,Resident> before,Map<Long,Resident> after) {
+        return (int)after.entrySet().stream().filter(e->before.get(e.getKey())==e.getValue()).count();
+    }
     private long entityTriangles;
     private CoplanarOverlayMapper overlayMapper;
     private Map<Long,CoplanarOverlayMapper.Overlay> overlays=Map.of();
@@ -97,11 +102,11 @@ public final class WorldGeometryManager implements AutoCloseable {
             residents = next; WorldGeometryManager.this.tlas = tlas; WorldGeometryManager.this.anchor = anchor;
             buildsSinceReport += built; retiresSinceReport += retired;
             if(sceneInstances!=null) {
+                emptyTransition |= lastSceneInstances.isEmpty()!=sceneInstances.isEmpty();
                 lastSceneInstances=sceneInstances;lastSceneMaterials=sceneMaterials;
                 entityBlasCount=entities.blasCount();entityTriangles=entities.materials().stream().mapToLong(e->e.layout().triangles()).sum();
-                report(emptyTransition, next.size()-pendingSolidBuilt, nextCutouts.size()-pendingCutoutBuilt,nextTranslucents.size()-pendingTransBuilt);
-                pendingSolidBuilt=pendingCutoutBuilt=pendingTransBuilt=0;
-            } else { pendingSolidBuilt+=built;pendingCutoutBuilt+=cutoutBuilt;pendingTransBuilt+=translucentBuilt; }
+                report(emptyTransition,reused(frameSolid,next),reused(frameCutout,nextCutouts),reused(frameTranslucent,nextTranslucents));
+            }
         }
     }
 

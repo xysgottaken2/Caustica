@@ -1,35 +1,44 @@
 # Native Vulkan RT — Minecraft Java 26.3
 
-## 0.8.0-experimental — TRANSLUCENT integrado; validação visual pendente
+## 0.9.0-experimental — entidades e FallingBlockEntity no TLAS compartilhado
 
-O usuário **validou a 0.7.0 em jogo**: SOLID, texturas/UV/tint, overlay do Grass
-Block e CUTOUT com alpha test (folhas, grama, flores e furos). Essa é a base aceita.
-A 0.8.0 acrescenta TRANSLUCENT real do vanilla — incluindo vidro/água conforme a
-classificação da malha — ao **mesmo TLAS**, com cache independente, cópia GPU dos
-índices originais, composição alpha ordenada e continuação até o fundo.
+A implementação captura a emissão/upload vanilla de **jogador (AvatarRenderer),
+zumbi, vaca, porco, galinha, itens comuns dropados e FallingBlockEntity**. Areia,
+cascalho e concreto em pó usam `MovingBlockFeatureRenderer`, não `SectionMesh`.
+Geometria local compartilhável, transformação afim da instância e materiais são
+separados: movimento/animação rígida atualiza o TLAS; geometria inalterada reutiliza
+BLAS sem nova cópia/normalização GPU.
 
-Usa o device Vulkan nativo do Minecraft 26.3 e o atlas original, sem segundo
-backend, renderer paralelo, readback ou retesselação CPU. TEXEL permanece padrão.
-CUTOUT continua sendo descarte em 0,5; TRANSLUCENT usa descarte residual vanilla
-em 0,1 **mais composição**, não um substituto opaco. Os três registros SBT permanecem.
+É o **mesmo renderer, device, fila, pipeline RT, SBT e TLAS** de
+SOLID + CUTOUT + TRANSLUCENT. Não há readback, retesselação própria, atlas
+reduzido/copiado ou textura substituta. TEXEL continua padrão/referência. Texturas,
+UV, Color/tint/alpha e overlay vêm dos dados e bindings reais do vanilla.
 
-**TRANSLUCENT ainda não está validado em jogo.** CI/ABI/SPIR-V não demonstram vidro
-ou água transparentes. O ambiente local continua sem Java/GPU. Publicação do JAR
-real e relatórios independentes Ubuntu/Windows: [PR #1](https://github.com/xysgottaken2/test-3/pull/1).
+**Experimental: os 14 cenários visuais da 0.9.0 ainda estão pendentes.**
+SOLID/TEXEL/grass overlay/CUTOUT são a base anteriormente validada pelo usuário;
+TRANSLUCENT 0.8.0 passou no CI, mas continua sem validação visual confirmada.
+CI/ABI/SPIR-V não equivalem a execução em GPU. Este ambiente local não tem Java/GPU.
 
-- [Investigação 26.3, implementação, limites e diagnóstico da 0.8.0](docs/translucent-0.8.0.md)
-- JAR: `native-vulkan-rt-0.8.0-experimental.jar` no artifact `native-vulkan-rt-experimental`.
-- Uso normal: substituir o JAR e abrir o mundo, mantendo `enabled=true`,
-  `scene=chunks` e `textureSampling=texel` nas propriedades `nativevulkanrt`.
-- Teste novo: vidro (também colorido) com blocos atrás e água com substrato visível.
-  Conferir fundo, alpha/UV/tint, camadas coexistentes e cache estável; apenas ver
-  vidro não basta. Diagnósticos detalhados são opcionais.
-- Fora deste marco: entidades/partículas/falling blocks, iluminação RT, sombras,
-  reflexos/GI, refração avançada, skybox e fog volumétrico de água.
+- [Investigação 26.3, implementação, limites e checklist dos 14 cenários](docs/entities-0.9.0.md).
+- JAR: **`native-vulkan-rt-0.9.0-experimental.jar`**, artifact
+  **`native-vulkan-rt-experimental`**; uploads e relatórios independentes
+  `test-ubuntu` / `test-windows` no [PR #1](https://github.com/xysgottaken2/test-3/pull/1).
+- Uso: substituir o JAR e abrir o mundo, mantendo `nativevulkanrt.enabled=true`,
+  `nativevulkanrt.scene=chunks` e `nativevulkanrt.textureSampling=texel`.
+  Não trocar para a cena de triângulo. F5 permite verificar o jogador emitido
+  pelo vanilla; não se inventa um corpo de primeira pessoa.
+- Opcional: `-Dnativevulkanrt.entityDiagnostics=true` ativa HUD de hit GPU e
+  detalhes de geometria/texturas. Contadores CPU são identificados como CPU;
+  `GPU SAMPLED` e `FALLING HIT` dependem do shader, não do enqueue.
+- Limites: banco de 12 pares texture-view/sampler; glint/foil, armaduras e efeitos
+  especiais, consumers envelopados e formatos customizados não são cobertura
+  completa. Rejeições são explícitas, sem substituir texturas. Veja o documento.
+- Continuam fora: partículas, iluminação RT, sombras, reflexos/GI, refração
+  avançada e View Bobbing. O caminho TRANSLUCENT mantém seus limites da 0.8.0.
 
-Comandos de verificação: `./gradlew --no-daemon check assemble verifyMinecraftAbi
-verifyModJar`. Documentos antigos abaixo descrevem etapas anteriores; o estado
-atual e os limites estão no documento da 0.8.0 acima.
+Verificação: `./gradlew --no-daemon check assemble verifyMinecraftAbi verifyModJar`
+e `./gradlew --no-daemon -p buildSrc test`. O CI também executa `spirv-val`.
+Documentos históricos abaixo descrevem marcos anteriores, não o escopo atual.
 
 ## Build e teste
 
