@@ -3,31 +3,33 @@ package dev.xys.vulkanrt.render;
 import com.mojang.renderpearl.backend.vulkan.VulkanGpuBuffer;
 import dev.xys.vulkanrt.geometry.ChunkCoordinates;
 import dev.xys.vulkanrt.geometry.SectionGeometryLayout;
-import net.minecraft.client.renderer.LevelRenderer;
 import dev.xys.vulkanrt.geometry.TerrainDrawCapture;
 import dev.xys.vulkanrt.geometry.SectionGeometrySanity;
+import net.minecraft.client.renderer.LevelRenderer;
 import net.minecraft.client.renderer.chunk.ChunkSectionLayer;
 import net.minecraft.client.renderer.chunk.SectionMesh;
-import net.minecraft.client.renderer.chunk.SectionRenderDispatcher;
 import net.minecraft.core.SectionPos;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import java.util.List;
+import java.util.ArrayList;
+import java.util.Map;
+import java.util.TreeMap;
+import java.util.stream.Collectors;
 
-/** One accepted SOLID section, from the same UberGpuBuffer slice used by terrain MDI.
- * No compiler interception, CPU vertex readback, second mesher or all-world BLAS loop.
- * Consume the receipt from vanilla draw extraction before later uploads can recycle the source;
- * copy/build ONLY when the accepted mesh/owner/allocation identity changes.
- * Chunk runtime unverified. The established triangle path is independent of this manager. */
+/** One cached BLAS per actual SOLID section draw; a single TLAS contains the entire valid set.
+ * Capture, lifetime validation and enqueue all precede vanilla's later heap uploads/reuse.
+ * No compiler interception, CPU vertex readback or second terrain mesher.
+ * Single-section integration user-verified in 0.3.1; multi-section GPU runtime pending validation. */
 public final class WorldGeometryManager implements AutoCloseable {
     private static final Logger LOG = LoggerFactory.getLogger("native_vulkan_rt");
     private final VulkanRayTracingContext context;
     private final AccelerationStructureManager acceleration;
-    private final Long pinnedSection;
-    private Resident resident;
+    private Map<Long, Resident> residents = Map.of();
     private AccelerationStructureManager.Structure tlas;
     private ChunkCoordinates.Anchor anchor;
-    private String waitReason;
+    private String waitReason, invalidReason;
+    private long lastReport, lastDetail;
+    private int buildsSinceReport, retiresSinceReport;
     private record Resident(long section, Object owner, SectionMesh mesh, VulkanGpuBuffer source, long offset,
                             SectionGeometryLayout layout, AccelerationStructureManager.Structure blas) {}
 
@@ -35,130 +37,156 @@ public final class WorldGeometryManager implements AutoCloseable {
         this.context = context;
         acceleration = new AccelerationStructureManager(context);
         anchor = ChunkCoordinates.Anchor.near(x, y, z);
-        pinnedSection = ChunkCoordinates.parseSection(System.getProperty("nativevulkanrt.section"));
-        LOG.info("[RT] Scene: chunks; milestone limit=1 SOLID section; selection={}",
-                pinnedSection == null ? "actual eligible terrain draws (no 3x3x3 cutoff), sticky within camera section"
-                        : "pinned " + SectionPos.x(pinnedSection) + "," + SectionPos.y(pinnedSection) + "," + SectionPos.z(pinnedSection));
-        counters(null);
+        var pin = ChunkCoordinates.parseSection(System.getProperty("nativevulkanrt.section"));
+        LOG.info("[RT] Scene: chunks; selection={}; BLAS cache keyed by section/owner/mesh/allocation",
+                pin == null ? "ALL eligible SOLID terrain draws" : "diagnostic pin " + coordinates(pin));
     }
 
     public final class Prepared {
         public final AccelerationStructureManager.Structure tlas;
         public final ChunkCoordinates.Anchor anchor;
-        private final Resident next;
+        private final Map<Long, Resident> next;
+        private final int built;
         private boolean committed;
-        private Prepared(AccelerationStructureManager.Structure tlas, Resident next, ChunkCoordinates.Anchor anchor) {
-            this.tlas = tlas; this.next = next; this.anchor = anchor;
+        private Prepared(AccelerationStructureManager.Structure tlas, Map<Long, Resident> next,
+                         ChunkCoordinates.Anchor anchor, int built) {
+            this.tlas = tlas; this.next = next; this.anchor = anchor; this.built = built;
         }
+        /** Only after enqueue: old TLAS/BLAS remain alive through all earlier GPU consumers. */
         public void commit() {
             if (committed) throw new IllegalStateException("Scene committed twice");
             committed = true;
-            boolean changed = resident != next;
+            boolean emptyTransition = residents.isEmpty() != next.isEmpty();
             if (WorldGeometryManager.this.tlas != null && WorldGeometryManager.this.tlas != tlas)
                 context.retire(WorldGeometryManager.this.tlas);
-            if (resident != null && resident != next) {
-                context.retire(resident.blas());
-                LOG.info("[RT] Chunk section replaced/removed: x={}, y={}, z={}; old BLAS retired after in-flight work",
-                        SectionPos.x(resident.section()), SectionPos.y(resident.section()), SectionPos.z(resident.section()));
-            }
-            resident = next; WorldGeometryManager.this.tlas = tlas; WorldGeometryManager.this.anchor = anchor;
-            TerrainDrawCapture.preferSection(next == null ? null : next.section());
-            if (changed) counters(next);
+            int retired = SectionResidency.retireReplaced(residents, next, section -> context.retire(section.blas()));
+            residents = next; WorldGeometryManager.this.tlas = tlas; WorldGeometryManager.this.anchor = anchor;
+            buildsSinceReport += built; retiresSinceReport += retired;
+            report(emptyTransition, next.size()-built);
         }
     }
 
-    /** No extra command buffer, copy or AS build for an unchanged draw and anchor. */
-    public Prepared reuseUnchangedDraw(double x, double y, double z) {
-        var receipt = TerrainDrawCapture.selected();
+    /** No extra GPU command buffer, copies or AS work for an unchanged set, even if draw order changes. */
+    public Prepared reuseUnchangedDraws(LevelRenderer level, double x, double y, double z) {
+        if (!TerrainDrawCapture.ready(level, level.sectionRenderDispatcher()) || residents.isEmpty()) return null;
+        var draws = TerrainDrawCapture.draws();
         var nextAnchor = ChunkCoordinates.Anchor.near(x,y,z);
-        if (resident == null || !TerrainDrawCapture.current(receipt) || !nextAnchor.equals(anchor)) return null;
-        if (receipt.section() != resident.section() || receipt.owner().getSectionNode() != receipt.section()
-                || receipt.owner().getSectionMesh() != receipt.mesh() || receipt.buffer().isClosed()) return null;
-        if (!sameSource(resident.owner(),resident.mesh(),resident.source(),resident.offset(),
-                receipt.owner(),receipt.mesh(),receipt.buffer(),receipt.offset())) return null;
-        return new Prepared(tlas, resident, anchor);
+        if (draws.size() != residents.size() || !nextAnchor.equals(anchor)) return null;
+        for (var receipt : draws.values()) {
+            if (!liveReceipt(receipt) || !matches(residents.get(receipt.section()), receipt)) return null;
+        }
+        return new Prepared(tlas, residents, anchor, 0);
     }
 
     public Prepared prepare(CommandBatch batch, LevelRenderer level, double x, double y, double z) {
-        var nextAnchor = ChunkCoordinates.Anchor.near(x, y, z);
+        var nextAnchor = ChunkCoordinates.Anchor.near(x,y,z);
         var dispatcher = level.sectionRenderDispatcher();
         if (dispatcher == null) return empty(nextAnchor, "DISPATCHER_MISSING");
         if (!TerrainDrawCapture.ready(level, dispatcher)) return empty(nextAnchor, TerrainDrawCapture.failure());
-        var receipt = TerrainDrawCapture.selected();
-        if (receipt == null) {
+        if (TerrainDrawCapture.draws().isEmpty()) {
             TerrainDrawCapture.diagnostics(level, false);
             return empty(nextAnchor, TerrainDrawCapture.failure());
         }
         dispatcher.lock();
         try {
-            if (!TerrainDrawCapture.current(receipt)) return empty(nextAnchor, "STALE_TERRAIN_DRAW_RECEIPT");
-            var selected = receipt.owner();
-            long node = receipt.section();
-            var mesh = receipt.mesh();
-            // This is lifetime validation of the captured receipt, NOT selection by a generic lookup.
-            var slice = dispatcher.getRenderSectionSlice(mesh, ChunkSectionLayer.SOLID);
+            // Validate each receipt independently: one invalidated mesh must not drop the other sections.
+            var valid = new TreeMap<Long, TerrainDrawCapture.Draw>();
+            String firstInvalid = null;
             var format = ChunkSectionLayer.SOLID.pipeline(false).getVertexFormatBinding(0);
-            var sanity = SectionGeometrySanity.inspect(selected, node, mesh, slice, format);
-            if (sanity != SectionGeometrySanity.Failure.OK) {
-                TerrainDrawCapture.diagnostics(level, false);
-                return empty(nextAnchor, "CAPTURE_INVALIDATED_BEFORE_COPY: " + sanity);
+            for (var receipt : TerrainDrawCapture.draws().values()) {
+                String reason = null;
+                if (!TerrainDrawCapture.current(receipt)) reason = "STALE_TERRAIN_DRAW_RECEIPT";
+                else {
+                    var slice = dispatcher.getRenderSectionSlice(receipt.mesh(), ChunkSectionLayer.SOLID);
+                    var sanity = SectionGeometrySanity.inspect(receipt.owner(),receipt.section(),receipt.mesh(),slice,format);
+                    if (sanity != SectionGeometrySanity.Failure.OK) reason = sanity.name();
+                    else if (slice.vertexBuffer() != receipt.buffer() || slice.vertexBufferOffset() != receipt.offset())
+                        reason = "ALLOCATION_CHANGED_AFTER_TERRAIN_DRAW_CAPTURE";
+                    else if (receipt.mesh().getSectionDraw(ChunkSectionLayer.SOLID).indexCount() != receipt.layout().indexCount())
+                        reason = "DRAW_COUNT_CHANGED_AFTER_CAPTURE";
+                }
+                if (reason == null) valid.put(receipt.section(), receipt);
+                else if (firstInvalid == null) firstInvalid = coordinates(receipt.section()) + ": " + reason;
             }
-            if (slice.vertexBuffer() != receipt.buffer() || slice.vertexBufferOffset() != receipt.offset())
-                return empty(nextAnchor, "ALLOCATION_CHANGED_AFTER_TERRAIN_DRAW_CAPTURE");
-            var source = receipt.buffer();
-            var draw = mesh.getSectionDraw(ChunkSectionLayer.SOLID);
-            Resident next = resident;
-            boolean unchanged = resident != null && resident.section() == node
-                    && sameSource(resident.owner(), resident.mesh(), resident.source(), resident.offset(),
-                                  selected, mesh, source, slice.vertexBufferOffset());
-            if (!unchanged) {
+            if (firstInvalid != null && !firstInvalid.equals(invalidReason))
+                LOG.info("[RT] Chunks: invalidatedBeforeCopy={}; first={}", TerrainDrawCapture.validSections()-valid.size(), firstInvalid);
+            invalidReason = firstInvalid;
+            if (valid.isEmpty()) return empty(nextAnchor, "NO_VALID_RECEIPTS_BEFORE_COPY: " + firstInvalid);
+            // Check before allocating any new BLAS; never silently truncate the captured set.
+            if (Long.compareUnsigned(valid.size(), context.capabilities().maxInstanceCount()) > 0)
+                throw new IllegalArgumentException("validSections=" + valid.size() + " exceeds device maxInstanceCount="
+                        + Long.toUnsignedString(context.capabilities().maxInstanceCount()));
+
+            var diff = SectionResidency.diff(residents, valid, WorldGeometryManager::matches);
+            var next = new TreeMap<Long, Resident>(); // Stable ordering independent of vanilla/frustum draw order.
+            for (long node : diff.reuse()) next.put(node, residents.get(node));
+            boolean detail = TerrainDrawCapture.diagnosticsEnabled() && System.nanoTime()-lastDetail >= 2_000_000_000L;
+            int detailed = 0;
+            for (long node : diff.build()) {
+                var receipt = valid.get(node);
                 var layout = receipt.layout();
-                if (layout.indexCount() != draw.indexCount()) return empty(nextAnchor, "DRAW_COUNT_CHANGED_AFTER_CAPTURE");
-                TerrainDrawCapture.diagnostics(level, true);
-                LOG.info("[RT] Selected section sanity PASS: selected section found; SOLID geometry found; vertex range > 0; triangle count > 0; GPU buffer handle valid");
-                if (TerrainDrawCapture.diagnosticsEnabled())
-                    LOG.info("[RT][chunks-diag] {}", TerrainDrawCapture.describe(selected,mesh,slice,node,sanity));
-                LOG.info("[RT] Chunk section discovered: x={}, y={}, z={}; world origin=({}, {}, {})",
-                        SectionPos.x(node), SectionPos.y(node), SectionPos.z(node), SectionPos.x(node) * 16, SectionPos.y(node) * 16, SectionPos.z(node) * 16);
-                LOG.info("[RT] Vertex buffer: UberGpuBuffer VkBuffer=0x{}, offset={}, bytes={}, vertices={}, stride={}, Position offset={}",
-                        Long.toHexString(source.vkBuffer()), slice.vertexBufferOffset(), layout.vertexBytes(), layout.vertexCount(), layout.stride(), layout.positionOffset());
-                LOG.info("[RT] Index buffer: vanilla implicit/shared QUADS -> uint32 triangle list; indices={}; Triangle count: {}",
-                        layout.indexCount(), layout.triangles());
-                LOG.info("[RT] Preserved vertex attributes: {}", layout.attributes());
-                LOG.info("[RT] Building chunk BLAS...");
-                var blas = batch.own(acceleration.buildSectionBlas(batch, source, slice.vertexBufferOffset(), layout));
-                next = new Resident(node, selected, mesh, source, slice.vertexBufferOffset(), layout, blas);
-                LOG.info("[RT] Chunk BLAS created: 0x{}; build recorded", Long.toHexString(blas.handle()));
+                if (detail && detailed++ < 4) {
+                    LOG.info("[RT][chunks-diag] Build section={} mesh={} UberGpuBuffer VkBuffer=0x{} offset={} bytes={} SOLID vertices={} triangles={} sanity=OK",
+                            coordinates(node), SectionGeometrySanity.identity(receipt.mesh()), Long.toHexString(receipt.buffer().vkBuffer()),
+                            receipt.offset(), layout.vertexBytes(), layout.vertexCount(), layout.triangles());
+                }
+                var blas = batch.own(acceleration.buildSectionBlas(batch, receipt.buffer(), receipt.offset(), layout));
+                next.put(node, new Resident(node, receipt.owner(), receipt.mesh(), receipt.buffer(), receipt.offset(), layout, blas));
+            }
+            if (detail && detailed > 0) lastDetail = System.nanoTime();
+            var action = SectionResidency.tlasAction(residents.size(), next.size(), diff.changed(), !nextAnchor.equals(anchor));
+            var nextTlas = tlas;
+            if (action != SectionResidency.TlasAction.REUSE) {
+                var instances = new ArrayList<AccelerationStructureManager.Instance>(next.size());
+                for (var section : next.values()) {
+                    long node = section.section();
+                    instances.add(new AccelerationStructureManager.Instance(section.blas(), nextAnchor.sectionX(node),
+                            nextAnchor.sectionY(node), nextAnchor.sectionZ(node), 0)); // Existing hit group/material convention.
+                }
+                if (action == SectionResidency.TlasAction.BUILD) nextTlas = batch.own(acceleration.buildTlas(batch, instances));
+                else acceleration.updateTlas(batch, tlas, instances);
+                LOG.debug("[RT] TLAS {}: {} instances; BLAS built={}, reused={}, retired={}; anchor=({}, {}, {})",
+                        action, next.size(), diff.build().size(), diff.reuse().size(), diff.retire().size(), nextAnchor.x(), nextAnchor.y(), nextAnchor.z());
             }
             waitReason = null;
-            var nextTlas = tlas;
-            if (next != resident || !nextAnchor.equals(anchor)) {
-                LOG.info("[RT] Adding chunk instance to TLAS: section=({}, {}, {}), translation=({}, {}, {}), anchor=({}, {}, {})",
-                        SectionPos.x(node), SectionPos.y(node), SectionPos.z(node), nextAnchor.sectionX(node), nextAnchor.sectionY(node), nextAnchor.sectionZ(node),
-                        nextAnchor.x(), nextAnchor.y(), nextAnchor.z());
-                var instances = List.of(new AccelerationStructureManager.Instance(next.blas(), nextAnchor.sectionX(node), nextAnchor.sectionY(node), nextAnchor.sectionZ(node), 0));
-                if (tlas == null) nextTlas = batch.own(acceleration.buildTlas(batch, instances));
-                else acceleration.updateTlas(batch, tlas, instances);
-                LOG.info("[RT] TLAS updated: 1 instances; {}; camera=({}, {}, {})", tlas == null ? "BUILD" : "UPDATE", x, y, z);
-            }
-            return new Prepared(nextTlas, next, nextAnchor);
+            return new Prepared(nextTlas, next, nextAnchor, diff.build().size());
         } finally { dispatcher.unlock(); }
     }
 
+    private static boolean liveReceipt(TerrainDrawCapture.Draw receipt) {
+        return TerrainDrawCapture.current(receipt) && receipt.owner().getSectionNode() == receipt.section()
+                && receipt.owner().getSectionMesh() == receipt.mesh() && !receipt.buffer().isClosed();
+    }
+    private static boolean matches(Resident resident, TerrainDrawCapture.Draw receipt) {
+        return resident != null && resident.section() == receipt.section()
+                && resident.layout().equals(receipt.layout())
+                && sameSource(resident.owner(), resident.mesh(), resident.source(), resident.offset(),
+                        receipt.owner(), receipt.mesh(), receipt.buffer(), receipt.offset());
+    }
     static boolean sameSource(Object oldOwner, Object oldMesh, Object oldBuffer, long oldOffset,
                               Object owner, Object mesh, Object buffer, long offset) {
         return oldOwner != null && oldOwner == owner && oldMesh == mesh && oldBuffer == buffer && oldOffset == offset;
     }
     private Prepared empty(ChunkCoordinates.Anchor nextAnchor, String reason) {
         if (!reason.equals(waitReason)) { waitReason = reason; LOG.info("[RT] Chunks: {}", reason); }
-        return new Prepared(null, null, nextAnchor);
+        return new Prepared(null, Map.of(), nextAnchor, 0);
     }
-    private static void counters(Resident next) {
-        LOG.info("[RT] Scene: chunks | BLAS count: {} | TLAS instances: {} | RT triangles: {}",
-                next == null ? 0 : 1, next == null ? 0 : 1, next == null ? 0 : next.layout().triangles());
+    private void report(boolean force, int reusedThisFrame) {
+        if (!force && System.nanoTime()-lastReport < 2_000_000_000L) return;
+        lastReport = System.nanoTime();
+        long triangles = 0, vertexBytes = 0;
+        for (var resident : residents.values()) { triangles += resident.layout().triangles(); vertexBytes += resident.layout().vertexBytes(); }
+        LOG.info("[RT] Scene: chunks | validSections={} | BLAS count: {} | TLAS instances: {} | RT triangles: {} | vertexBytes={}",
+                TerrainDrawCapture.validSections(), residents.size(), tlas == null ? 0 : tlas.count, triangles, vertexBytes);
+        LOG.info("[RT] Chunk cache: builtSinceReport={} retiredSinceReport={} (deferred) reusedThisFrame={}; section sample={}{}",
+                buildsSinceReport, retiresSinceReport, reusedThisFrame, residents.keySet().stream().limit(8).map(WorldGeometryManager::coordinates).collect(Collectors.joining(", ")),
+                residents.size() > 8 ? ", ..." : "");
+        buildsSinceReport = 0; retiresSinceReport = 0;
     }
+    private static String coordinates(long node) { return "("+SectionPos.x(node)+","+SectionPos.y(node)+","+SectionPos.z(node)+")"; }
     @Override public void close() {
         if (tlas != null) { tlas.close(); tlas = null; }
-        if (resident != null) { resident.blas().close(); resident = null; }
+        residents.values().forEach(section -> section.blas().close());
+        residents = Map.of();
     }
 }

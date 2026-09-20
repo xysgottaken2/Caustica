@@ -81,7 +81,7 @@ public final class RayTracingRenderer {
         if (dispatcher != null) dispatcher.lock();
         try {
             if (world == null) world = new WorldGeometryManager(context, camera.pos.x, camera.pos.y, camera.pos.z);
-            var reused = world.reuseUnchangedDraw(camera.pos.x,camera.pos.y,camera.pos.z);
+            var reused = world.reuseUnchangedDraws(level,camera.pos.x,camera.pos.y,camera.pos.z);
             if (reused != null) { reused.commit(); chunkScene = reused; return; }
             try (CommandBatch batch = new CommandBatch(context)) {
                 var prepared = world.prepare(batch, level, camera.pos.x, camera.pos.y, camera.pos.z);

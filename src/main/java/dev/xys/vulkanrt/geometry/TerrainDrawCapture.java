@@ -8,8 +8,11 @@ import net.minecraft.core.BlockPos;
 import net.minecraft.core.SectionPos;
 import org.slf4j.LoggerFactory;
 import java.util.Arrays;
+import java.util.Map;
+import java.util.TreeMap;
+import java.util.Collections;
 
-/** Render-thread receipt of actual vanilla draw extraction; retains at most one GPU candidate.
+/** Render-thread receipt of actual vanilla draw extraction; retains every eligible SOLID section, deduplicated by packed section position.
  * The redirects forward both original calls unchanged. Copy/AS preparation happens at extraction
  * RETURN, before LevelRenderer's later compile/upload can replace or reuse this allocation. */
 public final class TerrainDrawCapture {
@@ -17,29 +20,29 @@ public final class TerrainDrawCapture {
                        VulkanGpuBuffer buffer, long offset, SectionGeometryLayout layout) {}
     private static final boolean DIAGNOSTICS = Boolean.parseBoolean(System.getProperty("nativevulkanrt.chunkDiagnostics", "true"));
     private static final int[] rejected = new int[SectionGeometrySanity.Failure.values().length];
-    private static long frame, selectionCamera = Long.MIN_VALUE, lastDiagnostic;
-    private static Long pinned, preferred;
+    private static long frame, lastDiagnostic;
+    private static Long pinned;
     private static LevelRenderer level;
     private static SectionRenderDispatcher dispatcher;
     private static VertexFormat format;
     private static boolean started, completed, sawPin;
     private static int sections, solidCalls, valid;
-    private static double cameraX, cameraY, cameraZ, bestDistance;
-    private static Draw selected;
+    private static double cameraX, cameraY, cameraZ;
+    private static Map<Long, Draw> draws = new TreeMap<>(), previous = Map.of();
+    private static VertexFormat previousFormat;
     private static String firstRejected, configurationFailure;
 
     public static void beginFrame() {
-        frame++; started = false; completed = false; level = null; dispatcher = null; selected = null;
+        frame++; started = false; completed = false; level = null; dispatcher = null;
+        previous = draws; draws = new TreeMap<>(); previousFormat = format;
         sections = 0; solidCalls = 0; valid = 0; sawPin = false; firstRejected = null;
         Arrays.fill(rejected, 0);
     }
     public static void begin(LevelRenderer owner, SectionRenderDispatcher source, double x, double y, double z) {
         started = true; completed = false; level = owner; dispatcher = source;
-        selected = null; sections = 0; solidCalls = 0; valid = 0; sawPin = false; firstRejected = null;
+        draws.clear(); sections = 0; solidCalls = 0; valid = 0; sawPin = false; firstRejected = null;
         Arrays.fill(rejected, 0);
-        cameraX = x; cameraY = y; cameraZ = z; bestDistance = Double.POSITIVE_INFINITY;
-        long camera = SectionPos.asLong((int)Math.floor(x / 16), (int)Math.floor(y / 16), (int)Math.floor(z / 16));
-        if (selectionCamera != camera) { selectionCamera = camera; preferred = null; }
+        cameraX = x; cameraY = y; cameraZ = z;
         try { pinned = ChunkCoordinates.parseSection(System.getProperty("nativevulkanrt.section")); configurationFailure = null; }
         catch (IllegalArgumentException badOption) { configurationFailure = badOption.getMessage(); }
         format = ChunkSectionLayer.SOLID.pipeline(false).getVertexFormatBinding(0);
@@ -60,26 +63,24 @@ public final class TerrainDrawCapture {
         }
         valid++;
         if (configurationFailure != null || (pinned != null && pinned != node)) return;
-        double dx = SectionPos.x(node) * 16.0 + 8 - cameraX, dy = SectionPos.y(node) * 16.0 + 8 - cameraY, dz = SectionPos.z(node) * 16.0 + 8 - cameraZ;
-        double distance = dx * dx + dy * dy + dz * dz;
-        if (prefer(node, distance, selected == null ? null : selected.section(), bestDistance, preferred)) {
-            var draw = mesh.getSectionDraw(ChunkSectionLayer.SOLID);
-            selected = new Draw(frame, node, section, mesh, (VulkanGpuBuffer)slice.vertexBuffer(), slice.vertexBufferOffset(),
-                    SectionGeometryLayout.solidQuads(format, draw.indexCount()));
-            bestDistance = distance;
-        }
+        var draw = mesh.getSectionDraw(ChunkSectionLayer.SOLID);
+        var old = previous.get(node);
+        // Reuse immutable format metadata; never read vertices back or retain a receipt as current.
+        var layout = old != null && previousFormat == format && old.mesh() == mesh
+                && old.layout().indexCount() == draw.indexCount()
+                ? old.layout() : SectionGeometryLayout.solidQuads(format, draw.indexCount());
+        retain(draws, new Draw(frame, node, section, mesh, (VulkanGpuBuffer)slice.vertexBuffer(),
+                slice.vertexBufferOffset(), layout), pinned);
     }
-    /** Pure selection policy: all valid terrain draws are candidates; there is no 3x3x3 cutoff. */
-    public static boolean prefer(long node, double distance, Long bestNode, double bestDistance, Long preferredNode) {
-        if (bestNode == null) return true;
-        if (preferredNode != null && bestNode.equals(preferredNode)) return false;
-        return (preferredNode != null && node == preferredNode) || distance < bestDistance;
+    /** No radius/nearest filter. Duplicate observations cannot become duplicate TLAS instances. */
+    static void retain(Map<Long, Draw> into, Draw draw, Long pin) {
+        if (pin == null || pin == draw.section()) into.put(draw.section(), draw);
     }
     public static void finish(LevelRenderer owner) { if (level == owner) completed = true; }
     public static boolean ready(LevelRenderer owner, SectionRenderDispatcher source) { return started && completed && level == owner && source == dispatcher; }
-    public static Draw selected() { return selected; }
+    public static Map<Long, Draw> draws() { return Collections.unmodifiableMap(draws); }
+    public static int validSections() { return draws.size(); }
     public static boolean current(Draw draw) { return draw != null && draw.frame() == frame && completed; }
-    public static void preferSection(Long node) { preferred = node; }
     public static String failure() {
         if (!started) return "TERRAIN_EXTRACTION_HOOK_NOT_REACHED";
         if (!completed) return "TERRAIN_EXTRACTION_NOT_COMPLETED";
@@ -95,8 +96,8 @@ public final class TerrainDrawCapture {
         if (!DIAGNOSTICS || (!force && System.nanoTime() - lastDiagnostic < 5_000_000_000L)) return;
         lastDiagnostic = System.nanoTime();
         var log = LoggerFactory.getLogger("native_vulkan_rt");
-        log.info("[RT][chunks-diag] stage=extractSectionDrawGroups frame={} started={} completed={} sections={} SOLID calls={} valid={} pinSeen={} camera=({}, {}, {}) cameraSection=({}, {}, {})",
-                frame, started, completed, sections, solidCalls, valid, sawPin, cameraX, cameraY, cameraZ,
+        log.info("[RT][chunks-diag] stage=extractSectionDrawGroups frame={} started={} completed={} sections={} SOLID calls={} valid={} validSections={} pinSeen={} camera=({}, {}, {}) cameraSection=({}, {}, {})",
+                frame, started, completed, sections, solidCalls, valid, draws.size(), sawPin, cameraX, cameraY, cameraZ,
                 (int)Math.floor(cameraX/16), (int)Math.floor(cameraY/16), (int)Math.floor(cameraZ/16));
         for (var failure : SectionGeometrySanity.Failure.values()) if (rejected[failure.ordinal()] > 0)
             log.info("[RT][chunks-diag] rejected {}: {}", failure, rejected[failure.ordinal()]);

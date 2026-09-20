@@ -42,6 +42,19 @@ final class ChunkCoordinatesTest {
                 .translate(-anchor.cameraX(x),-anchor.cameraY(y),-anchor.cameraZ(z)).transform(corner);
         assertEquals(0.4,roundTrip.x/roundTrip.w,0.001); assertEquals(-0.3,roundTrip.y/roundTrip.w,0.001);
     }
+    @Test void multipleInstancesKeepDistinctOriginsAndAdjacentSeamsAcrossRebase() {
+        long a = SectionPos.asLong(-2,4,4), b = SectionPos.asLong(-2,4,5), c = SectionPos.asLong(-3,4,5);
+        for (double cameraX : new double[]{-255.9,-256.1}) {
+            var anchor = ChunkCoordinates.Anchor.near(cameraX,79,79.863);
+            assertEquals(16,anchor.sectionZ(b)-anchor.sectionZ(a),0.0001);
+            assertEquals(16,anchor.sectionX(b)-anchor.sectionX(c),0.0001);
+            assertEquals(anchor.sectionZ(a)+16,anchor.sectionZ(b),0.0001);
+            for (long node : new long[]{a,b,c}) {
+                assertEquals(SectionPos.x(node)*16.0-cameraX,anchor.sectionX(node)-anchor.cameraX(cameraX),0.0001);
+                assertEquals(SectionPos.z(node)*16.0-79.863,anchor.sectionZ(node)-anchor.cameraZ(79.863),0.0001);
+            }
+        }
+    }
     @Test void explicitSelectionIsInSectionUnitsAndCannotWrap() {
         assertNull(ChunkCoordinates.parseSection(null));
         long node = ChunkCoordinates.parseSection("-1, 4, 0");
