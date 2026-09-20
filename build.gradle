@@ -119,7 +119,8 @@ tasks.register('verifyModJar') {
             if (metadata.environment != 'client' || metadata.depends.minecraft != project.minecraft_version ||
                     metadata.version != project.version.toString() || metadata.depends.java != '>=25' ||
                     metadata.depends.fabricloader != ">=${project.loader_version}" ||
-                    metadata.entrypoints.client != ['dev.xys.vulkanrt.RayTracingMod']) {
+                    metadata.entrypoints.client != ['dev.xys.vulkanrt.RayTracingMod'] ||
+                    metadata.mixins != ['native_vulkan_rt.mixins.json']) {
                 throw new GradleException('Unexpected mod metadata')
             }
             if (zip.getEntry('dev/xys/vulkanrt/RayTracingMod.class') == null || zip.getEntry('LICENSE') == null) {
@@ -130,7 +131,18 @@ tasks.register('verifyModJar') {
                     throw new GradleException("Missing executable RT shader ${shader}")
                 }
             }
-            if (zip.getEntry('native_vulkan_rt.mixins.json') == null) throw new GradleException('Missing Vulkan integration mixins')
+            def mixinEntry = zip.getEntry('native_vulkan_rt.mixins.json')
+            if (mixinEntry == null) throw new GradleException('Missing Vulkan integration mixins')
+            def mixins = zip.getInputStream(mixinEntry).withCloseable { new JsonSlurper().parse(it) }
+            def requiredHooks = ['VulkanBackendMixin', 'FrontendGpuDeviceAccessor', 'RenderSystemMixin',
+                                 'GameRendererMixin', 'VulkanCommandEncoderMixin', 'VulkanDeviceMixin']
+            if (!mixins.required || mixins.injectors.defaultRequire != 1 || !mixins.client.containsAll(requiredHooks)) {
+                throw new GradleException('Required RT hooks are not registered with fail-fast injection checks')
+            }
+            mixins.client.each { name ->
+                def entryName = mixins.package.replace('.', '/') + '/' + name + '.class'
+                if (zip.getEntry(entryName) == null) throw new GradleException("Missing compiled Mixin ${entryName}")
+            }
             def forbidden = zip.entries().findAll {
                 it.name.startsWith('net/minecraft/') || it.name.startsWith('com/mojang/') ||
                     it.name.startsWith('org/lwjgl/') || it.name.endsWith('.dll') || it.name.endsWith('.so')

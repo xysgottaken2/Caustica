@@ -37,14 +37,55 @@ public record RayTracingCapabilities(Set<String> extensions, List<String> missin
                 new VulkanFeature(new VulkanPNextStruct(VkPhysicalDeviceRayTracingPipelineFeaturesKHR.class), "rayTracingPipeline")));
     }
 
-    public static RayTracingCapabilities query(VkPhysicalDevice physical) {
+    public static void logPhysicalDevice(VkPhysicalDevice physical) {
+        var log = org.slf4j.LoggerFactory.getLogger("native_vulkan_rt");
+        log.info("[RT] Vulkan instance acquired: 0x{} (borrowed)", Long.toHexString(physical.getInstance().address()));
+        try (MemoryStack stack = MemoryStack.stackPush()) {
+            var properties = VkPhysicalDeviceProperties.calloc(stack);
+            vkGetPhysicalDeviceProperties(physical, properties);
+            int version = properties.apiVersion();
+            log.info("[RT] Physical device: {}; handle=0x{}; Vulkan {}.{}.{}; vendor=0x{}; device=0x{}",
+                    properties.deviceNameString(), Long.toHexString(physical.address()),
+                    VK_VERSION_MAJOR(version), VK_VERSION_MINOR(version), VK_VERSION_PATCH(version),
+                    Integer.toHexString(properties.vendorID()), Integer.toHexString(properties.deviceID()));
+        }
+    }
+
+    public void logSupport() {
+        var log = org.slf4j.LoggerFactory.getLogger("native_vulkan_rt");
+        for (String extension : new TreeSet<>(REQUIRED_EXTENSIONS))
+            log.info("[RT] {}: {}", extension, extensions.contains(extension) ? "supported" : "MISSING");
+        log.info("[RT] VK_KHR_buffer_device_address extension: {}; core Vulkan 1.2 is used instead",
+                extensions.contains("VK_KHR_buffer_device_address") ? "supported" : "not advertised");
+        log.info("[RT] Buffer device address feature: {}", bufferDeviceAddress ? "supported" : "MISSING");
+        log.info("[RT] accelerationStructure feature: {}; rayTracingPipeline feature: {}",
+                accelerationStructure ? "supported" : "MISSING", rayTracingPipeline ? "supported" : "MISSING");
+        log.info("[RT] SPIR-V 1.4 / shader float controls / descriptor indexing dependencies: provided by Vulkan 1.2 core; bindless features not required");
+        if (!missing.isEmpty()) log.warn("[RT] Missing requirements: {}", String.join(", ", missing));
+    }
+
+    private static Set<String> enumerateExtensions(VkPhysicalDevice physical) {
         try (MemoryStack stack = MemoryStack.stackPush()) {
             var count = stack.ints(0);
-            check(vkEnumerateDeviceExtensionProperties(physical, (String)null, count, null), "enumerate extension count");
-            var properties = VkExtensionProperties.calloc(count.get(0), stack);
-            check(vkEnumerateDeviceExtensionProperties(physical, (String)null, count, properties), "enumerate extensions");
-            Set<String> extensions = new TreeSet<>();
-            for (int i = 0; i < count.get(0); i++) extensions.add(properties.get(i).extensionNameString());
+            for (int attempt = 0; attempt < 4; attempt++) {
+                check(vkEnumerateDeviceExtensionProperties(physical, (String)null, count, null), "enumerate extension count");
+                // Hundreds of extensions can exceed LWJGL's small thread-local stack.
+                try (var properties = VkExtensionProperties.calloc(count.get(0))) {
+                    int result = vkEnumerateDeviceExtensionProperties(physical, (String)null, count, properties);
+                    if (result == VK_INCOMPLETE) continue;
+                    check(result, "enumerate device extensions");
+                    Set<String> extensions = new TreeSet<>();
+                    for (int i = 0; i < count.get(0); i++) extensions.add(properties.get(i).extensionNameString());
+                    return extensions;
+                }
+            }
+        }
+        throw new IllegalStateException("Device extension enumeration remained VK_INCOMPLETE after four attempts");
+    }
+
+    public static RayTracingCapabilities query(VkPhysicalDevice physical) {
+        try (MemoryStack stack = MemoryStack.stackPush()) {
+            Set<String> extensions = enumerateExtensions(physical);
             List<String> missing = new ArrayList<>();
             for (String name : REQUIRED_EXTENSIONS) if (!extensions.contains(name)) missing.add(name);
 

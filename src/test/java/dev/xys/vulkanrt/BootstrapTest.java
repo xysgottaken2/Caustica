@@ -16,6 +16,24 @@ final class BootstrapTest {
     }
 
     @Test
+    void requiredMixinsAreRegisteredAndPackaged() throws Exception {
+        try (var input = getClass().getResourceAsStream("/native_vulkan_rt.mixins.json")) {
+            assertNotNull(input);
+            var config = JsonParser.parseReader(new InputStreamReader(input, StandardCharsets.UTF_8)).getAsJsonObject();
+            assertTrue(config.get("required").getAsBoolean());
+            assertEquals(1, config.getAsJsonObject("injectors").get("defaultRequire").getAsInt());
+            var names = new java.util.HashSet<String>();
+            for (var name : config.getAsJsonArray("client")) {
+                names.add(name.getAsString());
+                assertNotNull(getClass().getResource("/" + config.get("package").getAsString().replace('.', '/')
+                        + "/" + name.getAsString() + ".class"));
+            }
+            assertTrue(names.containsAll(java.util.Set.of("VulkanBackendMixin", "FrontendGpuDeviceAccessor", "RenderSystemMixin",
+                    "GameRendererMixin", "VulkanCommandEncoderMixin", "VulkanDeviceMixin")));
+        }
+    }
+
+    @Test
     void metadataIsExpandedAndRestrictedToTheResearchedRelease() throws Exception {
         try (var input = getClass().getResourceAsStream("/fabric.mod.json")) {
             assertNotNull(input);

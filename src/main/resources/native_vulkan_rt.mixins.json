@@ -10,7 +10,11 @@
     "LevelRendererMixin",
     "SectionCompilerMixin",
     "CompiledSectionMeshMixin",
-    "RenderSectionMixin"
+    "RenderSectionMixin",
+    "RenderSystemMixin",
+    "VulkanCommandEncoderMixin"
   ],
-  "injectors": { "defaultRequire": 1 }
+  "injectors": {
+    "defaultRequire": 1
+  }
 }

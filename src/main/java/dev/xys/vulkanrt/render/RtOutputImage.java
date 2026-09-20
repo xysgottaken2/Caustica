@@ -64,7 +64,7 @@ public final class RtOutputImage implements AutoCloseable {
     }
 
     /** Minecraft images stay GENERAL. Restore our image to GENERAL too; vanilla owns swapchain/present. */
-    public void copyToMainTarget(VkCommandBuffer cmd, VulkanGpuTexture target) {
+    public void copyToMainTarget(VkCommandBuffer cmd, VulkanGpuTexture target, TriangleReadback proof) {
         transition(cmd, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
                 VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR, VK_ACCESS_2_SHADER_WRITE_BIT_KHR,
                 VK_PIPELINE_STAGE_2_TRANSFER_BIT_KHR, VK_ACCESS_2_TRANSFER_READ_BIT_KHR);
@@ -80,6 +80,7 @@ public final class RtOutputImage implements AutoCloseable {
         }
         memoryBarrier(cmd, VK_PIPELINE_STAGE_2_TRANSFER_BIT_KHR, VK_ACCESS_2_TRANSFER_WRITE_BIT_KHR,
                 VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT_KHR, VK_ACCESS_2_MEMORY_READ_BIT_KHR | VK_ACCESS_2_MEMORY_WRITE_BIT_KHR);
+        if (proof != null) proof.record(cmd, image);
         transition(cmd, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL,
                 VK_PIPELINE_STAGE_2_TRANSFER_BIT_KHR, VK_ACCESS_2_TRANSFER_READ_BIT_KHR,
                 VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR, VK_ACCESS_2_SHADER_WRITE_BIT_KHR);

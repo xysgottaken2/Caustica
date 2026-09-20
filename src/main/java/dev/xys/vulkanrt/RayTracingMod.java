@@ -9,6 +9,8 @@ public final class RayTracingMod implements ClientModInitializer {
         var log = LoggerFactory.getLogger("native_vulkan_rt");
         log.info("[RT] Native Vulkan KHR ray tracing implementation loaded. RUNTIME VERIFIED: NO");
         log.info("[RT] Requested={}, scene={}; activation additionally requires successful device negotiation", RtOptions.ENABLED, RtOptions.CHUNKS ? "opaque chunks" : "test triangle");
+        log.info("[RT] Implementation JAR: {}", RayTracingMod.class.getProtectionDomain().getCodeSource());
+        if (RtOptions.ENABLED) dev.xys.vulkanrt.integration.RtHookAudit.verify();
         if (!RtOptions.ENABLED) log.info("[RT] Opt in with -Dnativevulkanrt.enabled=true; select -Dnativevulkanrt.scene=triangle|chunks before starting Minecraft");
     }
 }

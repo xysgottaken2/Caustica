@@ -25,13 +25,37 @@ public final class VulkanRayTracingContext {
 
     public static VulkanRayTracingContext borrow() {
         RenderSystem.assertOnRenderThread();
-        if (!(RenderSystem.getDevice() instanceof FrontendGpuDeviceAccessor access)
-                || !(access.nativeVulkanRt$backend() instanceof VulkanDevice backend)) return null;
-        RayTracingCapabilities enabled = DeviceNegotiation.enabledFor(backend.vkDevice());
-        if (enabled == null || !enabled.supported()) return null;
-        var dispatch = backend.vkDevice().getCapabilities();
-        if (dispatch.vkCmdTraceRaysKHR == 0 || dispatch.vkCreateRayTracingPipelinesKHR == 0
-                || dispatch.vkCmdBuildAccelerationStructuresKHR == 0) return null;
+        var log = org.slf4j.LoggerFactory.getLogger("native_vulkan_rt");
+        var frontend = RenderSystem.getDevice();
+        log.info("[RT] Renderer device frontend: {}", frontend.getClass().getName());
+        if (!(frontend instanceof FrontendGpuDeviceAccessor access))
+            throw new IllegalStateException("FrontendGpuDeviceAccessor Mixin not applied to " + frontend.getClass().getName());
+        var actualBackend = access.nativeVulkanRt$backend();
+        log.info("[RT] Renderer backend: {}", actualBackend.getClass().getName());
+        if (!(actualBackend instanceof VulkanDevice backend))
+            throw new IllegalStateException("Active backend is not Vulkan: " + actualBackend.getClass().getName());
+        var device = backend.vkDevice();
+        log.info("[RT] Logical device acquired from RenderSystem: 0x{}", Long.toHexString(device.address()));
+        RayTracingCapabilities enabled = DeviceNegotiation.enabledFor(device);
+        if (enabled == null) {
+            // Diagnose the real selected device even if the creation hook never ran.
+            RayTracingCapabilities.logPhysicalDevice(device.getPhysicalDevice());
+            RayTracingCapabilities.query(device.getPhysicalDevice()).logSupport();
+            throw new IllegalStateException(DeviceNegotiation.rejectionFor(device));
+        }
+        var dispatch = device.getCapabilities();
+        java.util.List<String> absent = new java.util.ArrayList<>();
+        if (dispatch.vkCmdTraceRaysKHR == 0) absent.add("vkCmdTraceRaysKHR");
+        if (dispatch.vkCreateRayTracingPipelinesKHR == 0) absent.add("vkCreateRayTracingPipelinesKHR");
+        if (dispatch.vkGetRayTracingShaderGroupHandlesKHR == 0) absent.add("vkGetRayTracingShaderGroupHandlesKHR");
+        if (dispatch.vkCreateAccelerationStructureKHR == 0) absent.add("vkCreateAccelerationStructureKHR");
+        if (dispatch.vkCmdBuildAccelerationStructuresKHR == 0) absent.add("vkCmdBuildAccelerationStructuresKHR");
+        if (dispatch.vkGetAccelerationStructureBuildSizesKHR == 0) absent.add("vkGetAccelerationStructureBuildSizesKHR");
+        if (dispatch.vkGetAccelerationStructureDeviceAddressKHR == 0) absent.add("vkGetAccelerationStructureDeviceAddressKHR");
+        if (dispatch.vkGetBufferDeviceAddress == 0) absent.add("vkGetBufferDeviceAddress (core 1.2)");
+        if (dispatch.vkCmdPipelineBarrier2KHR == 0) absent.add("vkCmdPipelineBarrier2KHR (vanilla dependency)");
+        if (!absent.isEmpty()) throw new IllegalStateException("Enabled device missing Vulkan dispatch: " + String.join(", ", absent));
+        log.info("[RT] Borrowed graphics queue and encoder; required Vulkan entry points resolved");
         return new VulkanRayTracingContext(backend, enabled);
     }
 

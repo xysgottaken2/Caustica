@@ -23,6 +23,7 @@ public final class RayTracingPipeline implements AutoCloseable {
 
     public RayTracingPipeline(VulkanRayTracingContext context) {
         this.context = context;
+        org.slf4j.LoggerFactory.getLogger("native_vulkan_rt").info("[RT] Creating ray tracing pipeline...");
         long[] modules = new long[3];
         try (MemoryStack stack = MemoryStack.stackPush()) {
             var bindings = VkDescriptorSetLayoutBinding.calloc(2, stack);
@@ -54,6 +55,7 @@ public final class RayTracingPipeline implements AutoCloseable {
                     .basePipelineIndex(-1).basePipelineHandle(VK_NULL_HANDLE);
             check(vkCreateRayTracingPipelinesKHR(context.device(), VK_NULL_HANDLE, VK_NULL_HANDLE, create, null, out), "vkCreateRayTracingPipelinesKHR");
             pipeline = out.get(0);
+            org.slf4j.LoggerFactory.getLogger("native_vulkan_rt").info("[RT] Pipeline created: 0x{}", Long.toHexString(pipeline));
             buildShaderBindingTable();
         } catch (RuntimeException | Error failure) { close(); throw failure; }
         finally { for (long module : modules) if (module != 0) vkDestroyShaderModule(context.device(), module, null); }
@@ -93,6 +95,8 @@ public final class RayTracingPipeline implements AutoCloseable {
                 for (int b = 0; b < limits.handleSize(); b++) target.put(offset + b, handles.get(group * limits.handleSize() + b));
             }
             raygenAddress = alignedBase; missAddress = alignedBase + step; hitAddress = alignedBase + 2 * step;
+            org.slf4j.LoggerFactory.getLogger("native_vulkan_rt").info("[RT] Shader Binding Table created: raygen=0x{}, miss=0x{}, hit=0x{}, stride={}",
+                    Long.toHexString(raygenAddress), Long.toHexString(missAddress), Long.toHexString(hitAddress), stride);
         } finally { MemoryUtil.memFree(handles); }
     }
 
