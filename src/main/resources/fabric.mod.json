@@ -3,7 +3,7 @@
   "id": "native_vulkan_rt",
   "version": "${version}",
   "name": "Native Vulkan RT \u2014 Experimental",
-  "description": "Experimental KHR ray tracing on the Minecraft 26.3 Vulkan device: test triangle and opaque chunk visibility. RUNTIME VERIFIED: NO.",
+  "description": "Experimental shared Vulkan KHR RT scene for Minecraft 26.3: SOLID/CUTOUT/TRANSLUCENT terrain, normal entities and FallingBlockEntity. Entity/translucent GPU runtime validation pending.",
   "license": "MIT",
   "environment": "client",
   "entrypoints": {
