@@ -47,6 +47,11 @@ public final class EntityGeometryManager implements AutoCloseable {
         return ChunkMaterialTable.ENTITY | (p.isCull()?ChunkMaterialTable.CULL_BACK:0)
             | (blend?ChunkMaterialTable.TRANSLUCENT:cutoff(p)>0?ChunkMaterialTable.CUTOUT:0);
     }
+    /** AS any-hit policy is special only for the MovingBlockFeatureRenderer owner. */
+    static boolean capturedAsNonOpaque(RenderPipeline p, boolean falling) {
+        return !falling || cutoff(p)>0.0f
+            || p.getColorTargetStates().getFirst().blendFunction().filter(BlendFunction.TRANSLUCENT::equals).isPresent();
+    }
     public static int abgr(int argb) { return (argb&0xff00ff00)|((argb&255)<<16)|((argb>>>16)&255); }
     public void upload(List<EntityCapture.Upload> uploads) {
         var added=new HashMap<EntityCapture.Key,AccelerationStructureManager.Structure>();
@@ -56,20 +61,27 @@ public final class EntityGeometryManager implements AutoCloseable {
         try {
             for(var upload:uploads) {
                 var p=upload.piece();
-                if(!supported(p.material().pipeline())) { EntityCapture.reject(p.owner(),"UNSUPPORTED_PIPELINE:"+p.material().pipeline().getLocation()+":"+p.material().pipeline().getShaderDefines());continue; }
+                if(!supported(p.material().pipeline())) { EntityCapture.reject(p.owner(),"UNSUPPORTED_PIPELINE:"+p.material().pipeline().getLocation()+":"+p.material().pipeline().getShaderDefines()); EntityCapture.fallingDiscard(p,"UNSUPPORTED_PIPELINE");continue; }
                 var geometry=cache.get(p.key());if(geometry==null) geometry=added.get(p.key());
+                // MovingBlockFeatureRenderer uses the real BLOCK pipeline. Opaque falling
+                // blocks must be opaque at the AS level; do not route SOLID_BLOCK through
+                // the generic entity any-hit path. CUTOUT/TRANSLUCENT falling blocks keep
+                // the non-opaque path and its existing alpha/composition behavior. Normal
+                // mobs/items retain their 0.9 entity policy unchanged.
+                boolean nonOpaque=capturedAsNonOpaque(p.material().pipeline(),p.owner().falling());
+                EntityCapture.fallingAsPolicy(p,nonOpaque);
                 if(geometry==null) {
                     if(normalizer==null) normalizer=new EntityVertexNormalizer(context);
                     if(batch==null) batch=new CommandBatch(context);
-                    geometry=batch.own(acceleration.buildCapturedBlas(batch,upload.source(),upload.offset(),p.key().layout(),true,normalizer,new Matrix4f(p.pose()).invert()));
+                    geometry=batch.own(acceleration.buildCapturedBlas(batch,upload.source(),upload.offset(),p.key().layout(),nonOpaque,normalizer,new Matrix4f(p.pose()).invert()));
                     geometry.onDestroyed(destroyed::incrementAndGet);
-                    added.put(p.key(),geometry);built++;copies++;
+                    added.put(p.key(),geometry);built++;copies++; EntityCapture.fallingBlasBuilt(p,false);
                     if(diagnoseCopies && copySamples++<4) {
                         lastCopyReport=System.nanoTime();
                         org.slf4j.LoggerFactory.getLogger("native_vulkan_rt").info("[RT][entity-geometry] id={} type={} source=vanilla-staging offset={} bytes={} stride={} vertices={} triangles={} pipeline={} cutoff={} cull={} GPU-unpose=YES; CPU receipt, not hit proof",
                             p.owner().id(),p.owner().type(),upload.offset(),p.key().layout().vertexBytes(),p.key().layout().stride(),p.key().layout().vertexCount(),p.key().layout().triangles(),p.material().pipeline().getLocation(),cutoff(p.material().pipeline()),p.material().pipeline().isCull());
                     }
-                } else reused++;
+                } else { reused++; EntityCapture.fallingBlasBuilt(p,true); }
                 next.put(p,geometry);
             }
             // Do not let vanilla reuse/write a staging allocation ahead of our transfer read.
@@ -102,9 +114,9 @@ public final class EntityGeometryManager implements AutoCloseable {
         for(var p:pieces) {
             var geometry=ready.get(p);if(geometry==null) continue;
             var sampler=texture(p.material(),"Sampler0");int t=slot(textures,sampler);
-            if(t<0) { EntityCapture.reject(p.owner(),sampler==null?"SAMPLER0_ABSENT_OR_CLOSED":"TEXTURE_SLOT_LIMIT_12");continue; }
+            if(t<0) { String reason=sampler==null?"SAMPLER0_ABSENT_OR_CLOSED":"TEXTURE_SLOT_LIMIT_12"; EntityCapture.reject(p.owner(),reason); EntityCapture.fallingDiscard(p,reason); continue; }
             var overlay=texture(p.material(),"Sampler1");int ot=slot(textures,overlay);
-            if(overlay!=null && ot<0) { EntityCapture.reject(p.owner(),"OVERLAY_TEXTURE_SLOT_LIMIT_12");continue; }
+            if(overlay!=null && ot<0) { EntityCapture.reject(p.owner(),"OVERLAY_TEXTURE_SLOT_LIMIT_12"); EntityCapture.fallingDiscard(p,"OVERLAY_TEXTURE_SLOT_LIMIT_12"); continue; }
             int flags=flags(p.material().pipeline());
             var transform=new Matrix4f().translation(anchor.cameraX(camX),anchor.cameraY(camY),anchor.cameraZ(camZ)).mul(p.pose());
             int record=accepted.size();
@@ -112,7 +124,12 @@ public final class EntityGeometryManager implements AutoCloseable {
             instances.add(new AccelerationStructureManager.Instance(geometry,transform,(flags&ChunkMaterialTable.TRANSLUCENT)!=0?2:1));
             materials.add(new ChunkMaterialTable.Entry(0,geometry.vertexAddress(),p.key().layout(),null,flags,0,0,material));
             accepted.add(p);active.add(p.key());triangles+=p.key().layout().triangles();
+            EntityCapture.fallingTexture(p,textures.get(t).view().texture().getLabel());
             if(owners.add(p.owner().id()) && p.owner().falling()) falling++;
+            if(p.owner().falling()) {
+                boolean changed=accepted.size()>previousInstances.size() || !instances.get(instances.size()-1).equals(previousInstances.get(instances.size()-1));
+                EntityCapture.fallingTlas(p,changed,transform);
+            }
         }
         // No subsequent trace references removed geometry; destruction remains deferred through vanilla fences.
         var it=cache.entrySet().iterator();while(it.hasNext()) { var e=it.next();if(!active.contains(e.getKey())) { context.retire(e.getValue());it.remove();retired++; } }
@@ -153,6 +170,7 @@ public final class EntityGeometryManager implements AutoCloseable {
             for(var o:EntityCapture.discovered.values()) if(o.falling()) log.info("[RT][falling] id={} block={} pos=({},{},{}) captured={} state={}",o.id(),o.detail(),o.x(),o.y(),o.z(),owners.contains(o.id()),owners.contains(o.id())?"SHARED_TLAS_ENQUEUED":"NOT_CAPTURED (see reasons)");
             for(var owner:EntityCapture.discovered.values()) if(!owners.contains(owner.id())) log.info("[RT][entities] ignored id={} type={} reason={}",owner.id(),owner.type(),EntityCapture.ignoredReason(owner));
         }
+        EntityCapture.reportFalling(System.nanoTime());
         return new Frame(List.copyOf(instances),List.copyOf(materials),List.copyOf(textures),hud,cache.size());
     }
     private static void ascii(ByteBuffer out,int offset,String s,int max) { byte[] text=s.toUpperCase(Locale.ROOT).getBytes(java.nio.charset.StandardCharsets.US_ASCII);for(int i=0;i<Math.min(max,text.length);i++) out.put(offset+i,text[i]); }

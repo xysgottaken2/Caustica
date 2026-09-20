@@ -74,6 +74,36 @@ entidade: areia, cascalho e concreto em pó são os alvos obrigatórios.
 Os pipelines são `SOLID_BLOCK`, `CUTOUT_BLOCK`, `TRANSLUCENT_BLOCK`, não os
 pipelines de entidade presumidos a partir do nome Java. Não criamos chunk fake.
 
+## Investigação específica da correção 0.9.0.1 — FallingBlockEntity
+
+A rota normal de Model/Item não é modificada. O diagnóstico adicional é exclusivo
+para owners cujo `EntityRenderState` é `FallingBlockRenderState` e acompanha a
+mesma sequência real: detecção pelo dispatcher, construção de `MovingBlock` submit,
+entrada em `MovingBlockFeatureRenderer.buildGroup`, chamada de `putBakedQuad`,
+range do `StagedVertexBuffer`/upload, receipt de draw, BLAS, instância TLAS e
+material. A linha `[RT][falling-trace]` informa cada estágio, vertices/triângulos,
+BLAS novo/reutilizado, receipt de draw, textura/pipeline, posição interpolada,
+matriz 3x4 efetiva e o motivo de descarte.
+
+`FallingBlockRenderer` aplica `(-.5,0,-.5)` antes de criar o submit. O bloco é
+emitido em `DefaultVertexFormat.BLOCK` (28 bytes), não em `ENTITY` (36 bytes),
+com origem de modelo `(0,0,0)`. O snapshot captura essa pose já aplicada, o
+compute remove exatamente essa pose uma única vez no XYZ, e o TLAS reaplica
+`translation(camera-anchor) * pose`. Assim a posição mundial não é adicionada
+uma segunda vez e a origem do cubo permanece a origem do modelo vanilla.
+
+Para o caso obrigatório `SOLID_BLOCK`, a correção mantém o material ENTITY para
+textura/HUD, mas marca o BLAS de FallingBlockEntity como `OPAQUE` no nível Vulkan;
+antes o caminho genérico de entidades passava toda geometria capturada pelo BLAS
+não-opaco. Falling `CUTOUT_BLOCK`/`TRANSLUCENT_BLOCK` continuam não-opacos, com
+alpha/composição existentes. Mobs/player/itens não passam por essa decisão.
+
+O campo `discard` só significa descarte/ausência em um estágio CPU; quando aparece
+`NONE_CPU_PIPELINE_COMPLETE_GPU_HUD_REQUIRED`, captura, upload, draw, BLAS, TLAS
+e material chegaram ao fim. Nesse caso a interseção não é inferida no CPU: use a
+linha `FALLING HIT` do HUD, que é gravada pelo closest-hit do shader no probe
+GPU. A implementação não lê vértices nem hit records de volta para a CPU.
+
 ## Implementação e recursos
 
 - `EntityCapture` e mixins registram ownership, geometria, pose, cores, material,

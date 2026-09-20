@@ -41,6 +41,9 @@ final class EntityIntegrationTest {
   assertTrue(EntityGeometryManager.supported(RenderPipelines.ENTITY_TRANSLUCENT));
   assertFalse(EntityGeometryManager.supported(RenderPipelines.ITEM_CUTOUT_GLINT),"Same name is not sufficient to authorize an incompatible shader");
   assertFalse(EntityGeometryManager.supported(RenderPipelines.ENTITY_CUTOUT_DISSOLVE));
+  assertFalse(EntityGeometryManager.capturedAsNonOpaque(RenderPipelines.SOLID_BLOCK,true),"Falling SOLID_BLOCK must use an opaque BLAS");
+  assertTrue(EntityGeometryManager.capturedAsNonOpaque(RenderPipelines.CUTOUT_BLOCK,true),"Falling CUTOUT_BLOCK retains any-hit alpha");
+  assertTrue(EntityGeometryManager.capturedAsNonOpaque(RenderPipelines.ENTITY_SOLID,false),"Normal entity policy remains unchanged");
   assertEquals(8|1,EntityGeometryManager.flags(RenderPipelines.ENTITY_CUTOUT));
   assertEquals(8|4,EntityGeometryManager.flags(RenderPipelines.ENTITY_TRANSLUCENT));
   assertEquals(8|2,EntityGeometryManager.flags(RenderPipelines.ENTITY_SOLID));
