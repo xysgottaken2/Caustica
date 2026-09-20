@@ -2,9 +2,9 @@
 #extension GL_EXT_ray_tracing : require
 layout(set=0,binding=0) uniform accelerationStructureEXT scene;
 layout(set=0,binding=1,rgba8) uniform image2D outputImage;
-struct Hit { vec3 color; uint found; ivec3 section; uint primitive; vec2 uv; uint sampled; };
+struct Hit { vec3 color; uint found; ivec3 section; uint primitive; vec2 uv; uint sampled; ivec2 atlasSize; vec2 quadSpan; uint mode; int levels; };
 layout(location=0) rayPayloadEXT Hit hit;
-layout(set=0,binding=4,std430) buffer Probe { uvec4 state; ivec4 section; vec4 uv; vec4 color; } probe;
+layout(set=0,binding=4,std430) buffer Probe { uvec4 state; ivec4 section; vec4 uv; vec4 color; uvec4 atlas; } probe;
 layout(push_constant,std430) uniform Camera { mat4 inverseViewProjection; vec4 origin; uvec4 frame; } camera;
 // GPU-only center-ray telemetry. One optional 1x1 trace writes this probe, then a barrier precedes
 // the image trace/HUD. No vertex, image, UV or hit-record data is ever mapped/read by the CPU.
@@ -60,6 +60,14 @@ const int label2[10]=int[](80,82,73,77,73,84,73,86,69,61);
 const int label3[3]=int[](85,86,61);
 const int label4[18]=int[](65,84,76,65,83,61,66,76,79,67,75,83,32,76,79,68,61,48);
 const int label5[16]=int[](84,69,88,84,85,82,69,32,83,65,77,80,76,69,68,61);
+const int label6[9]=int[](65,84,76,65,83,32,80,88,61);
+const int label7[6]=int[](84,69,88,69,76,61);
+const int label8[13]=int[](81,85,65,68,32,83,80,65,78,32,80,88,61);
+const int label9[6]=int[](70,69,84,67,72,61);
+const int label10[9]=int[](85,86,32,86,65,76,73,68,61);
+const int label11[10]=int[](86,73,69,87,32,77,73,80,83,61);
+const int texelText[6]=int[](84,69,88,69,76,48);
+const int linearText[7]=int[](76,73,78,69,65,82,48);
 int digit(uint v,int n,int count) {
     uint divisor=1u; for(int i=0;i<count-1-n;i++) divisor*=10u;
     return 48+int((v/divisor)%10u);
@@ -68,6 +76,12 @@ int yesNo(bool yes,int n) {
     if(yes) return n==0?89:n==1?69:n==2?83:32;
     return n==0?78:n==1?79:32;
 }
+bool validUV() { return probe.state.z!=0u && !any(isnan(probe.uv.xy)) && !any(isinf(probe.uv.xy)) && all(greaterThanEqual(probe.uv.xy,vec2(0))) && all(lessThanEqual(probe.uv.xy,vec2(1))); }
+int pairDigit(uvec2 value,int c,int digits) {
+    if(c<0 || c>=digits*2+1) return 32;
+    if(c==digits) return 44;
+    return digit(c<digits?value.x:value.y,c<digits?c:c-digits-1,digits);
+}
 int text(int row,int col) {
  if(row==0 && col<7) return label0[col];
  if(row==1 && col<8) return label1[col];
@@ -75,9 +89,15 @@ int text(int row,int col) {
  if(row==3 && col<3) return label3[col];
  if(row==4 && col<18) return label4[col];
  if(row==5 && col<16) return label5[col];
+ if(row==6 && col<9) return label6[col];
+ if(row==7 && col<6) return label7[col];
+ if(row==8 && col<13) return label8[col];
+ if(row==9 && col<6) return label9[col];
+ if(row==10 && col<9) return label10[col];
+ if(row==11 && col<10) return label11[col];
  if(row==0) return yesNo(probe.state.x!=0u,col-7);
  if(row==5) return yesNo(probe.state.z!=0u,col-16);
- if(probe.state.x==0u && (row==1 || row==2 || row==3)) return 32;
+ if(probe.state.x==0u && (row==1 || row==2 || row==3 || row>=6)) return 32;
  if(row==1) {
     int c=col-8; if(c<0 || c>=26) return 32;
     int axis=c/9, part=c%9;
@@ -88,14 +108,34 @@ int text(int row,int col) {
  }
  if(row==2 && col>=10 && col<19) return digit(probe.state.y,col-10,9);
  if(row==3) {
-    int c=col-3; if(c<0 || c>=13) return 32;
-    if(c==6) return 44;
-    int axis=c<6?0:1, part=c<6?c:c-7;
-    float uv=clamp(probe.uv[axis],0.0,1.0);
+    if(!validUV()) return 32;
+    int c=col-3; if(c<0 || c>=17) return 32;
+    if(c==8) return 44;
+    int axis=c<8?0:1, part=c<8?c:c-9;
+    float uv=probe.uv[axis];
     if(part==0) return 48+int(uv);
     if(part==1) return 46;
-    return digit(uint(fract(uv)*10000.0),part-2,4);
+    return digit(uint(fract(uv)*1000000.0),part-2,6);
  }
+ if(row==6) return pairDigit(probe.atlas.xy,col-9,5);
+ if(row==7 && validUV() && all(greaterThan(probe.atlas.xy,uvec2(0))))
+    return pairDigit(min(uvec2(floor(probe.uv.xy*vec2(probe.atlas.xy))),probe.atlas.xy-1u),col-6,5);
+ if(row==8 && !any(isnan(probe.uv.zw)) && !any(isinf(probe.uv.zw))) {
+    int c=col-13; if(c<0 || c>=17) return 32;
+    if(c==8) return 44;
+    int axis=c<8?0:1, part=c<8?c:c-9;
+    float span=clamp(probe.uv[axis+2],0.0,99999.99);
+    if(part<5) return digit(uint(span),part,5);
+    if(part==5) return 46;
+    return digit(uint(fract(span)*100.0),part-6,2);
+ }
+ if(row==9) {
+    int c=col-6;
+    if(probe.atlas.w==1u) return c>=0 && c<7 ? linearText[c] : 32;
+    return c>=0 && c<6 ? texelText[c] : 32;
+ }
+ if(row==10) return yesNo(validUV(),col-9);
+ if(row==11 && col>=10 && col<12) return digit(probe.atlas.z,col-10,2);
  return 32;
 }
 void main() {
@@ -103,7 +143,7 @@ void main() {
     ivec2 pixel=ivec2(gl_LaunchIDEXT.xy);
     if(!probePass && (camera.frame.w&2u)!=0u) {
         ivec2 panel=pixel-ivec2(8,8);
-        if(all(greaterThanEqual(panel,ivec2(0))) && all(lessThan(panel,ivec2(320,84)))) {
+        if(all(greaterThanEqual(panel,ivec2(0))) && all(lessThan(panel,ivec2(320,168)))) {
             ivec2 p=panel/2;
             int row=p.y/7, col=p.x/4;
             bool ink=(p.x%4<3 && p.y%7<5) && ((glyph(text(row,col))>>uint((p.y%7)*3+p.x%4))&1u)!=0u;
@@ -115,10 +155,11 @@ void main() {
     vec2 uv=probePass ? vec2(0.5) : (vec2(gl_LaunchIDEXT.xy)+0.5)/vec2(gl_LaunchSizeEXT.xy);
     vec4 projected=camera.inverseViewProjection*vec4(uv*2.0-1.0,0.5,1.0);
     vec3 direction=normalize(projected.xyz/projected.w-camera.origin.xyz);
-    hit.color=vec3(0); hit.found=0u; hit.section=ivec3(0); hit.primitive=0u; hit.uv=vec2(0); hit.sampled=0u;
+    hit.color=vec3(0); hit.found=0u; hit.section=ivec3(0); hit.primitive=0u; hit.uv=vec2(0); hit.sampled=0u; hit.atlasSize=ivec2(0); hit.quadSpan=vec2(0); hit.mode=0u; hit.levels=0;
     traceRayEXT(scene,gl_RayFlagsOpaqueEXT,0xff,0,0,0,camera.origin.xyz,0.001,direction,4096.0,0);
     if(probePass) {
         probe.state=uvec4(hit.found,hit.primitive,hit.sampled,0);
-        probe.section=ivec4(hit.section,0); probe.uv=vec4(hit.uv,0,0); probe.color=vec4(hit.color,1);
+        probe.section=ivec4(hit.section,0); probe.uv=vec4(hit.uv,hit.quadSpan); probe.color=vec4(hit.color,1);
+        probe.atlas=uvec4(hit.atlasSize,uint(hit.levels),hit.mode);
     } else imageStore(outputImage,pixel,vec4(hit.color,1));
 }

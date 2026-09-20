@@ -148,6 +148,11 @@ public final class RayTracingRenderer {
                     LOG.info("[RT] Storage image created: {}x{}; destination Minecraft image=0x{}", target.width, target.height, Long.toHexString(color.vkImage()));
                 }
                 nextOutput.validateTarget(color);
+                if (RtOptions.CHUNKS) {
+                    var window=renderer.gameRenderState().windowRenderState;
+                    TextureQualityDiagnostics.output(nextOutput.width,nextOutput.height,target.width,target.height,
+                            color.getWidth(0),color.getHeight(0),window.width,window.height);
+                }
                 WorldGeometryManager.Prepared prepared = null;
                 var nextTestBlas = testBlas;
                 var nextTestTlas = testTlas;

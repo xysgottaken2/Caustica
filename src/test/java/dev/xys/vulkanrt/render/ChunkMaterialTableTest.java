@@ -28,6 +28,15 @@ final class ChunkMaterialTableTest {
         assertEquals(-2,bytes.getInt(32)); assertEquals(4,bytes.getInt(36)); assertEquals(4,bytes.getInt(40));
         assertEquals(-3,bytes.getInt(80)); assertEquals(5,bytes.getInt(88)); assertEquals(0,bytes.getInt(92));
     }
+    @Test void comparisonModeChangesOnlyReservedMetadataWordNotGeometryOrUVLayout() {
+        var texel=ByteBuffer.allocate(48).order(ByteOrder.nativeOrder());
+        var linear=ByteBuffer.allocate(48).order(ByteOrder.nativeOrder());
+        var entry=new ChunkMaterialTable.Entry(SectionPos.asLong(-4,4,5),0x123400L,layout());
+        ChunkMaterialTable.pack(texel,0,entry,ChunkTextureSampling.TEXEL);
+        ChunkMaterialTable.pack(linear,0,entry,ChunkTextureSampling.LINEAR);
+        assertEquals(0,texel.getInt(28)); assertEquals(1,linear.getInt(28));
+        for(int i=0;i<48;i+=4) if(i!=28) assertEquals(texel.getInt(i),linear.getInt(i));
+    }
     @Test void rejectsMissingUnsupportedOrUnalignedAttributesBeforeGpuUse() {
         var bytes=ByteBuffer.allocate(48).order(ByteOrder.nativeOrder());
         assertThrows(IllegalArgumentException.class,()->ChunkMaterialTable.pack(bytes,0,new ChunkMaterialTable.Entry(0,0,layout())));

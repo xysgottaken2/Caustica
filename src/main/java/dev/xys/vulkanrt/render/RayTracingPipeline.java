@@ -36,7 +36,7 @@ public final class RayTracingPipeline implements AutoCloseable {
                 bindings.get(2).binding(2).descriptorType(VK_DESCRIPTOR_TYPE_STORAGE_BUFFER).descriptorCount(1).stageFlags(VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR);
                 bindings.get(3).binding(3).descriptorType(VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER).descriptorCount(1).stageFlags(VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR);
                 bindings.get(4).binding(4).descriptorType(VK_DESCRIPTOR_TYPE_STORAGE_BUFFER).descriptorCount(1).stageFlags(VK_SHADER_STAGE_RAYGEN_BIT_KHR);
-                hitProbe = new GpuBuffer(context,64,VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,false,false);
+                hitProbe = new GpuBuffer(context,ChunkTextureSampling.PROBE_BYTES,VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,false,false);
                 org.slf4j.LoggerFactory.getLogger("native_vulkan_rt").info("[RT] Chunks material shader: vanilla atlas + GPU vertex addresses; GPU-only center-hit HUD={}; no readback, unchanged 3-group SBT", materialDiagnostics);
             }
             var out = stack.mallocLong(1);
@@ -144,10 +144,11 @@ public final class RayTracingPipeline implements AutoCloseable {
                 writes.get(1).sType$Default().dstSet(set).dstBinding(1).descriptorCount(1)
                         .descriptorType(VK_DESCRIPTOR_TYPE_STORAGE_IMAGE).pImageInfo(image);
                 if (chunks) {
+                    TerrainAtlasCapture.binding(atlas);
                     var table = VkDescriptorBufferInfo.calloc(1,stack).buffer(materials.buffer.handle()).offset(0).range(materials.buffer.size);
                     var atlasImage = VkDescriptorImageInfo.calloc(1,stack).imageView(atlas.view().vkImageView())
                             .sampler(atlas.sampler().vkSampler()).imageLayout(VK_IMAGE_LAYOUT_GENERAL);
-                    var probe = VkDescriptorBufferInfo.calloc(1,stack).buffer(hitProbe.handle()).offset(0).range(64);
+                    var probe = VkDescriptorBufferInfo.calloc(1,stack).buffer(hitProbe.handle()).offset(0).range(ChunkTextureSampling.PROBE_BYTES);
                     writes.get(2).sType$Default().dstSet(set).dstBinding(2).descriptorCount(1).descriptorType(VK_DESCRIPTOR_TYPE_STORAGE_BUFFER).pBufferInfo(table);
                     writes.get(3).sType$Default().dstSet(set).dstBinding(3).descriptorCount(1).descriptorType(VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER).pImageInfo(atlasImage);
                     writes.get(4).sType$Default().dstSet(set).dstBinding(4).descriptorCount(1).descriptorType(VK_DESCRIPTOR_TYPE_STORAGE_BUFFER).pBufferInfo(probe);

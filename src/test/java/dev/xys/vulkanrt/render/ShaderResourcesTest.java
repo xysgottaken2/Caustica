@@ -43,6 +43,37 @@ final class ShaderResourcesTest {
         assertEquals(java.util.Set.of(2,3),bindings);
         assertTrue(rowsStride48,"Material std430 row must match Java packer");
     }
+    @Test void bothComparisonPathsSampleViewMipZeroAndDiagnosticProbeHasFiveVectors() throws Exception {
+        var words=shader("chunks.rchit");
+        var zeroConstants=new HashSet<Integer>();
+        var lods=new java.util.ArrayList<Integer>();
+        boolean fetch=false, filtered=false;
+        for(int i=20;i<words.limit();) {
+            int head=words.getInt(i), count=head>>>16, opcode=head&0xffff;
+            assertTrue(count>0);
+            if(opcode==43 && count==4 && words.getInt(i+12)==0) zeroConstants.add(words.getInt(i+8));
+            if(opcode==95 || opcode==88) { // OpImageFetch / OpImageSampleExplicitLod
+                fetch |= opcode==95; filtered |= opcode==88;
+                assertTrue(count>=7); assertEquals(2,words.getInt(i+20)); // Lod, no implicit/bias selection
+                lods.add(words.getInt(i+24));
+            }
+            i+=count*4;
+        }
+        assertTrue(fetch,"Unfiltered atlas texel path must be executable SPIR-V");
+        assertTrue(filtered,"0.5.0 filtered A/B path must remain available");
+        assertTrue(zeroConstants.containsAll(lods),"Both paths explicitly use view LOD 0, never an arbitrary reduced mip");
+        var raygen=shader("chunks.rgen");
+        var offsets=new java.util.HashMap<Integer,java.util.Map<Integer,Integer>>();
+        for(int i=20;i<raygen.limit();) {
+            int head=raygen.getInt(i), count=head>>>16;
+            assertTrue(count>0);
+            if((head&0xffff)==72 && count==5 && raygen.getInt(i+12)==35) // OpMemberDecorate Offset
+                offsets.computeIfAbsent(raygen.getInt(i+4),k->new java.util.HashMap<>()).put(raygen.getInt(i+8),raygen.getInt(i+16));
+            i+=count*4;
+        }
+        assertTrue(offsets.values().stream().anyMatch(m->m.equals(java.util.Map.of(0,0,1,16,2,32,3,48,4,64))));
+        assertEquals(80,ChunkTextureSampling.PROBE_BYTES);
+    }
     @Test void triangleShaderStillUsesOnlyItsOriginalDescriptors() throws Exception {
         var words=shader("primary.rgen");
         var bindings=new HashSet<Integer>();

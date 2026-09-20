@@ -19,7 +19,7 @@ import java.util.stream.Collectors;
 /** One cached BLAS per actual SOLID section draw; a single TLAS contains the entire valid set.
  * Capture, lifetime validation and enqueue all precede vanilla's later heap uploads/reuse.
  * No compiler interception, CPU vertex readback or second terrain mesher.
- * Single-section integration user-verified in 0.3.1; multi-section GPU runtime pending validation. */
+ * Geometry/cache user-verified with 444 sections in 0.5.0; texture-quality correction pending runtime validation. */
 public final class WorldGeometryManager implements AutoCloseable {
     private static final Logger LOG = LoggerFactory.getLogger("native_vulkan_rt");
     private final VulkanRayTracingContext context;
