@@ -92,6 +92,14 @@ public final class AccelerationStructureManager {
     public Structure buildSectionBlas(CommandBatch batch,
             com.mojang.renderpearl.backend.vulkan.VulkanGpuBuffer source, long sourceOffset,
             dev.xys.vulkanrt.geometry.SectionGeometryLayout layout) {
+        return buildSectionBlas(batch,source,sourceOffset,layout,false);
+    }
+    static int sectionGeometryFlags(boolean cutout) {
+        return cutout ? VK_GEOMETRY_NO_DUPLICATE_ANY_HIT_INVOCATION_BIT_KHR : VK_GEOMETRY_OPAQUE_BIT_KHR;
+    }
+    public Structure buildSectionBlas(CommandBatch batch,
+            com.mojang.renderpearl.backend.vulkan.VulkanGpuBuffer source, long sourceOffset,
+            dev.xys.vulkanrt.geometry.SectionGeometryLayout layout, boolean cutout) {
         long bytes = layout.vertexBytes();
         if (source.isClosed() || (source.usage() & com.mojang.renderpearl.api.buffers.GpuBuffer.USAGE_COPY_SRC) == 0
                 || sourceOffset < 0 || sourceOffset > source.size() - bytes || (sourceOffset & 3) != 0)
@@ -108,14 +116,14 @@ public final class AccelerationStructureManager {
                     VK_PIPELINE_STAGE_2_TRANSFER_BIT_KHR, VK_ACCESS_2_TRANSFER_READ_BIT_KHR);
             vkCmdCopyBuffer(batch.commands, source.vkBuffer(), vertices.handle(),
                     VkBufferCopy.calloc(1, stack).srcOffset(sourceOffset).dstOffset(0).size(bytes));
-            // SOLID has no per-section index allocation: vanilla uses shared sequential QUADS.
+            // SOLID and CUTOUT have no per-section index allocation: vanilla uses shared sequential QUADS.
             // Reproduce that topology only, without changing/re-tessellating a single vertex.
             var quads = indexBytes.asIntBuffer();
             for (int v = 0; v < layout.vertexCount(); v += 4)
                 quads.put(v).put(v + 1).put(v + 2).put(v + 2).put(v + 3).put(v);
             indices = GpuBuffer.upload(context, batch, indexBytes, VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR);
             var geometry = VkAccelerationStructureGeometryKHR.calloc(1, stack).sType$Default()
-                    .geometryType(VK_GEOMETRY_TYPE_TRIANGLES_KHR).flags(VK_GEOMETRY_OPAQUE_BIT_KHR);
+                    .geometryType(VK_GEOMETRY_TYPE_TRIANGLES_KHR).flags(sectionGeometryFlags(cutout));
             geometry.geometry().triangles().sType$Default().vertexFormat(VK_FORMAT_R32G32B32_SFLOAT)
                     .vertexStride(layout.stride()).maxVertex(layout.vertexCount() - 1).indexType(VK_INDEX_TYPE_UINT32);
             geometry.geometry().triangles().vertexData().deviceAddress(vertices.address() + layout.positionOffset());
@@ -123,7 +131,8 @@ public final class AccelerationStructureManager {
             result = allocateAndBuild(batch, geometry, VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR, layout.triangles(), null, false);
             result.vertices = vertices; result.indices = indices;
             org.slf4j.LoggerFactory.getLogger("native_vulkan_rt").info(
-                    "[RT] Chunk BLAS buffers: vertex=0x{}, index=0x{}, triangles={}; original interleaved attributes retained",
+                    "[RT] Chunk BLAS buffers: layer={} vertex=0x{}, index=0x{}, triangles={}; original interleaved attributes retained",
+                    cutout ? "CUTOUT (non-opaque/any-hit)" : "SOLID (opaque)",
                     Long.toHexString(vertices.handle()), Long.toHexString(indices.handle()), layout.triangles());
             return result;
         } catch (RuntimeException | Error failure) {

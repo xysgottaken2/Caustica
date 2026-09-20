@@ -7,7 +7,7 @@ import static dev.xys.vulkanrt.build.TerrainHookContract.*
 
 class TerrainHookContractTest {
     private static Map<String, List<String>> expected() {
-        [(EXTRACT): [GET_MESH, GET_SLICE],
+        [(EXTRACT): [GET_MESH, LAYERS, GET_SLICE],
          'prepareChunkRenders()V': [LEVEL + '.' + EXTRACT],
          'prepareChunkRendersIndirect()V': [LEVEL + '.' + EXTRACT],
          'render()V': [LEVEL + '.prepareChunkRenders()V', LEVEL + '.prepareChunkRendersIndirect()V',
@@ -22,6 +22,10 @@ class TerrainHookContractTest {
     }
     @Test void rejectsChangedRenderLifetimeOrder() {
         def methods = expected(); methods['render()V'] = methods['render()V'].reverse()
+        assertFalse(verifyCalls(methods).empty)
+    }
+    @Test void rejectsExtractorThatNoLongerEnumeratesCutoutLayer() {
+        def methods=expected(); methods[EXTRACT].remove(LAYERS)
         assertFalse(verifyCalls(methods).empty)
     }
     @Test void readsCallsFromClassfileInsteadOfSkippingCode() {

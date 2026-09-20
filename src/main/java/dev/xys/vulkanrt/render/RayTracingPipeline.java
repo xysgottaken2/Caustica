@@ -27,14 +27,14 @@ public final class RayTracingPipeline implements AutoCloseable {
     public RayTracingPipeline(VulkanRayTracingContext context) {
         this.context = context;
         org.slf4j.LoggerFactory.getLogger("native_vulkan_rt").info("[RT] Creating ray tracing pipeline...");
-        long[] modules = new long[3];
+        long[] modules = new long[chunks ? 4 : 3];
         try (MemoryStack stack = MemoryStack.stackPush()) {
             var bindings = VkDescriptorSetLayoutBinding.calloc(chunks ? 5 : 2, stack);
             bindings.get(0).binding(0).descriptorType(VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR).descriptorCount(1).stageFlags(VK_SHADER_STAGE_RAYGEN_BIT_KHR);
             bindings.get(1).binding(1).descriptorType(VK_DESCRIPTOR_TYPE_STORAGE_IMAGE).descriptorCount(1).stageFlags(VK_SHADER_STAGE_RAYGEN_BIT_KHR);
             if (chunks) {
-                bindings.get(2).binding(2).descriptorType(VK_DESCRIPTOR_TYPE_STORAGE_BUFFER).descriptorCount(1).stageFlags(VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR);
-                bindings.get(3).binding(3).descriptorType(VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER).descriptorCount(1).stageFlags(VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR);
+                bindings.get(2).binding(2).descriptorType(VK_DESCRIPTOR_TYPE_STORAGE_BUFFER).descriptorCount(1).stageFlags(VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR | VK_SHADER_STAGE_ANY_HIT_BIT_KHR);
+                bindings.get(3).binding(3).descriptorType(VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER).descriptorCount(1).stageFlags(VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR | VK_SHADER_STAGE_ANY_HIT_BIT_KHR);
                 bindings.get(4).binding(4).descriptorType(VK_DESCRIPTOR_TYPE_STORAGE_BUFFER).descriptorCount(1).stageFlags(VK_SHADER_STAGE_RAYGEN_BIT_KHR);
                 hitProbe = new GpuBuffer(context,ChunkTextureSampling.PROBE_BYTES,VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,false,false);
                 org.slf4j.LoggerFactory.getLogger("native_vulkan_rt").info("[RT] Chunks material shader: vanilla atlas + GPU vertex addresses; GPU-only center-hit HUD={}; no readback, unchanged 3-group SBT", materialDiagnostics);
@@ -47,10 +47,10 @@ public final class RayTracingPipeline implements AutoCloseable {
                     .pSetLayouts(stack.longs(descriptorLayout)).pPushConstantRanges(pushRange), null, out), "vkCreatePipelineLayout(RT)");
             pipelineLayout = out.get(0);
             String prefix = chunks ? "chunks" : "primary";
-            String[] resources = {prefix + ".rgen.spv", prefix + ".rmiss.spv", prefix + ".rchit.spv"};
-            int[] stageBits = {VK_SHADER_STAGE_RAYGEN_BIT_KHR, VK_SHADER_STAGE_MISS_BIT_KHR, VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR};
-            var stages = VkPipelineShaderStageCreateInfo.calloc(3, stack);
-            for (int i = 0; i < 3; i++) {
+            String[] resources = {prefix + ".rgen.spv", prefix + ".rmiss.spv", prefix + ".rchit.spv", "chunks.rahit.spv"};
+            int[] stageBits = {VK_SHADER_STAGE_RAYGEN_BIT_KHR, VK_SHADER_STAGE_MISS_BIT_KHR, VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR, VK_SHADER_STAGE_ANY_HIT_BIT_KHR};
+            var stages = VkPipelineShaderStageCreateInfo.calloc(modules.length, stack);
+            for (int i = 0; i < modules.length; i++) {
                 modules[i] = loadModule(resources[i]);
                 stages.get(i).sType$Default().stage(stageBits[i]).module(modules[i]).pName(stack.UTF8("main"));
             }
@@ -61,6 +61,7 @@ public final class RayTracingPipeline implements AutoCloseable {
             groups.get(0).type(VK_RAY_TRACING_SHADER_GROUP_TYPE_GENERAL_KHR).generalShader(0);
             groups.get(1).type(VK_RAY_TRACING_SHADER_GROUP_TYPE_GENERAL_KHR).generalShader(1);
             groups.get(2).type(VK_RAY_TRACING_SHADER_GROUP_TYPE_TRIANGLES_HIT_GROUP_KHR).closestHitShader(2);
+            if(chunks) groups.get(2).anyHitShader(3); // Same hit group/SBT record; SOLID stays opaque.
             var create = VkRayTracingPipelineCreateInfoKHR.calloc(1, stack).sType$Default()
                     .pStages(stages).pGroups(groups).maxPipelineRayRecursionDepth(1).layout(pipelineLayout)
                     .basePipelineIndex(-1).basePipelineHandle(VK_NULL_HANDLE);

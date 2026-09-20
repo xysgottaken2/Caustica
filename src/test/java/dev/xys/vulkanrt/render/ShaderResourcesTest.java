@@ -21,6 +21,7 @@ final class ShaderResourcesTest {
         for (String family : new String[]{"primary","chunks"}) for (String stage : new String[]{"rgen","rmiss","rchit"})
             shader(family+"."+stage);
         shader("overlay.comp");
+        shader("chunks.rahit");
     }
     @Test void physicalVertexReadsDoNotRequireShaderInt64OrDescriptorIndexing() throws Exception {
         var words=shader("chunks.rchit");
@@ -44,7 +45,7 @@ final class ShaderResourcesTest {
         assertEquals(java.util.Set.of(2,3),bindings);
         assertTrue(rowsStride80,"Material std430 row must match Java packer");
     }
-    @Test void bothComparisonPathsSampleViewMipZeroAndDiagnosticProbeHasNineVectors() throws Exception {
+    @Test void bothComparisonPathsSampleViewMipZeroAndDiagnosticProbeHasTenVectors() throws Exception {
         var words=shader("chunks.rchit");
         var zeroConstants=new HashSet<Integer>();
         var lods=new java.util.ArrayList<Integer>();
@@ -72,8 +73,8 @@ final class ShaderResourcesTest {
                 offsets.computeIfAbsent(raygen.getInt(i+4),k->new java.util.HashMap<>()).put(raygen.getInt(i+8),raygen.getInt(i+16));
             i+=count*4;
         }
-        assertTrue(offsets.values().stream().anyMatch(m->m.equals(java.util.Map.of(0,0,1,16,2,32,3,48,4,64,5,80,6,96,7,112,8,128))));
-        assertEquals(144,ChunkTextureSampling.PROBE_BYTES);
+        assertTrue(offsets.values().stream().anyMatch(m->m.equals(java.util.Map.of(0,0,1,16,2,32,3,48,4,64,5,80,6,96,7,112,8,128,9,144))));
+        assertEquals(160,ChunkTextureSampling.PROBE_BYTES);
     }
     @Test void overlayComputeIsOfflineCompiledWithBoundedInterfaceAndNoExtraDescriptors() throws Exception {
         var words=shader("overlay.comp");
@@ -93,6 +94,34 @@ final class ShaderResourcesTest {
         assertTrue(compute);assertTrue(atomicExchange);assertTrue(localSize);assertTrue(pushEnd);
         assertTrue(capabilities.contains(5347));assertFalse(capabilities.contains(11));
         assertEquals(72,CoplanarOverlayMapper.PUSH_BYTES);
+    }
+    @Test void anyHitReallySamplesAlphaAndIgnoresIntersectionsWithoutForcingOpaqueRays() throws Exception {
+        var words=shader("chunks.rahit");
+        var bindings=new HashSet<Integer>();var capabilities=new HashSet<Integer>();
+        boolean anyHit=false,ignore=false,fetch=false,cutoff=false,stride=false;
+        for(int i=20;i<words.limit();) {
+            int head=words.getInt(i),count=head>>>16,op=head&0xffff;assertTrue(count>0);
+            if(op==15) anyHit=words.getInt(i+4)==5315;
+            if(op==4448) ignore=true;
+            if(op==95) fetch=true;
+            if(op==17) capabilities.add(words.getInt(i+4));
+            if(op==43 && count==4 && words.getInt(i+12)==Float.floatToIntBits(0.5f)) cutoff=true;
+            if(op==71 && count==4) {
+                if(words.getInt(i+8)==33) bindings.add(words.getInt(i+12));
+                if(words.getInt(i+8)==6 && words.getInt(i+12)==80) stride=true;
+            }
+            i+=count*4;
+        }
+        assertTrue(anyHit);assertTrue(ignore);assertTrue(fetch);assertTrue(cutoff);assertTrue(stride);
+        assertEquals(java.util.Set.of(2,3),bindings);assertFalse(capabilities.contains(11));
+        var raygen=shader("chunks.rgen");var zeros=new HashSet<Integer>();var flags=new java.util.ArrayList<Integer>();
+        for(int i=20;i<raygen.limit();) {
+            int h=raygen.getInt(i),n=h>>>16,op=h&0xffff;assertTrue(n>0);
+            if(op==43 && n==4 && raygen.getInt(i+12)==0) zeros.add(raygen.getInt(i+8));
+            if(op==4445) flags.add(raygen.getInt(i+8));
+            i+=n*4;
+        }
+        assertFalse(flags.isEmpty());assertTrue(zeros.containsAll(flags),"Chunks rays must not force OPAQUE on CUTOUT");
     }
     @Test void triangleShaderStillUsesOnlyItsOriginalDescriptors() throws Exception {
         var words=shader("primary.rgen");

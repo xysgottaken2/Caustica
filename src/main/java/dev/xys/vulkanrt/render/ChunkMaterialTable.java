@@ -11,7 +11,13 @@ import static org.lwjgl.vulkan.VK10.VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
  * Only CPU-known addresses/layout/section metadata are uploaded. Vertex bytes stay on the GPU. */
 public final class ChunkMaterialTable implements AutoCloseable {
     public static final int ROW_BYTES = 80;
-    public record Entry(long section, long vertexAddress, SectionGeometryLayout layout, CoplanarOverlayMapper.Overlay overlay) {
+    public static final int CUTOUT = 1, CULL_BACK = 2;
+    public record Entry(long section, long vertexAddress, SectionGeometryLayout layout, CoplanarOverlayMapper.Overlay overlay, int flags) {
+        public Entry {
+            if((flags & ~(CUTOUT|CULL_BACK))!=0 || flags==CULL_BACK || (flags!=0 && overlay!=null))
+                throw new IllegalArgumentException("Invalid layer/material flags");
+        }
+        public Entry(long section,long vertexAddress,SectionGeometryLayout layout,CoplanarOverlayMapper.Overlay overlay) { this(section,vertexAddress,layout,overlay,0); }
         public Entry(long section,long vertexAddress,SectionGeometryLayout layout) { this(section,vertexAddress,layout,null); }
     }
     public final GpuBuffer buffer;
@@ -53,7 +59,7 @@ public final class ChunkMaterialTable implements AutoCloseable {
         bytes.putInt(offset+8,layout.stride()/4).putInt(offset+12,uv);
         bytes.putInt(offset+16,color).putInt(offset+20,layout.vertexCount()).putInt(offset+24,layout.triangles()).putInt(offset+28,sampling.shaderId);
         bytes.putInt(offset+32,SectionPos.x(entry.section())).putInt(offset+36,SectionPos.y(entry.section()))
-                .putInt(offset+40,SectionPos.z(entry.section())).putInt(offset+44,0);
+                .putInt(offset+40,SectionPos.z(entry.section())).putInt(offset+44,entry.flags());
         var overlay=entry.overlay();
         bytes.putLong(offset+48,overlay==null?0:overlay.vertices.address());
         bytes.putInt(offset+56,overlay==null?0:overlay.format.stride()/4).putInt(offset+60,overlay==null?0:attribute(overlay.format,"UV0","RG32_FLOAT",8));

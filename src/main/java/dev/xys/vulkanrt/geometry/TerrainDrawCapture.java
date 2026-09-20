@@ -106,6 +106,7 @@ public final class TerrainDrawCapture {
     public static void finish(LevelRenderer owner) { if (level == owner) completed = true; }
     public static boolean ready(LevelRenderer owner, SectionRenderDispatcher source) { return started && completed && level == owner && source == dispatcher; }
     public static Map<Long, Draw> draws() { return Collections.unmodifiableMap(draws); }
+    public static Map<Long, Draw> cutoutDraws() { return Collections.unmodifiableMap(cutouts); }
     public static Draw cutout(long section) { return cutouts.get(section); }
     public static int validSections() { return draws.size(); }
     public static boolean current(Draw draw) { return draw != null && draw.frame() == frame && completed; }
@@ -127,7 +128,7 @@ public final class TerrainDrawCapture {
         log.info("[RT][chunks-diag] stage=extractSectionDrawGroups frame={} started={} completed={} sections={} SOLID calls={} valid={} validSections={} pinSeen={} camera=({}, {}, {}) cameraSection=({}, {}, {})",
                 frame, started, completed, sections, solidCalls, valid, draws.size(), sawPin, cameraX, cameraY, cameraZ,
                 (int)Math.floor(cameraX/16), (int)Math.floor(cameraY/16), (int)Math.floor(cameraZ/16));
-        log.info("[RT][coplanar-diag] CUTOUT calls={} accepted={} rejected={} firstRejection={}; auxiliary shading data only, not AS geometry",cutoutCalls,cutouts.size(),cutoutRejected,firstCutoutRejected);
+        log.info("[RT][cutout-capture] stage=extractSectionDrawGroups group=OPAQUE pipeline=CUTOUT_TERRAIN/CUTOUT_TERRAIN_MULTIDRAW CUTOUT calls={} accepted={} rejected={} firstRejection={} (capture receipts; BLAS/TLAS residency reported separately)",cutoutCalls,cutouts.size(),cutoutRejected,firstCutoutRejected);
         for (var failure : SectionGeometrySanity.Failure.values()) if (rejected[failure.ordinal()] > 0)
             log.info("[RT][chunks-diag] rejected {}: {}", failure, rejected[failure.ordinal()]);
         if (firstRejected != null) log.info("[RT][chunks-diag] rejected sample: {}", firstRejected);

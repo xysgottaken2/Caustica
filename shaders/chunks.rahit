@@ -1,0 +1,58 @@
+#version 460
+#extension GL_EXT_ray_tracing : require
+#extension GL_EXT_buffer_reference2 : require
+#extension GL_EXT_buffer_reference_uvec2 : require
+struct Hit { vec3 color; uint found; ivec3 section; uint primitive; vec2 uv; uint sampled; ivec2 atlasSize; vec2 quadSpan; uint mode; int levels; vec4 baseTint; vec4 overlayTint; vec4 sampleColor; vec2 baseUv; uint overlayState; uint face; uint layer; uvec4 alphaStats; };
+layout(location=0) rayPayloadInEXT Hit hit;
+hitAttributeEXT vec2 barycentric;
+struct Material { uvec4 addressLayout; uvec4 attributes; ivec4 section; uvec4 overlay; uvec4 mapping; };
+layout(set=0,binding=2,std430) readonly buffer Materials { Material rows[]; } materials;
+layout(set=0,binding=3) uniform sampler2D blockAtlas;
+layout(buffer_reference,std430,buffer_reference_align=4) readonly buffer Vertices { uint words[]; };
+vec2 uvAt(Vertices v,Material m,uint index) {
+    uint i=index*m.addressLayout.z+m.addressLayout.w;
+    return vec2(uintBitsToFloat(v.words[i]),uintBitsToFloat(v.words[i+1u]));
+}
+vec4 colorAt(Vertices v,Material m,uint index) {
+    return unpackUnorm4x8(v.words[index*m.addressLayout.z+m.attributes.x]);
+}
+vec3 positionAt(Vertices v,Material m,uint index) {
+    uint i=index*m.addressLayout.z+m.mapping.w;
+    return vec3(uintBitsToFloat(v.words[i]),uintBitsToFloat(v.words[i+1u]),uintBitsToFloat(v.words[i+2u]));
+}
+void main() {
+    if(gl_InstanceID>=materials.rows.length()) { ignoreIntersectionEXT; }
+    Material m=materials.rows[gl_InstanceID];
+    // SOLID geometries carry OPAQUE; no force-opaque ray flag may bypass this stage on CUTOUT.
+    if((uint(m.section.w)&1u)==0u) return;
+    uint primitive=uint(gl_PrimitiveID),base=(primitive/2u)*4u;
+    if(primitive>=m.attributes.z || base+3u>=m.attributes.y) { ignoreIntersectionEXT; }
+    uvec3 indices=base+((primitive&1u)==0u ? uvec3(0,1,2) : uvec3(2,3,0));
+    Vertices v=Vertices(m.addressLayout.xy);
+    // FaceInfo/BakedQuad winding points outward in object/section space. Do not change SOLID's
+    // existing two-sided instance flags; honor the CUTOUT pipeline's isCull() here instead.
+    if((uint(m.section.w)&2u)!=0u) {
+        vec3 a=positionAt(v,m,indices.x),b=positionAt(v,m,indices.y),c=positionAt(v,m,indices.z);
+        if(dot(cross(b-a,c-a),gl_ObjectRayDirectionEXT)>=0.0) { ignoreIntersectionEXT; }
+    }
+    vec3 w=vec3(1.0-barycentric.x-barycentric.y,barycentric);
+    vec2 uv=uvAt(v,m,indices.x)*w.x+uvAt(v,m,indices.y)*w.y+uvAt(v,m,indices.z)*w.z;
+    if(any(isnan(uv)) || any(isinf(uv))) { ignoreIntersectionEXT; }
+    vec4 color=colorAt(v,m,indices.x)*w.x+colorAt(v,m,indices.y)*w.y+colorAt(v,m,indices.z)*w.z;
+    ivec2 size=textureSize(blockAtlas,0);
+    ivec2 texel=clamp(ivec2(floor(clamp(uv,0.0,1.0)*vec2(size))),ivec2(0),size-1);
+    // Same atlas view, sampling mode and LOD as the closest-hit; not a second sampler/atlas.
+    vec4 sampleColor=m.attributes.w==1u ? textureLod(blockAtlas,uv,0.0) : texelFetch(blockAtlas,texel,0);
+    float alpha=sampleColor.a*color.a;
+    bool discardAlpha=isnan(alpha) || isinf(alpha) || alpha<0.5;
+    if(all(equal(gl_LaunchSizeEXT.xy,uvec2(1)))) {
+        hit.alphaStats.x++;
+        if(discardAlpha) hit.alphaStats.y++;
+        if(!isnan(alpha) && !isinf(alpha)) {
+            hit.alphaStats.z=floatBitsToUint(min(uintBitsToFloat(hit.alphaStats.z),alpha));
+            hit.alphaStats.w=floatBitsToUint(max(uintBitsToFloat(hit.alphaStats.w),alpha));
+        }
+    }
+    // Do not terminate accepted hits: traversal must still find the nearest SOLID/CUTOUT surface.
+    if(discardAlpha) { ignoreIntersectionEXT; }
+}

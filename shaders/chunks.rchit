@@ -3,7 +3,7 @@
 #extension GL_EXT_buffer_reference2 : require
 #extension GL_EXT_buffer_reference_uvec2 : require
 
-struct Hit { vec3 color; uint found; ivec3 section; uint primitive; vec2 uv; uint sampled; ivec2 atlasSize; vec2 quadSpan; uint mode; int levels; vec4 baseTint; vec4 overlayTint; vec4 sampleColor; vec2 baseUv; uint overlayState; uint face; };
+struct Hit { vec3 color; uint found; ivec3 section; uint primitive; vec2 uv; uint sampled; ivec2 atlasSize; vec2 quadSpan; uint mode; int levels; vec4 baseTint; vec4 overlayTint; vec4 sampleColor; vec2 baseUv; uint overlayState; uint face; uint layer; uvec4 alphaStats; };
 layout(location=0) rayPayloadInEXT Hit hit;
 hitAttributeEXT vec2 barycentric;
 struct Material { uvec4 addressLayout; uvec4 attributes; ivec4 section; uvec4 overlay; uvec4 mapping; };
@@ -33,7 +33,7 @@ void main() {
     hit.color=vec3(1,0,1); // Invalid metadata must be visibly different from a successful atlas sample.
     if (gl_InstanceID >= materials.rows.length()) return;
     Material m=materials.rows[gl_InstanceID];
-    hit.section=m.section.xyz;
+    hit.section=m.section.xyz; hit.layer=uint(m.section.w)&1u;
     if (uint(gl_PrimitiveID)>=m.attributes.z) return;
     // Exactly the implicit QUADS indices copied into the BLAS: 0,1,2, 2,3,0.
     uint base=(uint(gl_PrimitiveID)/2u)*4u;

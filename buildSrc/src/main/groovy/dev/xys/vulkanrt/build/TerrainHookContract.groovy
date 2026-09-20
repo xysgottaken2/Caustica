@@ -8,6 +8,7 @@ final class TerrainHookContract {
     static final String DISPATCHER = 'net/minecraft/client/renderer/chunk/SectionRenderDispatcher'
     static final String MESH = 'Lnet/minecraft/client/renderer/chunk/SectionMesh;'
     static final String EXTRACT = 'extractSectionDrawGroups(ZLjava/util/List;Ljava/util/Map;)I'
+    static final String LAYERS = 'net/minecraft/client/renderer/chunk/ChunkSectionLayer.values()[Lnet/minecraft/client/renderer/chunk/ChunkSectionLayer;'
     static final String GET_MESH = DISPATCHER + '$RenderSection.getSectionMesh()' + MESH
     static final String GET_SLICE = DISPATCHER + '.getRenderSectionSlice(' + MESH +
             'Lnet/minecraft/client/renderer/chunk/ChunkSectionLayer;)L' + DISPATCHER + '$RenderSectionBufferSlice;'
@@ -31,6 +32,8 @@ final class TerrainHookContract {
     static List<String> verifyCalls(Map<String, List<String>> methods) {
         List<String> errors = []
         List<String> extractor = methods[EXTRACT] ?: []
+        if (extractor.count(LAYERS) != 1 || extractor.indexOf(LAYERS) >= extractor.indexOf(GET_SLICE))
+            errors.add('Terrain hook: extractor must enumerate actual ChunkSectionLayer values before layer-specific slices (including CUTOUT)')
         if (extractor.count(GET_MESH) != 1 || extractor.count(GET_SLICE) != 1
                 || extractor.indexOf(GET_MESH) >= extractor.indexOf(GET_SLICE))
             errors.add('Terrain hook: expected one owner.getSectionMesh then one dispatcher.getRenderSectionSlice in extractor')

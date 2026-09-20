@@ -21,6 +21,6 @@ public abstract class ModelBlockRendererMixin {
     @Shadow @Final private QuadInstance quadInstance;
     @Inject(method="putQuadWithTint",at=@At(value="INVOKE",target="Lnet/minecraft/client/renderer/block/BlockQuadOutput;put(FFFLnet/minecraft/client/resources/model/geometry/BakedQuad;Lcom/mojang/blaze3d/vertex/QuadInstance;)V"))
     private void nativeVulkanRt$tintSource(BlockQuadOutput output,float x,float y,float z,BlockAndTintGetter level,BlockState state,BlockPos pos,BakedQuad quad,CallbackInfo ci) {
-        BlockTintDiagnostics.observe(pos,quad,quadInstance,tintCacheValue);
+        BlockTintDiagnostics.observe(pos,state,quad,quadInstance,tintCacheValue);
     }
 }

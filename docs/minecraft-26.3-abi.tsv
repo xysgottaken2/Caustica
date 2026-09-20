@@ -107,3 +107,12 @@ net/minecraft/client/renderer/texture/TextureAtlasSprite	M	contents	()Lnet/minec
 net/minecraft/client/renderer/texture/SpriteContents	M	name	()Lnet/minecraft/resources/Identifier;
 net/minecraft/client/model/geom/builders/UVPair	M	unpackU	(J)F
 net/minecraft/client/model/geom/builders/UVPair	M	unpackV	(J)F
+
+# Full CUTOUT: same extraction path, actual layer/group/pipelines; no CUTOUT_MIPPED layer in 26.3.
+net/minecraft/client/renderer/chunk/ChunkSectionLayer	F	CUTOUT	Lnet/minecraft/client/renderer/chunk/ChunkSectionLayer;
+net/minecraft/client/renderer/chunk/ChunkSectionLayer	M	byTransparency	(Lcom/mojang/blaze3d/platform/Transparency;)Lnet/minecraft/client/renderer/chunk/ChunkSectionLayer;
+net/minecraft/client/renderer/chunk/ChunkSectionLayerGroup	M	layers	()[Lnet/minecraft/client/renderer/chunk/ChunkSectionLayer;
+net/minecraft/client/renderer/RenderPipelines	F	CUTOUT_TERRAIN	Lcom/mojang/renderpearl/api/pipeline/RenderPipeline;
+net/minecraft/client/renderer/RenderPipelines	F	CUTOUT_TERRAIN_MULTIDRAW	Lcom/mojang/renderpearl/api/pipeline/RenderPipeline;
+com/mojang/renderpearl/api/pipeline/RenderPipeline	M	isCull	()Z
+net/minecraft/client/renderer/texture/SpriteContents	M	transparency	()Lcom/mojang/blaze3d/platform/Transparency;
