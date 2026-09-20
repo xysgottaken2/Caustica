@@ -137,7 +137,7 @@ tasks.register('verifyModJar') {
             if (mixinEntry == null) throw new GradleException('Missing Vulkan integration mixins')
             def mixins = zip.getInputStream(mixinEntry).withCloseable { new JsonSlurper().parse(it) }
             def requiredHooks = ['VulkanBackendMixin', 'FrontendGpuDeviceAccessor', 'RenderSystemMixin',
-                                 'GameRendererMixin', 'VulkanCommandEncoderMixin', 'VulkanDeviceMixin']
+                                 'GameRendererMixin', 'VulkanCommandEncoderMixin', 'VulkanDeviceMixin', 'LevelRendererMixin']
             if (!mixins.required || mixins.injectors.defaultRequire != 1 || !mixins.client.containsAll(requiredHooks)) {
                 throw new GradleException('Required RT hooks are not registered with fail-fast injection checks')
             }

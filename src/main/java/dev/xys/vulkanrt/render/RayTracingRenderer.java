@@ -5,7 +5,8 @@ import com.mojang.renderpearl.api.device.GpuDeviceLossException;
 import com.mojang.renderpearl.backend.vulkan.VulkanDevice;
 import com.mojang.renderpearl.backend.vulkan.VulkanGpuTexture;
 import dev.xys.vulkanrt.geometry.ChunkCoordinates;
-import net.minecraft.client.Minecraft;
+import dev.xys.vulkanrt.geometry.TerrainDrawCapture;
+import net.minecraft.client.renderer.LevelRenderer;
 import dev.xys.vulkanrt.geometry.TriangleMesh;
 import net.minecraft.client.renderer.GameRenderer;
 import org.joml.Matrix4f;
@@ -15,6 +16,7 @@ import org.slf4j.LoggerFactory;
 import java.util.List;
 
 import static org.lwjgl.vulkan.VK10.VK_ERROR_DEVICE_LOST;
+import static org.lwjgl.vulkan.KHRSynchronization2.*;
 
 /** RT color replaces the world AFTER post effects, BEFORE GUI. Vanilla owns presentation/depth.
  * Triangle bring-up is independent of the chunk camera/projection. RUNTIME NOT VERIFIED. */
@@ -33,6 +35,7 @@ public final class RayTracingRenderer {
     private static RayTracingPipeline.Bindings bindings;
     private static AccelerationStructureManager.Structure boundTlas, testBlas, testTlas;
     private static WorldGeometryManager world;
+    private static WorldGeometryManager.Prepared chunkScene;
 
     /** Called when RenderSystem has installed Minecraft's actual GpuDevice, not from bootstrap. */
     public static void deviceReady() {
@@ -48,6 +51,7 @@ public final class RayTracingRenderer {
         if (!RtOptions.ENABLED) return;
         if (!frameLogged) { frameLogged = true; LOG.info("[RT] GameRenderer.render frame hook reached"); }
         projectionCaptured = false;
+        if (RtOptions.CHUNKS) { chunkScene = null; TerrainDrawCapture.beginFrame(); }
         if (resetRequested) { resetRequested = false; retireScene(); }
         if (!failed) {
             if (context == null) deviceReady(); // explicit recovery path if initRenderer was already called
@@ -59,6 +63,45 @@ public final class RayTracingRenderer {
             }
         }
     }
+    public static boolean chunkCaptureEnabled() { return RtOptions.ENABLED && RtOptions.CHUNKS && !failed; }
+    public static void chunkCaptureFailed(RuntimeException failure) {
+        stage = "terrain draw capture";
+        if (failure instanceof VulkanRayTracingContext.VulkanFailure vk) handleFailure(vk);
+        else disable(failure);
+    }
+
+    /** Called by actual terrain draw extraction RETURN, BEFORE later compile/upload can reuse a heap range. */
+    public static void prepareChunkGeometry(LevelRenderer level, GameRenderer renderer) {
+        if (!RtOptions.ENABLED || !RtOptions.CHUNKS || failed) return;
+        if (context == null) deviceReady();
+        if (failed || context == null) return;
+        stage = "capture actual terrain draw / prepare chunk geometry before later uploads";
+        var camera = renderer.gameRenderState().levelRenderState.cameraRenderState;
+        var dispatcher = level.sectionRenderDispatcher();
+        if (dispatcher != null) dispatcher.lock();
+        try {
+            if (world == null) world = new WorldGeometryManager(context, camera.pos.x, camera.pos.y, camera.pos.z);
+            var reused = world.reuseUnchangedDraw(camera.pos.x,camera.pos.y,camera.pos.z);
+            if (reused != null) { reused.commit(); chunkScene = reused; return; }
+            try (CommandBatch batch = new CommandBatch(context)) {
+                var prepared = world.prepare(batch, level, camera.pos.x, camera.pos.y, camera.pos.z);
+                // WAR: the borrowed Uber range may be recycled by the later vanilla uploads.
+                // Queue order alone does not prevent a subsequent transfer write overtaking our read.
+                VulkanRayTracingContext.memoryBarrier(batch.commands,
+                        VK_PIPELINE_STAGE_2_TRANSFER_BIT_KHR, VK_ACCESS_2_TRANSFER_READ_BIT_KHR,
+                        VK_PIPELINE_STAGE_2_TRANSFER_BIT_KHR, VK_ACCESS_2_TRANSFER_WRITE_BIT_KHR);
+                batch.commit(); // source copy + BLAS/TLAS are ordered before subsequent vanilla uploads
+                if (boundTlas != prepared.tlas && bindings != null) {
+                    context.retire(bindings); bindings = null; boundTlas = null;
+                }
+                prepared.commit();
+                chunkScene = prepared;
+            }
+        } catch (VulkanRayTracingContext.VulkanFailure failure) { handleFailure(failure); }
+        catch (RuntimeException failure) { disable(failure); }
+        finally { if (dispatcher != null) dispatcher.unlock(); }
+    }
+
     public static void captureProjection(Matrix4fc projection) { PROJECTION.set(projection); projectionCaptured = true; }
     public static void worldChanged() { resetRequested = true; }
 
@@ -89,7 +132,9 @@ public final class RayTracingRenderer {
             if (!(target.getColorTexture() instanceof VulkanGpuTexture color))
                 throw new IllegalStateException("Main color target is not VulkanGpuTexture: " + target.getColorTexture());
             if (lastGate != null) { LOG.info("[RT] Pass resumed; main target={}x{}", target.width, target.height); lastGate = null; }
-            if (RtOptions.CHUNKS && world == null) world = new WorldGeometryManager(context, camera.pos.x, camera.pos.y, camera.pos.z);
+            if (RtOptions.CHUNKS && chunkScene == null) {
+                waiting("chunks have no completed terrain extraction callback: " + TerrainDrawCapture.failure()); return;
+            }
             stage = "allocate vanilla transient RT command buffer";
             try (CommandBatch batch = new CommandBatch(context)) {
                 stage = "create/validate RT output and Minecraft blit target";
@@ -105,7 +150,7 @@ public final class RayTracingRenderer {
                 AccelerationStructureManager.Structure nextTlas;
                 if (RtOptions.CHUNKS) {
                     stage = "prepare chunk acceleration structures";
-                    prepared = world.prepare(batch, Minecraft.getInstance().levelRenderer, camera.pos.x, camera.pos.y, camera.pos.z); nextTlas = prepared.tlas;
+                    prepared = chunkScene; nextTlas = prepared.tlas;
                     ChunkCoordinates.inverse(INVERSE, PROJECTION, camera.viewRotationMatrix, prepared.anchor, camera.pos.x, camera.pos.y, camera.pos.z);
                 } else {
                     if (nextTestTlas == null) {
@@ -154,7 +199,6 @@ public final class RayTracingRenderer {
                 testBlas = nextTestBlas; testTlas = nextTestTlas; proof = nextProof;
                 if (oldBindings != null && oldBindings != nextBindings) context.retire(oldBindings);
                 if (oldOutput != null && oldOutput != nextOutput) context.retire(oldOutput);
-                if (prepared != null) prepared.commit();
                 if (nextTlas != null) tracePending = true;
                 if (nextTlas != null && !traceLogged) {
                     traceLogged = true;
@@ -200,7 +244,7 @@ public final class RayTracingRenderer {
             if (testBlas != null) context.retire(testBlas);
             if (output != null) context.retire(output);
         }
-        bindings = null; boundTlas = null; world = null; testTlas = null; testBlas = null; output = null; proof = null;
+        bindings = null; boundTlas = null; world = null; chunkScene = null; testTlas = null; testBlas = null; output = null; proof = null;
         traceLogged = false; tracePending = false; submitLogged = false;
     }
     public static void deviceClosing(VulkanDevice backend) {

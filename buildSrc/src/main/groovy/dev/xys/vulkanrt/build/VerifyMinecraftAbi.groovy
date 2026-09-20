@@ -25,7 +25,7 @@ abstract class VerifyMinecraftAbi extends DefaultTask {
         def requirements = AbiContract.parse(contractFile.get().asFile.getText('UTF-8'))
         List<String> errors = AbiContract.verify(requirements, minecraftClasspath.files)
         report.setText(errors.empty
-                ? "PASS: ${requirements.size()} member signatures found. This is NOT a GPU or Mixin execution test.\n"
+                ? "PASS: ${requirements.size()} member signatures found; terrain extraction call sites/order checked. This is NOT a GPU or Mixin execution test.\n"
                 : "FAIL\n${errors.join('\n')}\n", 'UTF-8')
         if (!errors.empty) {
             throw new GradleException("Minecraft 26.3 ABI mismatch; do not port 26.2 hooks blindly.\n${errors.join('\n')}")

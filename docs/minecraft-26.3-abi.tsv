@@ -58,3 +58,10 @@ net/minecraft/client/renderer/chunk/SectionRenderDispatcher$RenderSectionBufferS
 net/minecraft/client/renderer/chunk/SectionMesh	M	getSectionDraw	(Lnet/minecraft/client/renderer/chunk/ChunkSectionLayer;)Lnet/minecraft/client/renderer/chunk/SectionMesh$SectionDraw;
 net/minecraft/client/renderer/chunk/ChunkSectionLayer	M	vertexFormat	()Lcom/mojang/renderpearl/api/vertex/VertexFormat;
 com/mojang/renderpearl/backend/vulkan/VulkanGpuBuffer	M	vkBuffer	()J
+net/minecraft/client/renderer/LevelRenderer	M	extractSectionDrawGroups	(ZLjava/util/List;Ljava/util/Map;)I
+net/minecraft/client/renderer/LevelRenderer	F	gameRenderer	Lnet/minecraft/client/renderer/GameRenderer;
+net/minecraft/client/renderer/LevelRenderer	F	sectionRenderDispatcher	Lnet/minecraft/client/renderer/chunk/SectionRenderDispatcher;
+net/minecraft/client/renderer/chunk/CompiledSectionMesh	M	isVertexBufferUploaded	(Lnet/minecraft/client/renderer/chunk/ChunkSectionLayer;)Z
+net/minecraft/client/renderer/chunk/CompiledSectionMesh	M	isIndexBufferUploaded	(Lnet/minecraft/client/renderer/chunk/ChunkSectionLayer;)Z
+net/minecraft/client/renderer/chunk/ChunkSectionLayer	M	pipeline	(Z)Lcom/mojang/renderpearl/api/pipeline/RenderPipeline;
+com/mojang/renderpearl/api/pipeline/RenderPipeline	M	getVertexFormatBinding	(I)Lcom/mojang/renderpearl/api/vertex/VertexFormat;

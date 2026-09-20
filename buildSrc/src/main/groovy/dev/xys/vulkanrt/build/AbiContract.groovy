@@ -75,6 +75,8 @@ final class AbiContract {
             if (!classes.containsKey(owner)) {
                 errors.add("Missing class: ${owner}".toString())
             } else {
+                if (owner == TerrainHookContract.LEVEL && requirements.any { it[2] == 'extractSectionDrawGroups' })
+                    errors.addAll(TerrainHookContract.verify(classes[owner]))
                 Set<String> available = members(classes[owner], owner)
                 requirements.each { List<String> requirement ->
                     String member = requirement.subList(1, 4).join('\t')
