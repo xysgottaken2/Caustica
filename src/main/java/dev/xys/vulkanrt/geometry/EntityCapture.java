@@ -17,7 +17,7 @@ import java.util.*;
 
 /** Receipts for vanilla-emitted ranges, never a mesher. All methods run on the render thread. */
 public final class EntityCapture {
-    public record Owner(int id,String type,double x,double y,double z,boolean falling) {}
+    public record Owner(int id,String type,double x,double y,double z,boolean falling,String detail) {}
     public record Key(Object geometry,SectionGeometryLayout layout) {}
     public record Colors(int a,int b,int c,int d) { public static Colors uniform(int c) { return new Colors(c,c,c,c); } }
     public record Piece(Owner owner,Key key,StagedVertexBuffer.Draw draw,int first,Matrix4f pose,
@@ -44,7 +44,7 @@ public final class EntityCapture {
     public static void state(EntityRenderState state,int id) { if(enabled()) ids.put(state,id); }
     public static void beginEntity(EntityRenderState s) {
         if(!enabled()) return;
-        submitting=new Owner(ids.getOrDefault(s,System.identityHashCode(s)),String.valueOf(BuiltInRegistries.ENTITY_TYPE.getKey(s.entityType)),s.x,s.y,s.z,s instanceof FallingBlockRenderState);
+        submitting=new Owner(ids.getOrDefault(s,System.identityHashCode(s)),String.valueOf(BuiltInRegistries.ENTITY_TYPE.getKey(s.entityType)),s.x,s.y,s.z,s instanceof FallingBlockRenderState,s instanceof FallingBlockRenderState f?String.valueOf(f.movingBlockRenderState.blockState):"");
         discovered.put(submitting.id(),submitting);
     }
     public static void endEntity() { submitting=null; }
@@ -74,7 +74,9 @@ public final class EntityCapture {
         if(n==0) return;
         if(n<0 || n%4!=0 || p.start()%4!=0) { reject("INCOMPLETE_QUAD_RANGE");return; }
         var format=((EntityDrawAccessor)(Object)p.cursor().draw()).nativeVulkanRt$format();
-        var layout=SectionGeometryLayout.solidQuads(format,n/4*6);
+        SectionGeometryLayout layout;
+        try { layout=SectionGeometryLayout.solidQuads(format,n/4*6); }
+        catch(IllegalArgumentException failure) { reject("VERTEX_LAYOUT:"+failure.getMessage());return; }
         pieces.add(new Piece(p.owner(),new Key(p.shape(),layout),p.cursor().draw(),p.cursor().base()+p.start(),p.pose(),p.material(),p.colors(),p.overlay()));
     }
     public static void quad(VertexConsumer vertex,PoseStack.Pose pose,BakedQuad quad,QuadInstance instance) {

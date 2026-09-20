@@ -15,10 +15,10 @@ import static dev.xys.vulkanrt.render.VulkanRayTracingContext.memoryBarrier;
 
 /** Separate geometry residency; the only TLAS/RT pipeline remains WorldGeometryManager's scene. */
 public final class EntityGeometryManager implements AutoCloseable {
-    public static final int TEXTURES=12, HUD_HEADER=48, HUD_ROW=160;
+    public static final int TEXTURES=12, HUD_HEADER=64, HUD_ROW=160;
     public record Material(int texture,float cutoff,int overlay,int record,EntityCapture.Colors colors,int overlayTexture,boolean mirror,int id,boolean falling) {}
     public record Frame(List<AccelerationStructureManager.Instance> instances,List<ChunkMaterialTable.Entry> materials,
-                        List<TerrainAtlasCapture.Atlas> textures,GpuBuffer hud) {}
+                        List<TerrainAtlasCapture.Atlas> textures,GpuBuffer hud,int blasCount) {}
     private final VulkanRayTracingContext context;
     private final AccelerationStructureManager acceleration;
     private final EntityVertexNormalizer normalizer;
@@ -27,11 +27,12 @@ public final class EntityGeometryManager implements AutoCloseable {
     private List<AccelerationStructureManager.Instance> previousInstances=List.of();
     private GpuBuffer emptyHud;
     private int built,copies,retired,reused;
+    private final Set<EntityCapture.Key> builtKeys=new HashSet<>();
     private long lastReport;
     public EntityGeometryManager(VulkanRayTracingContext context) {
         this.context=context;acceleration=new AccelerationStructureManager(context);normalizer=new EntityVertexNormalizer(context);
     }
-    public void beginFrame() { ready.clear();built=copies=retired=reused=0; }
+    public void beginFrame() { ready.clear();builtKeys.clear();built=copies=retired=reused=0; }
     /** Read CPU pipeline state, not texture pixels, uniform bytes or GPU memory. Unknown effects fail closed. */
     public static boolean supported(RenderPipeline p) {
         return p==RenderPipelines.ENTITY_SOLID || p==RenderPipelines.ENTITY_CUTOUT_CULL || p==RenderPipelines.ENTITY_CUTOUT
@@ -63,7 +64,7 @@ public final class EntityGeometryManager implements AutoCloseable {
             // Do not let vanilla reuse/write a staging allocation ahead of our transfer read.
             memoryBarrier(batch.commands,VK_PIPELINE_STAGE_2_TRANSFER_BIT_KHR,VK_ACCESS_2_TRANSFER_READ_BIT_KHR,
                 VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT_KHR,VK_ACCESS_2_MEMORY_WRITE_BIT_KHR);
-            batch.commit();cache.putAll(added);ready.putAll(next);
+            batch.commit();cache.putAll(added);builtKeys.addAll(added.keySet());ready.putAll(next);
         }
     }
     private static TerrainAtlasCapture.Atlas texture(PreparedRenderType material,String name) {
@@ -101,6 +102,8 @@ public final class EntityGeometryManager implements AutoCloseable {
         }
         // No subsequent trace references removed geometry; destruction remains deferred through vanilla fences.
         var it=cache.entrySet().iterator();while(it.hasNext()) { var e=it.next();if(!active.contains(e.getKey())) { context.retire(e.getValue());it.remove();retired++; } }
+        var newOwners=new HashSet<Integer>();for(var p:accepted) if(builtKeys.contains(p.key())) newOwners.add(p.owner().id());
+        int reusedEntities=owners.size()-newOwners.size();
         int transforms=0;for(int i=0;i<instances.size();i++) if(i>=previousInstances.size() || !instances.get(i).equals(previousInstances.get(i))) transforms++;
         previousInstances=List.copyOf(instances);
         boolean diagnostic=Boolean.getBoolean("nativevulkanrt.entityDiagnostics") || Boolean.getBoolean("nativevulkanrt.materialDiagnostics");
@@ -110,6 +113,7 @@ public final class EntityGeometryManager implements AutoCloseable {
             try {
                 bytes.putInt(0,EntityCapture.discovered.size()).putInt(4,owners.size()).putInt(8,cache.size()).putInt(12,instances.size());
                 bytes.putInt(16,Math.toIntExact(triangles)).putInt(20,reused).putInt(24,transforms).putInt(28,falling);
+                bytes.putInt(48,reusedEntities);
                 bytes.putInt(32,built).putInt(36,copies).putInt(40,retired).putInt(44,textures.size());
                 for(int i=0;i<accepted.size();i++) {
                     var p=accepted.get(i);var o=p.owner();int off=HUD_HEADER+i*HUD_ROW;
@@ -126,11 +130,12 @@ public final class EntityGeometryManager implements AutoCloseable {
         }
         if(System.nanoTime()-lastReport>2_000_000_000L) {
             lastReport=System.nanoTime();var log=org.slf4j.LoggerFactory.getLogger("native_vulkan_rt");
-            log.info("[RT][entities] discovered(vanilla submitted)={} captured={} ignored={} reasons={} geometry={} GPUcopies={} BLASbuilt={} BLASreused={} BLASretired(deferred)={} TLASinstances={} triangles={} transformUpdates={} FallingBlockEntity={} textures={}; CPU enqueue counters, selected hit only in GPU HUD",
-                EntityCapture.discovered.size(),owners.size(),EntityCapture.discovered.size()-owners.size(),EntityCapture.rejected,cache.size(),copies,built,reused,retired,instances.size(),triangles,transforms,falling,textures.stream().map(t->t.view().texture().getLabel()).toList());
+            log.info("[RT][entities] discovered(vanilla submitted)={} captured={} ignored={} reasons={} geometry={} GPUcopies={} BLASbuilt={} BLASreused={} BLASretired(deferred)={} TLASinstances={} triangles={} transformUpdates={} FallingBlockEntity={} reusedEntities={} textures={}; CPU enqueue counters, selected hit only in GPU HUD",
+                EntityCapture.discovered.size(),owners.size(),EntityCapture.discovered.size()-owners.size(),EntityCapture.rejected,cache.size(),copies,built,reused,retired,instances.size(),triangles,transforms,falling,reusedEntities,textures.stream().map(t->t.view().texture().getLabel()).toList());
+            for(var o:EntityCapture.discovered.values()) if(o.falling()) log.info("[RT][falling] id={} block={} pos=({},{},{}) captured={} state={}",o.id(),o.detail(),o.x(),o.y(),o.z(),owners.contains(o.id()),owners.contains(o.id())?"SHARED_TLAS_ENQUEUED":"NOT_CAPTURED (see reasons)");
             for(var owner:EntityCapture.discovered.values()) if(!owners.contains(owner.id())) log.info("[RT][entities] ignored id={} type={} reason=NO_SUPPORTED_EXECUTED_GEOMETRY (see specific rejection counts)",owner.id(),owner.type());
         }
-        return new Frame(List.copyOf(instances),List.copyOf(materials),List.copyOf(textures),hud);
+        return new Frame(List.copyOf(instances),List.copyOf(materials),List.copyOf(textures),hud,cache.size());
     }
     private static void ascii(ByteBuffer out,int offset,String s,int max) { byte[] text=s.toUpperCase(Locale.ROOT).getBytes(java.nio.charset.StandardCharsets.US_ASCII);for(int i=0;i<Math.min(max,text.length);i++) out.put(offset+i,text[i]); }
     @Override public void close() { cache.values().forEach(AccelerationStructureManager.Structure::close);cache.clear();if(emptyHud!=null) emptyHud.close();normalizer.close(); }

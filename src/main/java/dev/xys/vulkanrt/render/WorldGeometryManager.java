@@ -12,6 +12,7 @@ import net.minecraft.core.SectionPos;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import java.util.ArrayList;
+import java.util.List;
 import java.util.Map;
 import java.util.TreeMap;
 import java.util.stream.Collectors;
@@ -34,6 +35,8 @@ public final class WorldGeometryManager implements AutoCloseable {
     private ChunkMaterialTable materials;
     private List<AccelerationStructureManager.Instance> lastSceneInstances=List.of();
     private List<ChunkMaterialTable.Entry> lastSceneMaterials=List.of();
+    private int pendingSolidBuilt,pendingCutoutBuilt,pendingTransBuilt,entityBlasCount;
+    private long entityTriangles;
     private CoplanarOverlayMapper overlayMapper;
     private Map<Long,CoplanarOverlayMapper.Overlay> overlays=Map.of();
     private int overlayBuildsSinceReport, overlayRetiresSinceReport;
@@ -95,8 +98,10 @@ public final class WorldGeometryManager implements AutoCloseable {
             buildsSinceReport += built; retiresSinceReport += retired;
             if(sceneInstances!=null) {
                 lastSceneInstances=sceneInstances;lastSceneMaterials=sceneMaterials;
-                report(emptyTransition, next.size()-built, nextCutouts.size()-cutoutBuilt,nextTranslucents.size()-translucentBuilt);
-            }
+                entityBlasCount=entities.blasCount();entityTriangles=entities.materials().stream().mapToLong(e->e.layout().triangles()).sum();
+                report(emptyTransition, next.size()-pendingSolidBuilt, nextCutouts.size()-pendingCutoutBuilt,nextTranslucents.size()-pendingTransBuilt);
+                pendingSolidBuilt=pendingCutoutBuilt=pendingTransBuilt=0;
+            } else { pendingSolidBuilt+=built;pendingCutoutBuilt+=cutoutBuilt;pendingTransBuilt+=translucentBuilt; }
         }
     }
 
@@ -329,8 +334,8 @@ public final class WorldGeometryManager implements AutoCloseable {
                 translucentResidents.size(),translucentTriangles,translucentBytes,TerrainDrawCapture.translucentDraws().size());
         LOG.info("[RT] TRANSLUCENT cache: builtSinceReport={} retiredSinceReport={} (deferred) reusedThisFrame={}",translucentBuildsSinceReport,translucentRetiresSinceReport,translucentReusedThisFrame);
         translucentBuildsSinceReport=0;translucentRetiresSinceReport=0;
-        LOG.info("[RT] Scene: chunks | SOLID sections={} | CUTOUT sections={} | TRANSLUCENT sections={} | terrain BLAS count={} | TOTAL TLAS instances={} | terrain RT triangles={}; entity subtotals logged separately; CPU committed/enqueued, actual composition in GPU HUD",
-                residents.size(),cutoutResidents.size(),translucentResidents.size(),residents.size()+cutoutResidents.size()+translucentResidents.size(),tlas==null?0:tlas.count,triangles+cutoutTriangles+translucentTriangles);
+        LOG.info("[RT] Scene: chunks | SOLID sections={} | CUTOUT sections={} | TRANSLUCENT sections={} | TOTAL BLAS count={} | TOTAL TLAS instances={} | TOTAL RT triangles={}; entity subtotals logged separately; CPU committed/enqueued, actual composition in GPU HUD",
+                residents.size(),cutoutResidents.size(),translucentResidents.size(),residents.size()+cutoutResidents.size()+translucentResidents.size()+entityBlasCount,tlas==null?0:tlas.count,triangles+cutoutTriangles+translucentTriangles+entityTriangles);
         LOG.info("[RT] CUTOUT cache: builtSinceReport={} retiredSinceReport={} (deferred) reusedThisFrame={}",cutoutBuildsSinceReport,cutoutRetiresSinceReport,cutoutReusedThisFrame);
         cutoutBuildsSinceReport=0;cutoutRetiresSinceReport=0;
         LOG.info("[RT] Chunk cache: builtSinceReport={} retiredSinceReport={} (deferred) reusedThisFrame={}; section sample={}{}",

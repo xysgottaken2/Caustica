@@ -7,7 +7,7 @@ layout(location=0) rayPayloadEXT Hit hit;
 layout(set=0,binding=4,std430) buffer Probe { uvec4 state; ivec4 section; vec4 uv; vec4 color; uvec4 atlas; vec4 baseTint; vec4 overlayTint; vec4 sampleColor; vec4 tintInfo; uvec4 alphaStats; vec4 cutoutSample; ivec4 cutoutSection; uvec4 transStats; vec4 transSample; ivec4 transSection; uvec4 transState; vec4 transBlend; uvec4 entity; } probe;
 layout(push_constant,std430) uniform Camera { mat4 inverseViewProjection; vec4 origin; uvec4 frame; } camera;
 struct EntityRecord { vec4 position; ivec4 state; uvec4 label[8]; };
-layout(set=0,binding=6,std430) readonly buffer EntityHud { uvec4 counts; uvec4 work; uvec4 ops; EntityRecord rows[]; } entityHud;
+layout(set=0,binding=6,std430) readonly buffer EntityHud { uvec4 counts; uvec4 work; uvec4 ops; uvec4 reuse; EntityRecord rows[]; } entityHud;
 // GPU-only center-ray telemetry. One optional 1x1 trace writes this probe, then a barrier precedes
 // the image trace/HUD. No vertex, image, UV or hit-record data is ever mapped/read by the CPU.
 uint glyph(int c) {
@@ -276,6 +276,7 @@ int entityText(int row,int col) {
  if(row==9) { const int t[11]=int[](71,80,85,32,67,79,80,73,69,83,61);if(col<11) return t[col];return col<18?digit(entityHud.ops.y,col-11,7):32; }
  if(row==10) { const int t[11]=int[](66,76,65,83,32,66,85,73,76,84,61);if(col<11) return t[col];return col<18?digit(entityHud.ops.x,col-11,7):32; }
  if(row==11) { const int t[13]=int[](66,76,65,83,32,82,69,84,73,82,69,68,61);if(col<13) return t[col];return col<20?digit(entityHud.ops.z,col-13,7):32; }
+ if(row==20) { const int t[16]=int[](82,69,85,83,69,68,32,69,78,84,73,84,73,69,83,61);if(col<16) return t[col];return col<23?digit(entityHud.reuse.x,col-16,7):32; }
  if(probe.entity.x==0xffffffffu || probe.entity.x>=uint(entityHud.rows.length())) return 32;
  if(row==12) { const int t[14]=int[](69,78,84,73,84,89,32,72,73,84,32,73,68,61);if(col<14) return t[col];return col<23?digit(uint(entityHud.rows[probe.entity.x].state.x),col-14,9):32; }
  if(row==13) { const int t[5]=int[](84,89,80,69,61);if(col<5) return t[col];return col<37?entityChar(probe.entity.x,col-5):32; }
@@ -293,7 +294,7 @@ void main() {
     ivec2 pixel=ivec2(gl_LaunchIDEXT.xy);
     if(!probePass && (camera.frame.w&2u)!=0u) {
         ivec2 entityPanel=pixel-ivec2(max(336,int(gl_LaunchSizeEXT.x)-392),8);
-        if(all(greaterThanEqual(entityPanel,ivec2(0))) && all(lessThan(entityPanel,ivec2(384,280)))) {
+        if(all(greaterThanEqual(entityPanel,ivec2(0))) && all(lessThan(entityPanel,ivec2(384,294)))) {
             ivec2 ep=entityPanel/2;int ec=entityText(ep.y/7,ep.x/4);
             bool ink=ep.x%4<3 && ep.y%7<5 && ((glyph(ec)>>uint((ep.y%7)*3+ep.x%4))&1u)!=0u;
             imageStore(outputImage,pixel,vec4(ink?vec3(1,.9,.65):vec3(.015),1));return;

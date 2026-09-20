@@ -77,6 +77,7 @@ final class AbiContract {
             } else {
                 if (owner == TerrainHookContract.LEVEL && requirements.any { it[2] == 'extractSectionDrawGroups' })
                     errors.addAll(TerrainHookContract.verify(classes[owner]))
+                errors.addAll(EntityHookContract.verify(owner,classes[owner]))
                 Set<String> available = members(classes[owner], owner)
                 requirements.each { List<String> requirement ->
                     String member = requirement.subList(1, 4).join('\t')
