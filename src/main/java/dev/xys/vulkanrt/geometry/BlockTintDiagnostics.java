@@ -6,6 +6,7 @@ import net.minecraft.client.model.geom.builders.UVPair;
 import net.minecraft.client.resources.model.geometry.BakedQuad;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.SectionPos;
+import net.minecraft.client.renderer.chunk.ChunkSectionLayer;
 import net.minecraft.world.level.block.state.BlockState;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
@@ -19,8 +20,13 @@ public final class BlockTintDiagnostics {
     /** Sections whose vanilla FluidRenderer emitted this frame; used only to conservatively tag
      * the existing TRANSLUCENT draw, never to invent a second mesh or a CPU material. */
     private static final Set<Long> FLUID_SECTIONS=ConcurrentHashMap.newKeySet();
-    public static void beginFrame() { COUNT.set(0); FLUID_SECTIONS.clear(); }
-    public static boolean hasFluid(long section) { return FLUID_SECTIONS.contains(section); }
+    private static final Set<Long> NON_FLUID_TRANSLUCENT_SECTIONS=ConcurrentHashMap.newKeySet();
+    public static void beginFrame() { COUNT.set(0); FLUID_SECTIONS.clear(); NON_FLUID_TRANSLUCENT_SECTIONS.clear(); }
+    /** Conservative water eligibility: a translucent section is reflective only when the
+     * vanilla fluid path emitted it and no block-model translucent quad was emitted there. */
+    public static boolean hasPureFluid(long section) {
+        return FLUID_SECTIONS.contains(section) && !NON_FLUID_TRANSLUCENT_SECTIONS.contains(section);
+    }
     private static BlockPos readPin() {
         String value=System.getProperty("nativevulkanrt.tintProbeBlock","");
         if(value.isBlank()) return null;
@@ -31,6 +37,10 @@ public final class BlockTintDiagnostics {
         } catch(RuntimeException bad) { LOG.warn("[RT][tint-source] Invalid tintProbeBlock '{}'; CPU probe disabled",value); return null; }
     }
     public static void observe(BlockPos pos,BlockState state,BakedQuad quad,QuadInstance instance,int vanillaTint) {
+        if(RtOptions.ENABLED && RtOptions.CHUNKS && quad.materialInfo().layer()==ChunkSectionLayer.TRANSLUCENT) {
+            NON_FLUID_TRANSLUCENT_SECTIONS.add(SectionPos.asLong(SectionPos.blockToSectionCoord(pos.getX()),
+                    SectionPos.blockToSectionCoord(pos.getY()), SectionPos.blockToSectionCoord(pos.getZ())));
+        }
         if(!RtOptions.ENABLED || !RtOptions.CHUNKS || PIN==null || !PIN.equals(pos) || COUNT.getAndIncrement()>=64) return;
         var material=quad.materialInfo();
         var vertices=new StringBuilder();

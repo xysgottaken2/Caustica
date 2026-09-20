@@ -276,7 +276,7 @@ public final class WorldGeometryManager implements AutoCloseable {
         int transFlags=ChunkMaterialTable.TRANSLUCENT|(ChunkSectionLayer.TRANSLUCENT.pipeline(false).isCull()?ChunkMaterialTable.CULL_BACK:0);
         for(var section:translucentResidents.values()) {
             long node=section.section();instances.add(new AccelerationStructureManager.Instance(section.blas(),anchor.sectionX(node),anchor.sectionY(node),anchor.sectionZ(node),0,2));
-            int waterFlags = transFlags | (BlockTintDiagnostics.hasFluid(node) ? ChunkMaterialTable.WATER : 0);
+            int waterFlags = transFlags | (BlockTintDiagnostics.hasPureFluid(node) ? ChunkMaterialTable.WATER : 0);
             entries.add(new ChunkMaterialTable.Entry(node,section.blas().vertexAddress(),section.layout(),null,waterFlags,section.blas().indexAddress(),section.blas().indexBytes()));
         }
         instances.addAll(entities.instances());entries.addAll(entities.materials());
