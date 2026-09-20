@@ -356,7 +356,7 @@ void main() {
             float nDotL=max(dot(normalize(hit.normal),lightDirection),0.0);
             if(nDotL>0.0) {
                 shadow.enabled=1u; shadow.blocked=0u; shadow.discarded=0u; shadow.translucentSkipped=0u;
-                traceRayEXT(scene,gl_RayFlagsNoneEXT,0xff,0,0,0,hit.position+normalize(hit.normal)*SHADOW_OFFSET,SHADOW_TMIN,lightDirection,SHADOW_TMAX,1);
+                traceRayEXT(scene,gl_RayFlagsNoneEXT,0xff,1,1,1,hit.position+normalize(hit.normal)*SHADOW_OFFSET,SHADOW_TMIN,lightDirection,SHADOW_TMAX,1);
                 shadowStats.x++; if(shadow.blocked!=0u) shadowStats.y++; else shadowStats.z++; shadowStats.w++;
                 shadowReasons.x+=shadow.discarded; shadowReasons.y+=shadow.translucentSkipped;
                 lit=shadow.blocked==0u; shadow.enabled=0u;

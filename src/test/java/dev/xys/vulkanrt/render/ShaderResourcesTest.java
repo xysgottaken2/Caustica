@@ -23,6 +23,9 @@ final class ShaderResourcesTest {
         shader("overlay.comp");
         shader("entity-local.comp");
         shader("chunks.rahit");
+        shader("chunks.shadow.rmiss");
+        shader("chunks.shadow.rchit");
+        shader("chunks.shadow.rahit");
     }
     @Test void physicalVertexReadsDoNotRequireShaderInt64OrDescriptorIndexing() throws Exception {
         var words=shader("chunks.rchit");
@@ -161,7 +164,7 @@ final class ShaderResourcesTest {
             if(payload==null) payload=value;else assertEquals(payload,value,stage);
             if(stage.equals("rgen")) {
                 assertTrue(source.contains("composed+=remaining*hit.alpha*shaded"));
-                assertTrue(source.contains("traceSunShadow"));
+                assertTrue(source.contains("traceRayEXT") && source.contains("lightDirection"));
                 assertTrue(source.contains("SHADOW_OFFSET"));
                 assertTrue(source.contains("remaining*=1.0-hit.alpha"));
                 assertTrue(source.contains("floatBitsToUint(hit.distance)+1u"));

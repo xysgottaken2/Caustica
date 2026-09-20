@@ -13,7 +13,7 @@ import static org.lwjgl.vulkan.KHRRayTracingPipeline.*;
 import static org.lwjgl.vulkan.KHRSynchronization2.*;
 import static dev.xys.vulkanrt.render.VulkanRayTracingContext.check;
 
-/** Three real KHR shader groups, immutable SBT and per-scene descriptor sets.
+/** KHR ray tracing shader groups, immutable SBT and per-scene descriptor sets.
  * RUNTIME VERIFIED: NO. No graphics/fullscreen shader is used to generate the RT image. */
 public final class RayTracingPipeline implements AutoCloseable {
     private final VulkanRayTracingContext context;
@@ -21,13 +21,14 @@ public final class RayTracingPipeline implements AutoCloseable {
     private GpuBuffer sbt, hitProbe;
     private final boolean chunks = RtOptions.CHUNKS;
     private final boolean materialDiagnostics = chunks && (Boolean.getBoolean("nativevulkanrt.materialDiagnostics") || Boolean.getBoolean("nativevulkanrt.entityDiagnostics"));
-    private long raygenAddress, missAddress, hitAddress, stride;
+    private final int groupCount = chunks ? 5 : 3;
+    private long raygenAddress, missAddress, hitAddress, missSize, hitSize, stride;
     public static final int PUSH_BYTES = 96;
 
     public RayTracingPipeline(VulkanRayTracingContext context) {
         this.context = context;
         org.slf4j.LoggerFactory.getLogger("native_vulkan_rt").info("[RT] Creating ray tracing pipeline...");
-        long[] modules = new long[chunks ? 4 : 3];
+        long[] modules = new long[chunks ? 7 : 3];
         try (MemoryStack stack = MemoryStack.stackPush()) {
             var bindings = VkDescriptorSetLayoutBinding.calloc(chunks ? 8 : 2, stack);
             bindings.get(0).binding(0).descriptorType(VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR).descriptorCount(1).stageFlags(VK_SHADER_STAGE_RAYGEN_BIT_KHR);
@@ -40,7 +41,7 @@ public final class RayTracingPipeline implements AutoCloseable {
                 bindings.get(6).binding(6).descriptorType(VK_DESCRIPTOR_TYPE_STORAGE_BUFFER).descriptorCount(1).stageFlags(VK_SHADER_STAGE_RAYGEN_BIT_KHR);
                 bindings.get(7).binding(7).descriptorType(VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER).descriptorCount(1).stageFlags(VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR|VK_SHADER_STAGE_ANY_HIT_BIT_KHR);
                 hitProbe = new GpuBuffer(context,ChunkTextureSampling.PROBE_BYTES,VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,false,false);
-                org.slf4j.LoggerFactory.getLogger("native_vulkan_rt").info("[RT] Chunks material shader: vanilla atlas + GPU vertex addresses; GPU-only center-hit HUD={}; no readback, unchanged 3-group SBT", materialDiagnostics);
+                org.slf4j.LoggerFactory.getLogger("native_vulkan_rt").info("[RT] Chunks material shader: vanilla atlas + GPU vertex addresses; GPU-only center-hit HUD={}; no readback, primary+shadow hit groups/SBT", materialDiagnostics);
             }
             var out = stack.mallocLong(1);
             check(vkCreateDescriptorSetLayout(context.device(), VkDescriptorSetLayoutCreateInfo.calloc(stack).sType$Default().pBindings(bindings), null, out), "vkCreateDescriptorSetLayout(RT)");
@@ -49,22 +50,37 @@ public final class RayTracingPipeline implements AutoCloseable {
             check(vkCreatePipelineLayout(context.device(), VkPipelineLayoutCreateInfo.calloc(stack).sType$Default()
                     .pSetLayouts(stack.longs(descriptorLayout)).pPushConstantRanges(pushRange), null, out), "vkCreatePipelineLayout(RT)");
             pipelineLayout = out.get(0);
-            String prefix = chunks ? "chunks" : "primary";
-            String[] resources = {prefix + ".rgen.spv", prefix + ".rmiss.spv", prefix + ".rchit.spv", "chunks.rahit.spv"};
-            int[] stageBits = {VK_SHADER_STAGE_RAYGEN_BIT_KHR, VK_SHADER_STAGE_MISS_BIT_KHR, VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR, VK_SHADER_STAGE_ANY_HIT_BIT_KHR};
+            String[] resources = chunks
+                    ? new String[]{"chunks.rgen.spv", "chunks.rmiss.spv", "chunks.shadow.rmiss.spv",
+                    "chunks.rchit.spv", "chunks.rahit.spv", "chunks.shadow.rchit.spv", "chunks.shadow.rahit.spv"}
+                    : new String[]{"primary.rgen.spv", "primary.rmiss.spv", "primary.rchit.spv"};
+            int[] stageBits = chunks
+                    ? new int[]{VK_SHADER_STAGE_RAYGEN_BIT_KHR, VK_SHADER_STAGE_MISS_BIT_KHR, VK_SHADER_STAGE_MISS_BIT_KHR,
+                    VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR, VK_SHADER_STAGE_ANY_HIT_BIT_KHR,
+                    VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR, VK_SHADER_STAGE_ANY_HIT_BIT_KHR}
+                    : new int[]{VK_SHADER_STAGE_RAYGEN_BIT_KHR, VK_SHADER_STAGE_MISS_BIT_KHR, VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR};
             var stages = VkPipelineShaderStageCreateInfo.calloc(modules.length, stack);
             for (int i = 0; i < modules.length; i++) {
                 modules[i] = loadModule(resources[i]);
                 stages.get(i).sType$Default().stage(stageBits[i]).module(modules[i]).pName(stack.UTF8("main"));
             }
-            var groups = VkRayTracingShaderGroupCreateInfoKHR.calloc(3, stack);
-            for (int i = 0; i < 3; i++) groups.get(i).sType$Default()
+            var groups = VkRayTracingShaderGroupCreateInfoKHR.calloc(groupCount, stack);
+            for (int i = 0; i < groupCount; i++) groups.get(i).sType$Default()
                     .generalShader(VK_SHADER_UNUSED_KHR).closestHitShader(VK_SHADER_UNUSED_KHR)
                     .anyHitShader(VK_SHADER_UNUSED_KHR).intersectionShader(VK_SHADER_UNUSED_KHR);
             groups.get(0).type(VK_RAY_TRACING_SHADER_GROUP_TYPE_GENERAL_KHR).generalShader(0);
             groups.get(1).type(VK_RAY_TRACING_SHADER_GROUP_TYPE_GENERAL_KHR).generalShader(1);
-            groups.get(2).type(VK_RAY_TRACING_SHADER_GROUP_TYPE_TRIANGLES_HIT_GROUP_KHR).closestHitShader(2);
-            if(chunks) groups.get(2).anyHitShader(3); // Same hit group/SBT record; SOLID stays opaque.
+            if (chunks) {
+                // Primary and shadow payloads have distinct incoming interfaces. They still share the
+                // same TLAS/material rows; the ray's SBT offset selects the corresponding hit group.
+                groups.get(2).type(VK_RAY_TRACING_SHADER_GROUP_TYPE_GENERAL_KHR).generalShader(2);
+                groups.get(3).type(VK_RAY_TRACING_SHADER_GROUP_TYPE_TRIANGLES_HIT_GROUP_KHR)
+                        .closestHitShader(3).anyHitShader(4);
+                groups.get(4).type(VK_RAY_TRACING_SHADER_GROUP_TYPE_TRIANGLES_HIT_GROUP_KHR)
+                        .closestHitShader(5).anyHitShader(6);
+            } else {
+                groups.get(2).type(VK_RAY_TRACING_SHADER_GROUP_TYPE_TRIANGLES_HIT_GROUP_KHR).closestHitShader(2);
+            }
             var create = VkRayTracingPipelineCreateInfoKHR.calloc(1, stack).sType$Default()
                     .pStages(stages).pGroups(groups).maxPipelineRayRecursionDepth(1).layout(pipelineLayout)
                     .basePipelineIndex(-1).basePipelineHandle(VK_NULL_HANDLE);
@@ -99,19 +115,23 @@ public final class RayTracingPipeline implements AutoCloseable {
         if (stride > Integer.toUnsignedLong(limits.maxGroupStride())) throw new IllegalStateException("SBT stride exceeds device limit");
         long baseAlignment = Integer.toUnsignedLong(limits.baseAlignment());
         long step = GpuBuffer.alignUp(stride, baseAlignment);
-        sbt = new GpuBuffer(context, Math.addExact(3 * step, baseAlignment), VK_BUFFER_USAGE_SHADER_BINDING_TABLE_BIT_KHR, true, true);
+        sbt = new GpuBuffer(context, Math.addExact(groupCount * step, baseAlignment), VK_BUFFER_USAGE_SHADER_BINDING_TABLE_BIT_KHR, true, true);
         long alignedBase = GpuBuffer.alignUp(sbt.address(), baseAlignment);
-        ByteBuffer handles = MemoryUtil.memAlloc(Math.multiplyExact(limits.handleSize(), 3));
+        ByteBuffer handles = MemoryUtil.memAlloc(Math.multiplyExact(limits.handleSize(), groupCount));
         try {
-            check(vkGetRayTracingShaderGroupHandlesKHR(context.device(), pipeline, 0, 3, handles), "vkGetRayTracingShaderGroupHandlesKHR");
+            check(vkGetRayTracingShaderGroupHandlesKHR(context.device(), pipeline, 0, groupCount, handles), "vkGetRayTracingShaderGroupHandlesKHR");
             var target = sbt.mapped();
-            for (int group = 0; group < 3; group++) {
+            for (int group = 0; group < groupCount; group++) {
                 int offset = Math.toIntExact(alignedBase - sbt.address() + group * step);
                 for (int b = 0; b < limits.handleSize(); b++) target.put(offset + b, handles.get(group * limits.handleSize() + b));
             }
-            raygenAddress = alignedBase; missAddress = alignedBase + step; hitAddress = alignedBase + 2 * step;
-            org.slf4j.LoggerFactory.getLogger("native_vulkan_rt").info("[RT] Shader Binding Table created: raygen=0x{}, miss=0x{}, hit=0x{}, stride={}",
-                    Long.toHexString(raygenAddress), Long.toHexString(missAddress), Long.toHexString(hitAddress), stride);
+            raygenAddress = alignedBase;
+            missAddress = alignedBase + step;
+            missSize = (chunks ? 2 : 1) * step;
+            hitAddress = alignedBase + (chunks ? 3 : 2) * step;
+            hitSize = (chunks ? 2 : 1) * step;
+            org.slf4j.LoggerFactory.getLogger("native_vulkan_rt").info("[RT] Shader Binding Table created: raygen=0x{}, miss=0x{} ({} records), hit=0x{} ({} records), stride={}",
+                    Long.toHexString(raygenAddress), Long.toHexString(missAddress), missSize / stride, Long.toHexString(hitAddress), hitSize / stride, stride);
         } finally { MemoryUtil.memFree(handles); }
     }
 
@@ -192,8 +212,8 @@ public final class RayTracingPipeline implements AutoCloseable {
             constants.putInt(80, width).putInt(84, height).putInt(88, testTriangle ? 1 : 0);
             vkCmdPushConstants(cmd, pipelineLayout, VK_SHADER_STAGE_RAYGEN_BIT_KHR, 0, constants);
             var raygen = VkStridedDeviceAddressRegionKHR.calloc(stack).deviceAddress(raygenAddress).stride(stride).size(stride);
-            var miss = VkStridedDeviceAddressRegionKHR.calloc(stack).deviceAddress(missAddress).stride(stride).size(stride);
-            var hit = VkStridedDeviceAddressRegionKHR.calloc(stack).deviceAddress(hitAddress).stride(stride).size(stride);
+            var miss = VkStridedDeviceAddressRegionKHR.calloc(stack).deviceAddress(missAddress).stride(stride).size(missSize);
+            var hit = VkStridedDeviceAddressRegionKHR.calloc(stack).deviceAddress(hitAddress).stride(stride).size(hitSize);
             var callable = VkStridedDeviceAddressRegionKHR.calloc(stack);
             if (chunks) {
                 // Includes copied vertices/table, vanilla atlas uploads/animation, prior probe readers,
