@@ -245,6 +245,15 @@ int text(int row,int col) {
  }
  if(row==35) { const int t[8]=int[](84,83,69,76,69,67,84,61);if(col<8) return t[col];return col<9?digit(probe.transState.z,col-8,1):32; }
  if(row==36) { const int t[14]=int[](84,79,86,69,82,70,76,79,87,44,69,78,68,61);if(col<14) return t[col];return pairDigit(probe.transState.yw,col-14,1); }
+ if(row==37) {
+    const int label[8]=int[](84,65,67,84,73,79,78,61);if(col<8) return label[col];
+    // Action for the displayed TRANSLUCENT sample, never an assertion based on CPU enqueue.
+    // NONE / DROP / TESTED (candidate only) / CONTINUE / STOP (alpha1).
+    int action=probe.transState.z==1u ? (probe.transBlend.x<1.0?3:4)
+        : probe.transSample.z<0.0 ? 0 : probe.transSample.z*probe.transSample.w<0.1 ? 1 : 2;
+    const int names[40]=int[](78,79,78,69,32,32,32,32,68,82,79,80,32,32,32,32,84,69,83,84,69,68,32,32,67,79,78,84,73,78,85,69,83,84,79,80,32,32,32,32);
+    return col<16?names[action*8+col-8]:32;
+ }
  return 32;
 }
 void main() {
@@ -252,7 +261,7 @@ void main() {
     ivec2 pixel=ivec2(gl_LaunchIDEXT.xy);
     if(!probePass && (camera.frame.w&2u)!=0u) {
         ivec2 panel=pixel-ivec2(8,8);
-        if(all(greaterThanEqual(panel,ivec2(0))) && all(lessThan(panel,ivec2(320,518)))) {
+        if(all(greaterThanEqual(panel,ivec2(0))) && all(lessThan(panel,ivec2(320,532)))) {
             ivec2 p=panel/2;
             int row=p.y/7, col=p.x/4;
             bool ink=(p.x%4<3 && p.y%7<5) && ((glyph(text(row,col))>>uint((p.y%7)*3+p.x%4))&1u)!=0u;

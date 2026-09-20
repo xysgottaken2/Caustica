@@ -117,6 +117,10 @@ With `-Dnativevulkanrt.materialDiagnostics=true`, the GPU-only center-ray probe
 * `TSELECT=1`: those sample fields identify the first closest composed surface.
   `TSELECT=0`: last tested candidate, which may have been discarded or hidden;
   absence is shown by blank sample fields. This is not a claimed visible hit.
+* `TACTION`: NONE (no sampled candidate), DROP (.1 discard), TESTED (candidate
+  only, not a claimed composed surface), CONTINUE (closest fractional-alpha
+  surface), STOP (closest alpha1 surface). Maximum-distance/overflow endings
+  remain explicitly identified by END/OVERFLOW.
 * `TOVERFLOW,END`: overflow0/1; END0 miss background,1 SOLID/CUTOUT background,
   2 fully opaque translucent surface,3 maximum ray distance. COMPOSE>0 with
   partial alpha and END0/1 is executed continuation, not CPU enqueue telemetry.

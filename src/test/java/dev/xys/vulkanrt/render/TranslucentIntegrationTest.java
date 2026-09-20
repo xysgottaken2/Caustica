@@ -65,6 +65,13 @@ final class TranslucentIntegrationTest {
             }
         }
     }
+    @Test void sortedShortIndicesRemainUnsignedAbove32767() {
+        var state=new MeshData.SortState(new CompactVectorArray(16384),IndexType.SHORT);
+        var bytes=ByteBuffer.allocate(16384*6*2).order(ByteOrder.nativeOrder());
+        state.writeSortedIndexBuffer(bytes,points->java.util.stream.IntStream.range(0,16384).map(i->16383-i).toArray());
+        int[] expected={65532,65533,65534,65534,65535,65532};
+        for(int i=0;i<6;i++) assertEquals(expected[i],(bytes.getInt((i/2)*4)>>>((i&1)*16))&65535);
+    }
     @Test void indexRangesRejectBadLifetimeCopyUsageAlignmentAndSize() {
         assertTrue(SectionGeometrySanity.validIndexRange(12,2,4,28,1,false,true));
         assertTrue(SectionGeometrySanity.validIndexRange(12,4,4,52,1,false,true));

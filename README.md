@@ -45,19 +45,16 @@ Para executar RT, é necessário driver/GPU Vulkan com os recursos exigidos.
 # Vanilla Vulkan, RT desativado
 ./gradlew runClient
 
-# Cena de triângulo com validation layers
-./gradlew runClient -Prt=true -PrtScene=triangle -PrtValidation=true
-
-# Malhas SOLID reais dos chunks
+# Malhas SOLID + CUTOUT + TRANSLUCENT reais dos chunks
 ./gradlew runClient -Prt=true -PrtScene=chunks -PrtValidation=true
 ```
 
 No Windows, use `gradlew.bat`. As validation layers precisam estar disponíveis no
 ambiente de execução. `runClient` solicita `--graphicsBackend VULKAN` ao Minecraft.
 O JAR esperado após build bem-sucedido é
-`build/libs/native-vulkan-rt-0.2.0-experimental.jar`.
+`build/libs/native-vulkan-rt-0.8.0-experimental.jar`.
 
-Os três shaders GLSL em `shaders/` são compilados offline por
+Os oito shaders GLSL em `shaders/` são compilados offline por
 `src/shaderCompiler/java/dev/xys/vulkanrt/build/CompileRtShaders.java` e seus SPIR-V
 são incluídos como recursos do JAR. Não há compilação de shaders RT por frame.
 O workflow de build também prepara validação com `spirv-val --target-env vulkan1.2`.
