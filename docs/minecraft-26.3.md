@@ -130,7 +130,10 @@ O cliente oficial 26.3 não foi redistribuído nem pôde ser baixado/autenticado
 neste ambiente por falha TLS; os nomes de extração acima continuam sujeitos ao
 `verifyMinecraftAbi`/CI e a execução no jogo. A captura de `StagedVertexBuffer`
 é intencionalmente independente desses nomes de estado e falha fechada quando
-o formato, topologia, textura ou draw não coincide.
+o formato, topologia, textura ou draw não coincide. Os contadores
+`[RT][particles]` são observações CPU de upload/enqueue; o center-ray/probe do
+shader continua sendo a única fonte de hit/interseção RT, inclusive quando o
+row selecionado é uma instância de partícula no TLAS compartilhado.
 
 | Transparência | `R.LevelRenderer.prepareTranslucents/executeOit/executeClassicTransparency/executeOitWaterMask` | Não substituir OIT por simples alpha no closest-hit |
 | Sky / fog | `R.SkyRenderer.extractRenderState/render`; `R.fog.FogRenderer.updateBuffer/getBuffer`; `CameraRenderState.fogData` | Consumir ambiente por dimensão, não fixar sol Overworld |
