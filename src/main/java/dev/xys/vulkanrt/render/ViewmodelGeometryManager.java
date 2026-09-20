@@ -4,7 +4,7 @@ import com.mojang.renderpearl.api.pipeline.BlendFunction;
 import dev.xys.vulkanrt.geometry.ChunkCoordinates;
 import dev.xys.vulkanrt.geometry.EntityCapture;
 import dev.xys.vulkanrt.geometry.SectionGeometryLayout;
-import net.minecraft.client.renderer.RenderPipeline;
+import com.mojang.renderpearl.api.pipeline.RenderPipeline;
 import net.minecraft.client.renderer.rendertype.PreparedRenderType;
 import com.mojang.renderpearl.backend.vulkan.VulkanGpuSampler;
 import com.mojang.renderpearl.backend.vulkan.VulkanGpuTextureView;
