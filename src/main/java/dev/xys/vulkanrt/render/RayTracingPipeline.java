@@ -1,6 +1,7 @@
 package dev.xys.vulkanrt.render;
 
 import org.joml.Matrix4fc;
+import org.joml.Vector3fc;
 import org.lwjgl.system.MemoryStack;
 import org.lwjgl.system.MemoryUtil;
 import org.lwjgl.vulkan.*;
@@ -23,7 +24,8 @@ public final class RayTracingPipeline implements AutoCloseable {
     private final boolean materialDiagnostics = chunks && (Boolean.getBoolean("nativevulkanrt.materialDiagnostics") || Boolean.getBoolean("nativevulkanrt.entityDiagnostics"));
     private final int groupCount = chunks ? 5 : 3;
     private long raygenAddress, missAddress, hitAddress, missSize, hitSize, stride;
-    public static final int PUSH_BYTES = 96;
+    /** mat4 + origin/frame + solar direction/intensity + sky/ambient colors and factors. */
+    public static final int PUSH_BYTES = 160;
 
     public RayTracingPipeline(VulkanRayTracingContext context) {
         this.context = context;
@@ -46,7 +48,9 @@ public final class RayTracingPipeline implements AutoCloseable {
             var out = stack.mallocLong(1);
             check(vkCreateDescriptorSetLayout(context.device(), VkDescriptorSetLayoutCreateInfo.calloc(stack).sType$Default().pBindings(bindings), null, out), "vkCreateDescriptorSetLayout(RT)");
             descriptorLayout = out.get(0);
-            var pushRange = VkPushConstantRange.calloc(1, stack).stageFlags(VK_SHADER_STAGE_RAYGEN_BIT_KHR).offset(0).size(PUSH_BYTES);
+            var pushRange = VkPushConstantRange.calloc(1, stack)
+                    .stageFlags(VK_SHADER_STAGE_RAYGEN_BIT_KHR | VK_SHADER_STAGE_MISS_BIT_KHR)
+                    .offset(0).size(PUSH_BYTES);
             check(vkCreatePipelineLayout(context.device(), VkPipelineLayoutCreateInfo.calloc(stack).sType$Default()
                     .pSetLayouts(stack.longs(descriptorLayout)).pPushConstantRanges(pushRange), null, out), "vkCreatePipelineLayout(RT)");
             pipelineLayout = out.get(0);
@@ -200,7 +204,9 @@ public final class RayTracingPipeline implements AutoCloseable {
     }
 
     public void trace(VkCommandBuffer cmd, Bindings bindings, Matrix4fc inverseViewProjection,
-                      float originX, float originY, float originZ, int width, int height, boolean testTriangle) {
+                      float originX, float originY, float originZ, int width, int height, boolean testTriangle,
+                      Vector3fc sunDirection, float sunIntensity, Vector3fc skyColor,
+                      Vector3fc skyLightColor, float skyFactor, Vector3fc ambientColor, float rainBrightness) {
         if (width <= 0 || height <= 0 || (long)width * height > Integer.toUnsignedLong(context.capabilities().maxDispatchInvocations()))
             throw new IllegalArgumentException("Ray dispatch dimensions exceed limit");
         try (MemoryStack stack = MemoryStack.stackPush()) {
@@ -210,6 +216,11 @@ public final class RayTracingPipeline implements AutoCloseable {
             inverseViewProjection.get(0, constants);
             constants.putFloat(64, originX).putFloat(68, originY).putFloat(72, originZ);
             constants.putInt(80, width).putInt(84, height).putInt(88, testTriangle ? 1 : 0);
+            // Keep all world lighting in the same push contract used by raygen and miss.
+            constants.putFloat(96, sunDirection.x()).putFloat(100, sunDirection.y()).putFloat(104, sunDirection.z()).putFloat(108, sunIntensity);
+            constants.putFloat(112, skyColor.x()).putFloat(116, skyColor.y()).putFloat(120, skyColor.z()).putFloat(124, 1.0f);
+            constants.putFloat(128, skyLightColor.x()).putFloat(132, skyLightColor.y()).putFloat(136, skyLightColor.z()).putFloat(140, skyFactor);
+            constants.putFloat(144, ambientColor.x()).putFloat(148, ambientColor.y()).putFloat(152, ambientColor.z()).putFloat(156, rainBrightness);
             vkCmdPushConstants(cmd, pipelineLayout, VK_SHADER_STAGE_RAYGEN_BIT_KHR, 0, constants);
             var raygen = VkStridedDeviceAddressRegionKHR.calloc(stack).deviceAddress(raygenAddress).stride(stride).size(stride);
             var miss = VkStridedDeviceAddressRegionKHR.calloc(stack).deviceAddress(missAddress).stride(stride).size(missSize);

@@ -5,7 +5,10 @@ import dev.xys.vulkanrt.render.RtOptions;
 import net.minecraft.client.model.geom.builders.UVPair;
 import net.minecraft.client.resources.model.geometry.BakedQuad;
 import net.minecraft.core.BlockPos;
+import net.minecraft.core.SectionPos;
 import net.minecraft.world.level.block.state.BlockState;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
 
 /** Optional, bounded inspection of EXISTING prepared quads before vertex upload. NOT GPU readback. */
@@ -13,6 +16,11 @@ public final class BlockTintDiagnostics {
     private static final org.slf4j.Logger LOG=org.slf4j.LoggerFactory.getLogger("native_vulkan_rt");
     private static final BlockPos PIN=readPin();
     private static final AtomicInteger COUNT=new AtomicInteger();
+    /** Sections whose vanilla FluidRenderer emitted this frame; used only to conservatively tag
+     * the existing TRANSLUCENT draw, never to invent a second mesh or a CPU material. */
+    private static final Set<Long> FLUID_SECTIONS=ConcurrentHashMap.newKeySet();
+    public static void beginFrame() { COUNT.set(0); FLUID_SECTIONS.clear(); }
+    public static boolean hasFluid(long section) { return FLUID_SECTIONS.contains(section); }
     private static BlockPos readPin() {
         String value=System.getProperty("nativevulkanrt.tintProbeBlock","");
         if(value.isBlank()) return null;
@@ -44,6 +52,8 @@ public final class BlockTintDiagnostics {
     public static boolean fluidProbeEnabled() { return RtOptions.ENABLED && RtOptions.CHUNKS && PIN!=null; }
     public static void beginFluid(BlockPos pos,BlockState state,net.minecraft.world.level.material.FluidState fluid,
                                   net.minecraft.client.renderer.block.FluidStateModelSet models) {
+        FLUID_SECTIONS.add(SectionPos.asLong(SectionPos.blockToSectionCoord(pos.getX()),
+                SectionPos.blockToSectionCoord(pos.getY()), SectionPos.blockToSectionCoord(pos.getZ())));
         if(!fluidProbeEnabled()) return;
         FLUID.remove();
         if(PIN.equals(pos) && COUNT.get()<64) FLUID.set(new FluidProbe(pos.immutable(),state,fluid,models.get(fluid)));

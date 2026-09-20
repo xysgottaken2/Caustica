@@ -11,10 +11,10 @@ import static org.lwjgl.vulkan.VK10.VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
  * Only CPU-known addresses/layout/section metadata are uploaded. Vertex bytes stay on the GPU. */
 public final class ChunkMaterialTable implements AutoCloseable {
     public static final int ROW_BYTES = 144;
-    public static final int CUTOUT = 1, CULL_BACK = 2, TRANSLUCENT = 4, ENTITY = 8, PARTICLE = 16;
+    public static final int CUTOUT = 1, CULL_BACK = 2, TRANSLUCENT = 4, ENTITY = 8, PARTICLE = 16, WATER = 32, VIEWMODEL = 64;
     public record Entry(long section, long vertexAddress, SectionGeometryLayout layout, CoplanarOverlayMapper.Overlay overlay, int flags,long indexAddress,int indexBytes, EntityGeometryManager.Material entity, ParticleGeometryManager.ParticleMaterial particle) {
         public Entry {
-            if((flags & ~(CUTOUT|CULL_BACK|TRANSLUCENT|ENTITY|PARTICLE))!=0 || flags==CULL_BACK || (flags&(CUTOUT|TRANSLUCENT))==(CUTOUT|TRANSLUCENT) || (flags!=0 && overlay!=null) || ((flags&PARTICLE)!=0 && particle==null) || ((flags&PARTICLE)==0 && particle!=null))
+            if((flags & ~(CUTOUT|CULL_BACK|TRANSLUCENT|ENTITY|PARTICLE|WATER|VIEWMODEL))!=0 || flags==CULL_BACK || (flags&(CUTOUT|TRANSLUCENT))==(CUTOUT|TRANSLUCENT) || (flags!=0 && overlay!=null) || ((flags&PARTICLE)!=0 && particle==null) || ((flags&PARTICLE)==0 && particle!=null) || ((flags&WATER)!=0 && (flags&TRANSLUCENT)==0) || ((flags&VIEWMODEL)!=0 && entity==null))
                 throw new IllegalArgumentException("Invalid layer/material flags");
         }
         public Entry(long section,long vertexAddress,SectionGeometryLayout layout,CoplanarOverlayMapper.Overlay overlay,int flags,long indexAddress,int indexBytes) { this(section,vertexAddress,layout,overlay,flags,indexAddress,indexBytes,null,null); }

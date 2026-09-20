@@ -3,7 +3,7 @@
 #extension GL_EXT_buffer_reference2 : require
 #extension GL_EXT_buffer_reference_uvec2 : require
 
-struct Hit { vec3 color; uint found; ivec3 section; uint primitive; vec2 uv; uint sampled; ivec2 atlasSize; vec2 quadSpan; uint mode; int levels; vec4 baseTint; vec4 overlayTint; vec4 sampleColor; vec2 baseUv; uint overlayState; uint face; uint layer; uvec4 alphaStats; vec4 cutoutSample; ivec4 cutoutSection; float distance; float alpha; uvec2 previous; uvec4 transStats; vec4 transSample; ivec4 transSection; uint entityRecord; vec3 position; vec3 normal; };
+struct Hit { vec3 color; uint found; ivec3 section; uint primitive; vec2 uv; uint sampled; ivec2 atlasSize; vec2 quadSpan; uint mode; int levels; vec4 baseTint; vec4 overlayTint; vec4 sampleColor; vec2 baseUv; uint overlayState; uint face; uint layer; uint materialFlags; uvec4 alphaStats; vec4 cutoutSample; ivec4 cutoutSection; float distance; float alpha; uvec2 previous; uvec4 transStats; vec4 transSample; ivec4 transSection; uint entityRecord; vec3 position; vec3 normal; };
 layout(location=0) rayPayloadInEXT Hit hit;
 hitAttributeEXT vec2 barycentric;
 struct Material { uvec4 addressLayout; uvec4 attributes; ivec4 section; uvec4 overlay; uvec4 mapping; uvec4 indices; uvec4 entityMeta; uvec4 entityColors; uvec4 entityInfo; };
@@ -127,10 +127,12 @@ void main() {
     if (gl_InstanceID >= materials.rows.length()) return;
     Material m=materials.rows[gl_InstanceID];
     bool entity=(uint(m.section.w)&8u)!=0u;
+    bool viewmodel=(uint(m.section.w)&64u)!=0u;
+    bool texturedEntity=entity||viewmodel;
     bool particle=(uint(m.section.w)&16u)!=0u;
     bool particleBlock=particle && m.entityMeta.z!=0u;
     if(entity) hit.entityRecord=m.entityMeta.w;
-    hit.section=m.section.xyz; hit.layer=(uint(m.section.w)&4u)!=0u ? 2u : uint(m.section.w)&1u;
+    hit.section=m.section.xyz; hit.layer=(uint(m.section.w)&4u)!=0u ? 2u : uint(m.section.w)&1u; hit.materialFlags=uint(m.section.w);
     if (uint(gl_PrimitiveID)>=m.attributes.z) return;
     uvec3 indices=triangleIndices(m,uint(gl_PrimitiveID));
     uint base=(indices.x/4u)*4u;
@@ -143,11 +145,11 @@ void main() {
     // (0.5.0) omitted its texel-position correction, softening magnified pixel-art textures.
     // Reference/correction: read the actual mip-0 texel of the SAME view, bypassing filtering.
     // This is not a replacement for vanilla's derivative-based minification/RGSS.
-    hit.atlasSize=entity?entitySize(m.entityMeta.x):(particle && !particleBlock?textureSize(particleAtlas,0):textureSize(blockAtlas,0));
+    hit.atlasSize=texturedEntity?entitySize(m.entityMeta.x):(particle && !particleBlock?textureSize(particleAtlas,0):textureSize(blockAtlas,0));
     hit.mode=m.attributes.w;
     if (any(isnan(hit.uv)) || any(isinf(hit.uv)) || any(lessThanEqual(hit.atlasSize,ivec2(0)))) return;
     ivec2 texel=clamp(ivec2(floor(clamp(hit.uv,0.0,1.0)*vec2(hit.atlasSize))),ivec2(0),hit.atlasSize-1);
-    vec4 albedo=entity?entitySample(m.entityMeta.x,hit.uv,hit.mode):particle?(particleBlock? (hit.mode==1u ? textureLod(blockAtlas,hit.uv,0.0) : texelFetch(blockAtlas,texel,0)) : particleSample(hit.uv,hit.mode)) :(hit.mode==1u ? textureLod(blockAtlas,hit.uv,0.0) : texelFetch(blockAtlas,texel,0));
+    vec4 albedo=texturedEntity?entitySample(m.entityMeta.x,hit.uv,hit.mode):particle?(particleBlock? (hit.mode==1u ? textureLod(blockAtlas,hit.uv,0.0) : texelFetch(blockAtlas,texel,0)) : particleSample(hit.uv,hit.mode)) :(hit.mode==1u ? textureLod(blockAtlas,hit.uv,0.0) : texelFetch(blockAtlas,texel,0));
     hit.baseTint=color; hit.overlayTint=vec4(0); hit.baseUv=hit.uv; hit.overlayState=0u;
     if(any(notEqual(m.mapping.xy,uvec2(0)))) {
         Vertices mapping=Vertices(m.mapping.xy);
@@ -192,6 +194,6 @@ void main() {
         vec2 a=uvAt(vertices,m,base), b=uvAt(vertices,m,base+1u);
         vec2 c=uvAt(vertices,m,base+2u), d=uvAt(vertices,m,base+3u);
         hit.quadSpan=(max(max(a,b),max(c,d))-min(min(a,b),min(c,d)))*vec2(hit.atlasSize);
-        hit.levels=entity?entityLevels(m.entityMeta.x):(particle && !particleBlock?particleLevels():textureQueryLevels(blockAtlas));
+        hit.levels=texturedEntity?entityLevels(m.entityMeta.x):(particle && !particleBlock?particleLevels():textureQueryLevels(blockAtlas));
     }
 }

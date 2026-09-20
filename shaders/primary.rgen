@@ -7,7 +7,11 @@ layout(location = 0) rayPayloadEXT vec3 radiance;
 layout(push_constant, std430) uniform Camera {
     mat4 inverseViewProjection;
     vec4 origin;
-    uvec4 frame; // width, height, test triangle, reserved
+    uvec4 frame; // width, height, test triangle, diagnostic mode
+    vec4 sunDirectionIntensity;
+    vec4 skyColor;
+    vec4 skyLightColorFactor;
+    vec4 ambientColorRain;
 } camera;
 
 void main() {

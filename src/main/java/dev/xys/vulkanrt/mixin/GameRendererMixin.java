@@ -20,15 +20,17 @@ public abstract class GameRendererMixin implements RtHookAudit.FrameHook {
     private void nativeVulkanRt$beginViewmodel(CallbackInfo ci) { ViewmodelCapture.begin(); }
 
     @Inject(method = "renderItemInHand", at = @At("RETURN"))
-    private void nativeVulkanRt$endViewmodel(CallbackInfo ci) { ViewmodelCapture.end(); }
+    private void nativeVulkanRt$endViewmodel(CallbackInfo ci) {
+        ViewmodelCapture.end();
+        // The RT image is now recorded after vanilla has emitted the real hand/item ranges,
+        // but before screen effects/crosshair/GUIs. It replaces the hand color pass rather
+        // than leaving a second visible vanilla compositor over the RT result.
+        RayTracingRenderer.render((GameRenderer)(Object)this);
+    }
 
     @ModifyArg(method = "renderLevel()V", at = @At(value = "INVOKE",
             target = "Lnet/minecraft/client/renderer/ProjectionMatrixBuffer;getBuffer(Lorg/joml/Matrix4f;)Lcom/mojang/renderpearl/api/buffers/GpuBufferSlice;"), index = 0)
     private Matrix4f nativeVulkanRt$projection(Matrix4f matrix) { RayTracingRenderer.captureProjection(matrix); return matrix; }
-
-    @Inject(method = "render()V", at = @At(value = "INVOKE",
-            target = "Lnet/minecraft/client/renderer/fog/FogRenderer;endFrame()V"))
-    private void nativeVulkanRt$render(CallbackInfo ci) { RayTracingRenderer.render((GameRenderer)(Object)this); }
 
     @Inject(method = "setLevel", at = @At("HEAD"))
     private void nativeVulkanRt$worldChanged(CallbackInfo ci) { RayTracingRenderer.worldChanged(); }

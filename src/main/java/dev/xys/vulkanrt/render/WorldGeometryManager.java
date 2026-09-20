@@ -1,6 +1,7 @@
 package dev.xys.vulkanrt.render;
 
 import com.mojang.renderpearl.backend.vulkan.VulkanGpuBuffer;
+import dev.xys.vulkanrt.geometry.BlockTintDiagnostics;
 import dev.xys.vulkanrt.geometry.ChunkCoordinates;
 import dev.xys.vulkanrt.geometry.SectionGeometryLayout;
 import dev.xys.vulkanrt.geometry.TerrainDrawCapture;
@@ -275,7 +276,8 @@ public final class WorldGeometryManager implements AutoCloseable {
         int transFlags=ChunkMaterialTable.TRANSLUCENT|(ChunkSectionLayer.TRANSLUCENT.pipeline(false).isCull()?ChunkMaterialTable.CULL_BACK:0);
         for(var section:translucentResidents.values()) {
             long node=section.section();instances.add(new AccelerationStructureManager.Instance(section.blas(),anchor.sectionX(node),anchor.sectionY(node),anchor.sectionZ(node),0,2));
-            entries.add(new ChunkMaterialTable.Entry(node,section.blas().vertexAddress(),section.layout(),null,transFlags,section.blas().indexAddress(),section.blas().indexBytes()));
+            int waterFlags = transFlags | (BlockTintDiagnostics.hasFluid(node) ? ChunkMaterialTable.WATER : 0);
+            entries.add(new ChunkMaterialTable.Entry(node,section.blas().vertexAddress(),section.layout(),null,waterFlags,section.blas().indexAddress(),section.blas().indexBytes()));
         }
         instances.addAll(entities.instances());entries.addAll(entities.materials());
         instances.addAll(particles.instances());entries.addAll(particles.materials());

@@ -8,6 +8,9 @@ import dev.xys.vulkanrt.geometry.ChunkCoordinates;
 import dev.xys.vulkanrt.geometry.TerrainDrawCapture;
 import net.minecraft.client.renderer.LevelRenderer;
 import dev.xys.vulkanrt.geometry.TriangleMesh;
+import net.minecraft.world.level.dimension.DimensionType;
+import org.joml.Vector3f;
+import org.joml.Vector3fc;
 import net.minecraft.client.renderer.GameRenderer;
 import org.joml.Matrix4f;
 import org.joml.Matrix4fc;
@@ -35,6 +38,7 @@ public final class RayTracingRenderer {
     private static RayTracingPipeline.Bindings bindings;
     private static AccelerationStructureManager.Structure boundTlas, testBlas, testTlas;
     private static WorldGeometryManager world;
+    private static ViewmodelGeometryManager viewmodels;
     private static WorldGeometryManager.Prepared chunkScene;
     private static ChunkMaterialTable boundMaterials;
     private static TerrainAtlasCapture.Atlas boundAtlas;
@@ -68,11 +72,18 @@ public final class RayTracingRenderer {
         catch(VulkanRayTracingContext.VulkanFailure failure) { handleFailure(failure); }
         catch(RuntimeException failure) { disable(failure); }
     }
+    public static void uploadViewmodel(java.util.List<ViewmodelCapture.Upload> uploads) {
+        if(!chunkCaptureEnabled() || context==null) return;
+        stage="first-person vanilla staged upload / camera-relative BLAS";
+        try { if(viewmodels==null) viewmodels=new ViewmodelGeometryManager(context);viewmodels.upload(uploads); }
+        catch(VulkanRayTracingContext.VulkanFailure failure) { handleFailure(failure); }
+        catch(RuntimeException failure) { disable(failure); }
+    }
     public static void beginFrame() {
         if (!RtOptions.ENABLED) return;
         if (!frameLogged) { frameLogged = true; LOG.info("[RT] GameRenderer.render frame hook reached"); }
         projectionCaptured = false;
-        if (RtOptions.CHUNKS) { chunkScene = null; TerrainDrawCapture.beginFrame(); TerrainAtlasCapture.beginFrame(); dev.xys.vulkanrt.geometry.EntityCapture.beginFrame(); dev.xys.vulkanrt.geometry.ParticleCapture.beginFrame(); if(entities!=null) entities.beginFrame(); if(particles!=null) particles.beginFrame(); if(world!=null) world.beginFrame(); }
+        if (RtOptions.CHUNKS) { chunkScene = null; TerrainDrawCapture.beginFrame(); TerrainAtlasCapture.beginFrame(); dev.xys.vulkanrt.geometry.BlockTintDiagnostics.beginFrame(); dev.xys.vulkanrt.geometry.EntityCapture.beginFrame(); dev.xys.vulkanrt.geometry.ParticleCapture.beginFrame(); if(entities!=null) entities.beginFrame(); if(particles!=null) particles.beginFrame(); if(viewmodels!=null) viewmodels.beginFrame(); if(world!=null) world.beginFrame(); }
         if (resetRequested) { resetRequested = false; retireScene(); }
         if (!failed) {
             if (context == null) deviceReady(); // explicit recovery path if initRenderer was already called
@@ -137,6 +148,31 @@ public final class RayTracingRenderer {
         return null;
     }
 
+    private static Vector3f environmentColor(Vector3fc value, float r, float g, float b) {
+        return value == null ? new Vector3f(r, g, b) : new Vector3f(value);
+    }
+
+    /** Snapshot the same extracted state consumed by vanilla SkyRenderer/LightmapRenderer.
+     * No clock, weather or dimension constants are synthesized here. */
+    private static Lighting lighting(GameRenderer renderer) {
+        var level = renderer.gameRenderState().levelRenderState;
+        var sky = level.skyRenderState;
+        var light = renderer.gameRenderState().lightmapRenderState;
+        boolean celestialSky = sky.skybox != DimensionType.Skybox.NONE && sky.skybox != DimensionType.Skybox.END;
+        Vector3f sun = new Vector3f(0.0f, (float)Math.cos(sky.sunAngle), (float)Math.sin(sky.sunAngle)).normalize();
+        float rain = Math.max(0.0f, Math.min(1.0f, sky.rainBrightness));
+        float direct = celestialSky ? Math.max(0.0f, light.skyFactor) * rain : 0.0f;
+        return new Lighting(sun, direct,
+                environmentColor(sky.skyColor, 0.015f, 0.025f, 0.06f),
+                environmentColor(light.skyLightColor, 1.0f, 1.0f, 1.0f),
+                Math.max(0.0f, light.skyFactor),
+                environmentColor(light.ambientColor, 1.0f, 1.0f, 1.0f), rain);
+    }
+
+    private record Lighting(Vector3f sunDirection, float sunIntensity, Vector3f skyColor,
+                             Vector3f skyLightColor, float skyFactor, Vector3f ambientColor,
+                             float rainBrightness) {}
+
     public static void render(GameRenderer renderer) {
         if (!RtOptions.ENABLED) return;
         if (!passLogged) { passLogged = true; LOG.info("[RT] Post-world/pre-GUI RT pass hook reached"); }
@@ -144,6 +180,7 @@ public final class RayTracingRenderer {
         if (context == null) deviceReady();
         if (failed || context == null) return;
         var camera = renderer.gameRenderState().levelRenderState.cameraRenderState;
+        var frameLighting = lighting(renderer);
         var target = renderer.mainRenderTarget();
         String blocked = blockedReason(RtOptions.CHUNKS, renderer.gameRenderState().shouldRenderLevel,
                 projectionCaptured, camera.initialized, target.width, target.height);
@@ -182,11 +219,22 @@ public final class RayTracingRenderer {
                     var entityFrame=entities.frame(batch,chunkScene.anchor,camera.pos.x,camera.pos.y,camera.pos.z);
                     var particleFrame=particles==null ? new ParticleGeometryManager.Frame(java.util.List.of(),java.util.List.of(),null,0,0,0,0)
                             : particles.frame(chunkScene.anchor,camera.pos.x,camera.pos.y,camera.pos.z);
-                    // Entity-only sky/void views must not require an opaque terrain draw. This fills
-                    // an unused descriptor; active entity materials still select their original textures.
-                    if(atlas==null && !entityFrame.textures().isEmpty()) atlas=entityFrame.textures().getFirst();
+                    var vmFrame=viewmodels==null ? new ViewmodelGeometryManager.Frame(java.util.List.of(),java.util.List.of(),java.util.List.of())
+                            : viewmodels.frame(chunkScene.anchor,camera.pos.x,camera.pos.y,camera.pos.z,
+                                    camera.viewRotationMatrix,
+                                    (float)(2.0 * Math.atan(1.0 / camera.projectionMatrix.m11())),
+                                    camera.hudFov,
+                                    entityFrame.textures());
+                    var sceneInstances=new java.util.ArrayList<AccelerationStructureManager.Instance>(entityFrame.instances());
+                    sceneInstances.addAll(vmFrame.instances());
+                    var sceneMaterials=new java.util.ArrayList<ChunkMaterialTable.Entry>(entityFrame.materials());
+                    sceneMaterials.addAll(vmFrame.materials());
+                    var combinedEntities=new EntityGeometryManager.Frame(sceneInstances,sceneMaterials,vmFrame.textures(),entityFrame.hud(),entityFrame.blasCount()+vmFrame.instances().size());
+                    // Entity/viewmodel-only sky views must not require an opaque terrain draw. This fills
+                    // an unused descriptor; each active material still selects its original vanilla texture.
+                    if(atlas==null && !combinedEntities.textures().isEmpty()) atlas=combinedEntities.textures().getFirst();
                     if(atlas==null && particleFrame.texture()!=null) atlas=particleFrame.texture();
-                    prepared = world.compose(batch,entityFrame,particleFrame); nextTlas = prepared.tlas;
+                    prepared = world.compose(batch,combinedEntities,particleFrame); nextTlas = prepared.tlas;
                     ChunkCoordinates.inverse(INVERSE, PROJECTION, camera.viewRotationMatrix, prepared.anchor, camera.pos.x, camera.pos.y, camera.pos.z);
                 } else {
                     if (nextTestTlas == null) {
@@ -224,7 +272,9 @@ public final class RayTracingRenderer {
                             RtOptions.CHUNKS ? prepared.anchor.cameraX(camera.pos.x) : 0,
                             RtOptions.CHUNKS ? prepared.anchor.cameraY(camera.pos.y) : 0,
                             RtOptions.CHUNKS ? prepared.anchor.cameraZ(camera.pos.z) : 2,
-                            target.width, target.height, !RtOptions.CHUNKS);
+                            target.width, target.height, !RtOptions.CHUNKS,
+                            frameLighting.sunDirection(), frameLighting.sunIntensity(), frameLighting.skyColor(),
+                            frameLighting.skyLightColor(), frameLighting.skyFactor(), frameLighting.ambientColor(), frameLighting.rainBrightness());
                     stage = "record RT image blit to Minecraft main target";
                     nextOutput.copyToMainTarget(batch.commands, color, recordProof ? nextProof : null);
                 }
@@ -280,11 +330,12 @@ public final class RayTracingRenderer {
             if (world != null) context.retire(world);
             if (entities != null) context.retire(entities);
             if (particles != null) context.retire(particles);
+            if (viewmodels != null) context.retire(viewmodels);
             if (testTlas != null) context.retire(testTlas);
             if (testBlas != null) context.retire(testBlas);
             if (output != null) context.retire(output);
         }
-        entities=null; particles=null; boundEntityTextures=java.util.List.of();boundEntityHud=null;boundParticleTexture=null;
+        entities=null; particles=null; viewmodels=null; boundEntityTextures=java.util.List.of();boundEntityHud=null;boundParticleTexture=null;
         bindings = null; boundTlas = null; boundMaterials = null; boundAtlas = null; world = null; chunkScene = null; testTlas = null; testBlas = null; output = null; proof = null;
         traceLogged = false; tracePending = false; submitLogged = false;
     }
