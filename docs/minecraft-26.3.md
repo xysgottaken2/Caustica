@@ -101,6 +101,37 @@ Os nomes abaixo foram encontrados na árvore 26.3 acima. Pacotes abreviados:
 | Terrain draw | `R.LevelRenderer.extractSectionDrawGroups`, `prepareChunkRenders`, `prepareChunkRendersIndirect`, `isChunkRenderingUsingMultiDrawIndirect` | Draw groups têm baseVertex/firstIndex/sectionInfo; não confundir draw index com section ID |
 | Entidades / block entities | `R.extract.LevelExtractor.extractVisibleEntities/extractVisibleBlockEntities`; `R.LevelRenderer.submitEntities/submitBlockEntities`; `R.feature.FeatureRenderDispatcher.prepareFrame` | Consumir estados extraídos, sem ler mundo mutável da thread de render |
 | Partículas | `R.LevelRenderer.submitFeatures` → `levelRenderState.particlesRenderState.submit`; `R.feature.QuadParticleFeatureRenderer` | Geometria dinâmica e alpha exigem tratamento separado |
+
+### Contrato de captura instalado nesta etapa
+
+A fronteira confirmada pelo cliente/RenderPearl usado pelo projeto é a mesma
+fronteira de upload já usada pelos recursos de entidades: `StagedVertexBuffer`
+expõe `Draw.format`, `Draw.vertexOffset`, `Draw.vertexCount` e
+`Draw.primitiveTopology`; `uploadDrawsToBuffers` copia a alocação vanilla; e
+`PreparedRenderType.draw` é a emissão final do draw. Para partículas, o formato
+real observado na API oficial é `DefaultVertexFormat.PARTICLE`, com a ordem
+`Position`, `UV0`, `Color`, `UV2/lightmap`, stride de 28 bytes, e topologia
+`QUADS` (quatro vértices, seis triângulos no BLAS). O caminho instalado é:
+
+`ParticleEngine.extract(ParticlesRenderState, Frustum, Camera, partialTick)` →
+`ParticlesRenderState.submit` → `QuadParticleFeatureRenderer` →
+`StagedVertexBuffer.getVertexBuilder`/upload → `PreparedRenderType.draw`.
+
+`ParticleCapture` apenas registra o range efetivamente copiado e o material
+`PreparedRenderType`; a geometria é copiada GPU→GPU para
+`ParticleGeometryManager`. Os quads já saem do vanilla orientados para a
+câmera, portanto o TLAS aplica somente `camera - anchor`, sem multiplicar a
+matriz de câmera. O material usa o atlas `Sampler0` original, o sampler
+capturado e o bit `PARTICLE` no row de 144 bytes; `CUTOUT`/`TRANSLUCENT` são
+selecionados pelos estados reais do `RenderPipeline`, e a textura de partículas
+fica em um binding separado do atlas de terreno.
+
+O cliente oficial 26.3 não foi redistribuído nem pôde ser baixado/autenticado
+neste ambiente por falha TLS; os nomes de extração acima continuam sujeitos ao
+`verifyMinecraftAbi`/CI e a execução no jogo. A captura de `StagedVertexBuffer`
+é intencionalmente independente desses nomes de estado e falha fechada quando
+o formato, topologia, textura ou draw não coincide.
+
 | Transparência | `R.LevelRenderer.prepareTranslucents/executeOit/executeClassicTransparency/executeOitWaterMask` | Não substituir OIT por simples alpha no closest-hit |
 | Sky / fog | `R.SkyRenderer.extractRenderState/render`; `R.fog.FogRenderer.updateBuffer/getBuffer`; `CameraRenderState.fogData` | Consumir ambiente por dimensão, não fixar sol Overworld |
 | Pós-processamento | `R.GameRenderer.preparePostEffects/applyPostEffects`; `R.PostChain.process/addToFrame` | Efeitos podem exigir depth consistente |
@@ -148,8 +179,11 @@ locations do raster e locations dos ray payloads não são a mesma interface.
 
 ## 5. Decisão de avanço
 
-Há evidência suficiente para preparar infraestrutura e um entrypoint inerte.
-**Não há evidência de execução suficiente para declarar a Fase 2 aprovada ou
-avançar à habilitação RT.** O próximo gate é um build real, ABI confirmada,
-fontes locais e cliente Vulkan iniciado. Não habilitar RT com base apenas
-neste documento, nem afrouxar `require` de mixins para esconder incompatibilidade.
+A infraestrutura de partículas agora está isolada em `ParticleCapture` e
+`ParticleGeometryManager`; não há alteração em `FallingBlockEntity`, nos caches
+de mobs/player/itens ou nos caminhos de terreno/material já aceitos. O próximo
+gate é `verifyMinecraftAbi`, compilação Java/ShaderC/SPIR-V e execução no cliente
+26.3. CI valida apenas build, ABI, testes CPU e SPIR-V; **CI não equivale a
+validação visual** de billboard, alpha, lifetime, OIT ou hit RT. A validação
+final deve executar no jogo os cenários de breaking block/item, fumaça, fogo,
+redstone, corações, dano, poção, água, lava e explosão.

@@ -73,6 +73,7 @@ public final class WorldGeometryManager implements AutoCloseable {
         private final Map<Long,Resident> nextTranslucents;
         private final int translucentBuilt;
         public EntityGeometryManager.Frame entities;
+        public ParticleGeometryManager.Frame particles = new ParticleGeometryManager.Frame(List.of(), List.of(), null, 0, 0, 0, 0);
         private List<AccelerationStructureManager.Instance> sceneInstances;
         private List<ChunkMaterialTable.Entry> sceneMaterials;
         private boolean committed;
@@ -260,7 +261,7 @@ public final class WorldGeometryManager implements AutoCloseable {
     /** Single scene finalization after the original entity feature draws, before vkCmdTraceRaysKHR. */
     public boolean hasTerrain() { return !residents.isEmpty() || !cutoutResidents.isEmpty() || !translucentResidents.isEmpty(); }
 
-    public Prepared compose(CommandBatch batch,EntityGeometryManager.Frame entities) {
+    public Prepared compose(CommandBatch batch,EntityGeometryManager.Frame entities, ParticleGeometryManager.Frame particles) {
         var instances=new ArrayList<AccelerationStructureManager.Instance>();var entries=new ArrayList<ChunkMaterialTable.Entry>();
         for(var section:residents.values()) {
             long node=section.section();instances.add(new AccelerationStructureManager.Instance(section.blas(),anchor.sectionX(node),anchor.sectionY(node),anchor.sectionZ(node),0));
@@ -277,6 +278,7 @@ public final class WorldGeometryManager implements AutoCloseable {
             entries.add(new ChunkMaterialTable.Entry(node,section.blas().vertexAddress(),section.layout(),null,transFlags,section.blas().indexAddress(),section.blas().indexBytes()));
         }
         instances.addAll(entities.instances());entries.addAll(entities.materials());
+        instances.addAll(particles.instances());entries.addAll(particles.materials());
         var nextTlas=tlas;var nextMaterials=materials;
         if(instances.isEmpty()) { nextTlas=null;nextMaterials=null; }
         else {
@@ -285,7 +287,7 @@ public final class WorldGeometryManager implements AutoCloseable {
             if(materials==null || !entries.equals(lastSceneMaterials)) nextMaterials=batch.own(new ChunkMaterialTable(context,batch,entries));
         }
         var result=new Prepared(nextTlas,residents,anchor,0,nextMaterials,overlays,0,cutoutResidents,0,translucentResidents,0);
-        result.entities=entities;result.sceneInstances=List.copyOf(instances);result.sceneMaterials=List.copyOf(entries);
+        result.entities=entities;result.particles=particles;result.sceneInstances=List.copyOf(instances);result.sceneMaterials=List.copyOf(entries);
         return result;
     }
 

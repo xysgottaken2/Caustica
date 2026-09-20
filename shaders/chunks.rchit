@@ -13,6 +13,7 @@ layout(buffer_reference,std430,buffer_reference_align=4) readonly buffer Vertice
 
 // Literal descriptor indices: no descriptor indexing / non-uniform sampler feature is required.
 layout(set=0,binding=5) uniform sampler2D entityTextures[12];
+layout(set=0,binding=7) uniform sampler2D particleAtlas;
 vec4 readEntitySampler(sampler2D tex,vec2 uv,uint mode) {
  ivec2 size=textureSize(tex,0);
  ivec2 p=clamp(ivec2(floor(clamp(uv,0.0,1.0)*vec2(size))),ivec2(0),size-1);
@@ -50,6 +51,12 @@ ivec2 entitySize(uint slot) {
  case 11u: return textureSize(entityTextures[11],0);
  } return ivec2(1);
 }
+vec4 particleSample(vec2 uv,uint mode) {
+ ivec2 size=textureSize(particleAtlas,0);
+ ivec2 p=clamp(ivec2(floor(clamp(uv,0.0,1.0)*vec2(size))),ivec2(0),size-1);
+ return mode==0u?texelFetch(particleAtlas,p,0):textureLod(particleAtlas,uv,0.0);
+}
+int particleLevels() { return textureQueryLevels(particleAtlas); }
 int entityLevels(uint slot) {
  switch(slot) {
  case 0u: return textureQueryLevels(entityTextures[0]);
@@ -120,6 +127,8 @@ void main() {
     if (gl_InstanceID >= materials.rows.length()) return;
     Material m=materials.rows[gl_InstanceID];
     bool entity=(uint(m.section.w)&8u)!=0u;
+    bool particle=(uint(m.section.w)&16u)!=0u;
+    bool particleBlock=particle && m.entityMeta.z!=0u;
     if(entity) hit.entityRecord=m.entityMeta.w;
     hit.section=m.section.xyz; hit.layer=(uint(m.section.w)&4u)!=0u ? 2u : uint(m.section.w)&1u;
     if (uint(gl_PrimitiveID)>=m.attributes.z) return;
@@ -134,11 +143,11 @@ void main() {
     // (0.5.0) omitted its texel-position correction, softening magnified pixel-art textures.
     // Reference/correction: read the actual mip-0 texel of the SAME view, bypassing filtering.
     // This is not a replacement for vanilla's derivative-based minification/RGSS.
-    hit.atlasSize=entity?entitySize(m.entityMeta.x):textureSize(blockAtlas,0);
+    hit.atlasSize=entity?entitySize(m.entityMeta.x):(particle && !particleBlock?textureSize(particleAtlas,0):textureSize(blockAtlas,0));
     hit.mode=m.attributes.w;
     if (any(isnan(hit.uv)) || any(isinf(hit.uv)) || any(lessThanEqual(hit.atlasSize,ivec2(0)))) return;
     ivec2 texel=clamp(ivec2(floor(clamp(hit.uv,0.0,1.0)*vec2(hit.atlasSize))),ivec2(0),hit.atlasSize-1);
-    vec4 albedo=entity?entitySample(m.entityMeta.x,hit.uv,hit.mode):(hit.mode==1u ? textureLod(blockAtlas,hit.uv,0.0) : texelFetch(blockAtlas,texel,0));
+    vec4 albedo=entity?entitySample(m.entityMeta.x,hit.uv,hit.mode):particle?(particleBlock? (hit.mode==1u ? textureLod(blockAtlas,hit.uv,0.0) : texelFetch(blockAtlas,texel,0)) : particleSample(hit.uv,hit.mode)) :(hit.mode==1u ? textureLod(blockAtlas,hit.uv,0.0) : texelFetch(blockAtlas,texel,0));
     hit.baseTint=color; hit.overlayTint=vec4(0); hit.baseUv=hit.uv; hit.overlayState=0u;
     if(any(notEqual(m.mapping.xy,uvec2(0)))) {
         Vertices mapping=Vertices(m.mapping.xy);
@@ -178,6 +187,6 @@ void main() {
         vec2 a=uvAt(vertices,m,base), b=uvAt(vertices,m,base+1u);
         vec2 c=uvAt(vertices,m,base+2u), d=uvAt(vertices,m,base+3u);
         hit.quadSpan=(max(max(a,b),max(c,d))-min(min(a,b),min(c,d)))*vec2(hit.atlasSize);
-        hit.levels=entity?entityLevels(m.entityMeta.x):textureQueryLevels(blockAtlas);
+        hit.levels=entity?entityLevels(m.entityMeta.x):(particle && !particleBlock?particleLevels():textureQueryLevels(blockAtlas));
     }
 }

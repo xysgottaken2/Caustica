@@ -29,7 +29,7 @@ public final class RayTracingPipeline implements AutoCloseable {
         org.slf4j.LoggerFactory.getLogger("native_vulkan_rt").info("[RT] Creating ray tracing pipeline...");
         long[] modules = new long[chunks ? 4 : 3];
         try (MemoryStack stack = MemoryStack.stackPush()) {
-            var bindings = VkDescriptorSetLayoutBinding.calloc(chunks ? 7 : 2, stack);
+            var bindings = VkDescriptorSetLayoutBinding.calloc(chunks ? 8 : 2, stack);
             bindings.get(0).binding(0).descriptorType(VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR).descriptorCount(1).stageFlags(VK_SHADER_STAGE_RAYGEN_BIT_KHR);
             bindings.get(1).binding(1).descriptorType(VK_DESCRIPTOR_TYPE_STORAGE_IMAGE).descriptorCount(1).stageFlags(VK_SHADER_STAGE_RAYGEN_BIT_KHR);
             if (chunks) {
@@ -38,6 +38,7 @@ public final class RayTracingPipeline implements AutoCloseable {
                 bindings.get(4).binding(4).descriptorType(VK_DESCRIPTOR_TYPE_STORAGE_BUFFER).descriptorCount(1).stageFlags(VK_SHADER_STAGE_RAYGEN_BIT_KHR);
                 bindings.get(5).binding(5).descriptorType(VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER).descriptorCount(EntityGeometryManager.TEXTURES).stageFlags(VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR|VK_SHADER_STAGE_ANY_HIT_BIT_KHR);
                 bindings.get(6).binding(6).descriptorType(VK_DESCRIPTOR_TYPE_STORAGE_BUFFER).descriptorCount(1).stageFlags(VK_SHADER_STAGE_RAYGEN_BIT_KHR);
+                bindings.get(7).binding(7).descriptorType(VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER).descriptorCount(1).stageFlags(VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR|VK_SHADER_STAGE_ANY_HIT_BIT_KHR);
                 hitProbe = new GpuBuffer(context,ChunkTextureSampling.PROBE_BYTES,VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,false,false);
                 org.slf4j.LoggerFactory.getLogger("native_vulkan_rt").info("[RT] Chunks material shader: vanilla atlas + GPU vertex addresses; GPU-only center-hit HUD={}; no readback, unchanged 3-group SBT", materialDiagnostics);
             }
@@ -114,15 +115,17 @@ public final class RayTracingPipeline implements AutoCloseable {
         } finally { MemoryUtil.memFree(handles); }
     }
 
-    public Bindings bind(AccelerationStructureManager.Structure tlas, RtOutputImage output) { return new Bindings(tlas, output, null, null,null); }
+    public Bindings bind(AccelerationStructureManager.Structure tlas, RtOutputImage output) { return new Bindings(tlas, output, null, null, null, null); }
     public Bindings bind(AccelerationStructureManager.Structure tlas, RtOutputImage output,
-                         ChunkMaterialTable materials, TerrainAtlasCapture.Atlas atlas,EntityGeometryManager.Frame entities) { return new Bindings(tlas,output,materials,atlas,entities); }
+                         ChunkMaterialTable materials, TerrainAtlasCapture.Atlas atlas,EntityGeometryManager.Frame entities,
+                         TerrainAtlasCapture.Atlas particleAtlas) { return new Bindings(tlas,output,materials,atlas,entities,particleAtlas); }
 
     /** Pool/set are never rewritten in flight. Allocate a new binding after TLAS replacement/resize. */
     public final class Bindings implements AutoCloseable {
         private long pool, set;
         private Bindings(AccelerationStructureManager.Structure tlas, RtOutputImage output,
-                         ChunkMaterialTable materials, TerrainAtlasCapture.Atlas atlas,EntityGeometryManager.Frame entities) {
+                         ChunkMaterialTable materials, TerrainAtlasCapture.Atlas atlas,EntityGeometryManager.Frame entities,
+                         TerrainAtlasCapture.Atlas particleAtlas) {
             if (chunks && (materials == null || materials.count != tlas.count || atlas == null || !atlas.live()))
                 throw new IllegalArgumentException("Chunk material rows/TLAS count/atlas mismatch");
             try (MemoryStack stack = MemoryStack.stackPush()) {
@@ -131,7 +134,7 @@ public final class RayTracingPipeline implements AutoCloseable {
                 sizes.get(1).type(VK_DESCRIPTOR_TYPE_STORAGE_IMAGE).descriptorCount(1);
                 if (chunks) {
                     sizes.get(2).type(VK_DESCRIPTOR_TYPE_STORAGE_BUFFER).descriptorCount(3);
-                    sizes.get(3).type(VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER).descriptorCount(1+EntityGeometryManager.TEXTURES);
+                    sizes.get(3).type(VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER).descriptorCount(2+EntityGeometryManager.TEXTURES);
                 }
                 var result = stack.mallocLong(1);
                 check(vkCreateDescriptorPool(context.device(), VkDescriptorPoolCreateInfo.calloc(stack).sType$Default().maxSets(1).pPoolSizes(sizes), null, result), "vkCreateDescriptorPool(RT)");
@@ -141,15 +144,14 @@ public final class RayTracingPipeline implements AutoCloseable {
                 set = result.get(0);
                 var asWrite = VkWriteDescriptorSetAccelerationStructureKHR.calloc(stack).sType$Default().pAccelerationStructures(stack.longs(tlas.handle()));
                 var image = VkDescriptorImageInfo.calloc(1, stack).imageView(output.view()).imageLayout(VK_IMAGE_LAYOUT_GENERAL);
-                var writes = VkWriteDescriptorSet.calloc(chunks ? 7 : 2, stack);
+                var writes = VkWriteDescriptorSet.calloc(chunks ? 8 : 2, stack);
                 writes.get(0).sType$Default().dstSet(set).dstBinding(0).descriptorCount(1)
                         .descriptorType(VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR).pNext(asWrite);
                 writes.get(1).sType$Default().dstSet(set).dstBinding(1).descriptorCount(1)
                         .descriptorType(VK_DESCRIPTOR_TYPE_STORAGE_IMAGE).pImageInfo(image);
                 if (chunks) {
+                    if(atlas == null || !atlas.live()) throw new IllegalStateException("Missing live fallback atlas for chunk material binding");
                     if(TerrainAtlasCapture.current()!=null) TerrainAtlasCapture.binding(atlas);
-                    else if(materials.count!=entities.materials().size() || !entities.textures().contains(atlas))
-                        throw new IllegalStateException("Missing terrain atlas: entity-only descriptor fallback cannot shade terrain");
                     var table = VkDescriptorBufferInfo.calloc(1,stack).buffer(materials.buffer.handle()).offset(0).range(materials.buffer.size);
                     var atlasImage = VkDescriptorImageInfo.calloc(1,stack).imageView(atlas.view().vkImageView())
                             .sampler(atlas.sampler().vkSampler()).imageLayout(VK_IMAGE_LAYOUT_GENERAL);
@@ -166,6 +168,10 @@ public final class RayTracingPipeline implements AutoCloseable {
                     writes.get(5).sType$Default().dstSet(set).dstBinding(5).descriptorCount(EntityGeometryManager.TEXTURES).descriptorType(VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER).pImageInfo(entityImages);
                     var entityHud=VkDescriptorBufferInfo.calloc(1,stack).buffer(entities.hud().handle()).offset(0).range(entities.hud().size);
                     writes.get(6).sType$Default().dstSet(set).dstBinding(6).descriptorCount(1).descriptorType(VK_DESCRIPTOR_TYPE_STORAGE_BUFFER).pBufferInfo(entityHud);
+                    var particleImage = particleAtlas != null && particleAtlas.live() ? particleAtlas : atlas;
+                    var particleInfo = VkDescriptorImageInfo.calloc(1,stack).imageView(particleImage.view().vkImageView())
+                            .sampler(particleImage.sampler().vkSampler()).imageLayout(VK_IMAGE_LAYOUT_GENERAL);
+                    writes.get(7).sType$Default().dstSet(set).dstBinding(7).descriptorCount(1).descriptorType(VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER).pImageInfo(particleInfo);
                 }
                 vkUpdateDescriptorSets(context.device(), writes, null);
             } catch (RuntimeException | Error failure) { close(); throw failure; }

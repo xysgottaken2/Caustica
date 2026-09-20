@@ -50,7 +50,9 @@ public final class RayTracingRenderer {
     }
 
     private static EntityGeometryManager entities;
+    private static ParticleGeometryManager particles;
     private static java.util.List<TerrainAtlasCapture.Atlas> boundEntityTextures=java.util.List.of();
+    private static TerrainAtlasCapture.Atlas boundParticleTexture;
     private static GpuBuffer boundEntityHud;
     public static void uploadEntities(java.util.List<dev.xys.vulkanrt.geometry.EntityCapture.Upload> uploads) {
         if(!chunkCaptureEnabled() || context==null) return;
@@ -59,11 +61,18 @@ public final class RayTracingRenderer {
         catch(VulkanRayTracingContext.VulkanFailure failure) { handleFailure(failure); }
         catch(RuntimeException failure) { disable(failure); }
     }
+    public static void uploadParticles(java.util.List<dev.xys.vulkanrt.geometry.ParticleCapture.Upload> uploads) {
+        if(!chunkCaptureEnabled() || context==null) return;
+        stage="particle staging GPU capture / shared-scene BLAS";
+        try { if(particles==null) particles=new ParticleGeometryManager(context);particles.upload(uploads); }
+        catch(VulkanRayTracingContext.VulkanFailure failure) { handleFailure(failure); }
+        catch(RuntimeException failure) { disable(failure); }
+    }
     public static void beginFrame() {
         if (!RtOptions.ENABLED) return;
         if (!frameLogged) { frameLogged = true; LOG.info("[RT] GameRenderer.render frame hook reached"); }
         projectionCaptured = false;
-        if (RtOptions.CHUNKS) { chunkScene = null; TerrainDrawCapture.beginFrame(); TerrainAtlasCapture.beginFrame(); dev.xys.vulkanrt.geometry.EntityCapture.beginFrame(); if(entities!=null) entities.beginFrame(); if(world!=null) world.beginFrame(); }
+        if (RtOptions.CHUNKS) { chunkScene = null; TerrainDrawCapture.beginFrame(); TerrainAtlasCapture.beginFrame(); dev.xys.vulkanrt.geometry.EntityCapture.beginFrame(); dev.xys.vulkanrt.geometry.ParticleCapture.beginFrame(); if(entities!=null) entities.beginFrame(); if(particles!=null) particles.beginFrame(); if(world!=null) world.beginFrame(); }
         if (resetRequested) { resetRequested = false; retireScene(); }
         if (!failed) {
             if (context == null) deviceReady(); // explicit recovery path if initRenderer was already called
@@ -171,10 +180,13 @@ public final class RayTracingRenderer {
                     stage = "prepare chunk acceleration structures";
                     if(entities==null) entities=new EntityGeometryManager(context);
                     var entityFrame=entities.frame(batch,chunkScene.anchor,camera.pos.x,camera.pos.y,camera.pos.z);
+                    var particleFrame=particles==null ? new ParticleGeometryManager.Frame(java.util.List.of(),java.util.List.of(),null,0,0,0,0)
+                            : particles.frame(chunkScene.anchor,camera.pos.x,camera.pos.y,camera.pos.z);
                     // Entity-only sky/void views must not require an opaque terrain draw. This fills
                     // an unused descriptor; active entity materials still select their original textures.
                     if(atlas==null && !entityFrame.textures().isEmpty()) atlas=entityFrame.textures().getFirst();
-                    prepared = world.compose(batch,entityFrame); nextTlas = prepared.tlas;
+                    if(atlas==null && particleFrame.texture()!=null) atlas=particleFrame.texture();
+                    prepared = world.compose(batch,entityFrame,particleFrame); nextTlas = prepared.tlas;
                     ChunkCoordinates.inverse(INVERSE, PROJECTION, camera.viewRotationMatrix, prepared.anchor, camera.pos.x, camera.pos.y, camera.pos.z);
                 } else {
                     if (nextTestTlas == null) {
@@ -197,8 +209,8 @@ public final class RayTracingRenderer {
                 var nextBindings = bindings;
                 if (nextTlas == null) nextBindings = null;
                 else if (nextBindings == null || boundTlas != nextTlas || nextOutput != output
-                        || (RtOptions.CHUNKS && (boundMaterials != prepared.materials || !atlas.equals(boundAtlas) || !prepared.entities.textures().equals(boundEntityTextures) || prepared.entities.hud()!=boundEntityHud)))
-                    nextBindings = batch.own(RtOptions.CHUNKS ? pipeline.bind(nextTlas,nextOutput,prepared.materials,atlas,prepared.entities) : pipeline.bind(nextTlas,nextOutput));
+                        || (RtOptions.CHUNKS && (boundMaterials != prepared.materials || !atlas.equals(boundAtlas) || !prepared.entities.textures().equals(boundEntityTextures) || prepared.entities.hud()!=boundEntityHud || prepared.particles.texture()!=boundParticleTexture)))
+                    nextBindings = batch.own(RtOptions.CHUNKS ? pipeline.bind(nextTlas,nextOutput,prepared.materials,atlas,prepared.entities,prepared.particles.texture()) : pipeline.bind(nextTlas,nextOutput));
                 TriangleReadback nextProof = proof;
                 boolean recordProof = !RtOptions.CHUNKS && nextProof == null;
                 if (recordProof) {
@@ -221,7 +233,7 @@ public final class RayTracingRenderer {
                 // Transfer persistent ownership immediately after successful enqueue.
                 var oldBindings = bindings; var oldOutput = output;
                 output = nextOutput; bindings = nextBindings; boundTlas = nextTlas;
-                if (RtOptions.CHUNKS) { prepared.commit();boundMaterials = prepared.materials; boundAtlas = atlas;boundEntityTextures=prepared.entities.textures();boundEntityHud=prepared.entities.hud(); }
+                if (RtOptions.CHUNKS) { prepared.commit();boundMaterials = prepared.materials; boundAtlas = atlas;boundEntityTextures=prepared.entities.textures();boundEntityHud=prepared.entities.hud();boundParticleTexture=prepared.particles.texture(); }
                 testBlas = nextTestBlas; testTlas = nextTestTlas; proof = nextProof;
                 if (oldBindings != null && oldBindings != nextBindings) context.retire(oldBindings);
                 if (oldOutput != null && oldOutput != nextOutput) context.retire(oldOutput);
@@ -267,11 +279,12 @@ public final class RayTracingRenderer {
             if (proof != null) context.retire(proof);
             if (world != null) context.retire(world);
             if (entities != null) context.retire(entities);
+            if (particles != null) context.retire(particles);
             if (testTlas != null) context.retire(testTlas);
             if (testBlas != null) context.retire(testBlas);
             if (output != null) context.retire(output);
         }
-        entities=null;boundEntityTextures=java.util.List.of();boundEntityHud=null;
+        entities=null; particles=null; boundEntityTextures=java.util.List.of();boundEntityHud=null;boundParticleTexture=null;
         bindings = null; boundTlas = null; boundMaterials = null; boundAtlas = null; world = null; chunkScene = null; testTlas = null; testBlas = null; output = null; proof = null;
         traceLogged = false; tracePending = false; submitLogged = false;
     }

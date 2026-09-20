@@ -11,6 +11,7 @@ layout(set=0,binding=3) uniform sampler2D blockAtlas;
 layout(buffer_reference,std430,buffer_reference_align=4) readonly buffer Vertices { uint words[]; };
 // Literal descriptor indices: no descriptor indexing / non-uniform sampler feature is required.
 layout(set=0,binding=5) uniform sampler2D entityTextures[12];
+layout(set=0,binding=7) uniform sampler2D particleAtlas;
 vec4 readEntitySampler(sampler2D tex,vec2 uv,uint mode) {
  ivec2 size=textureSize(tex,0);
  ivec2 p=clamp(ivec2(floor(clamp(uv,0.0,1.0)*vec2(size))),ivec2(0),size-1);
@@ -48,6 +49,12 @@ ivec2 entitySize(uint slot) {
  case 11u: return textureSize(entityTextures[11],0);
  } return ivec2(1);
 }
+vec4 particleSample(vec2 uv,uint mode) {
+ ivec2 size=textureSize(particleAtlas,0);
+ ivec2 p=clamp(ivec2(floor(clamp(uv,0.0,1.0)*vec2(size))),ivec2(0),size-1);
+ return mode==0u?texelFetch(particleAtlas,p,0):textureLod(particleAtlas,uv,0.0);
+}
+int particleLevels() { return textureQueryLevels(particleAtlas); }
 int entityLevels(uint slot) {
  switch(slot) {
  case 0u: return textureQueryLevels(entityTextures[0]);
@@ -110,8 +117,10 @@ void main() {
     if(gl_InstanceID>=materials.rows.length()) { ignoreIntersectionEXT; }
     Material m=materials.rows[gl_InstanceID];
     // SOLID geometries carry OPAQUE; no force-opaque ray flag may bypass this stage on CUTOUT.
-    if((uint(m.section.w)&13u)==0u) return;
+    if((uint(m.section.w)&(13u|16u))==0u) return;
     bool entity=(uint(m.section.w)&8u)!=0u;
+    bool particle=(uint(m.section.w)&16u)!=0u;
+    bool particleBlock=particle && m.entityMeta.z!=0u;
     bool translucent=(uint(m.section.w)&4u)!=0u;
     // A straight ray cannot legitimately intersect the same planar triangle twice.
     if(translucent && all(equal(hit.previous,uvec2(uint(gl_InstanceID),uint(gl_PrimitiveID))))) { ignoreIntersectionEXT; }
@@ -126,7 +135,7 @@ void main() {
         vec3 a=positionAt(v,m,indices.x),b=positionAt(v,m,indices.y),c=positionAt(v,m,indices.z);
         if(dot(cross(b-a,c-a),gl_ObjectRayDirectionEXT)*(entity && m.entityInfo.y!=0u?-1.0:1.0)>=0.0) { ignoreIntersectionEXT; }
     }
-    if(entity && uintBitsToFloat(m.entityMeta.y)==0.0) return; // opaque entity; cull only
+    if((entity || particle) && uintBitsToFloat(m.entityMeta.y)==0.0) return; // opaque entity/particle; cull only
     vec3 w=vec3(1.0-barycentric.x-barycentric.y,barycentric);
     vec2 uv=uvAt(v,m,indices.x)*w.x+uvAt(v,m,indices.y)*w.y+uvAt(v,m,indices.z)*w.z;
     vec4 color=colorAt(v,m,indices.x)*w.x+colorAt(v,m,indices.y)*w.y+colorAt(v,m,indices.z)*w.z;
@@ -137,12 +146,12 @@ void main() {
         else { hit.cutoutSection=ivec4(m.section.xyz,int(primitive));hit.cutoutSample=vec4(uv,-1.0,color.a); }
     }
     if(any(isnan(uv)) || any(isinf(uv))) { ignoreIntersectionEXT; }
-    ivec2 size=textureSize(blockAtlas,0);
+    ivec2 size=entity?entitySize(m.entityMeta.x):(particle && !particleBlock?textureSize(particleAtlas,0):textureSize(blockAtlas,0));
     ivec2 texel=clamp(ivec2(floor(clamp(uv,0.0,1.0)*vec2(size))),ivec2(0),size-1);
     // Same atlas view, sampling mode and LOD as the closest-hit; not a second sampler/atlas.
-    vec4 sampleColor=entity?entitySample(m.entityMeta.x,uv,m.attributes.w):(m.attributes.w==1u ? textureLod(blockAtlas,uv,0.0) : texelFetch(blockAtlas,texel,0));
+    vec4 sampleColor=entity?entitySample(m.entityMeta.x,uv,m.attributes.w):particle?(particleBlock?(m.attributes.w==1u ? textureLod(blockAtlas,uv,0.0) : texelFetch(blockAtlas,texel,0)):particleSample(uv,m.attributes.w)):(m.attributes.w==1u ? textureLod(blockAtlas,uv,0.0) : texelFetch(blockAtlas,texel,0));
     float alpha=sampleColor.a*color.a;
-    bool discardAlpha=isnan(alpha) || isinf(alpha) || (entity ? alpha<uintBitsToFloat(m.entityMeta.y) : (translucent ? alpha<0.1 : alpha<0.5));
+    bool discardAlpha=isnan(alpha) || isinf(alpha) || (entity ? alpha<uintBitsToFloat(m.entityMeta.y) : (particle && !translucent ? alpha<uintBitsToFloat(m.entityMeta.y) : (translucent ? alpha<0.1 : alpha<0.5)));
     if(probe && translucent) {
         hit.transSample.z=sampleColor.a; hit.transStats.x++;
         if(discardAlpha) hit.transStats.y++;

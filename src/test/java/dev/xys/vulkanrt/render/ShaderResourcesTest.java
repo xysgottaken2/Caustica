@@ -43,7 +43,7 @@ final class ShaderResourcesTest {
         assertTrue(capabilities.contains(5347),"PhysicalStorageBufferAddresses");
         assertFalse(capabilities.contains(11),"shaderInt64 is not enabled/required");
         assertFalse(capabilities.contains(5301),"ShaderNonUniform indexing is not enabled/required");
-        assertEquals(java.util.Set.of(2,3,5),bindings);
+        assertEquals(java.util.Set.of(2,3,5,7),bindings);
         assertTrue(rowsStride144,"Material std430 row must match Java packer");
     }
     @Test void bothComparisonPathsSampleViewMipZeroAndDiagnosticProbeHasEighteenVectors() throws Exception {
@@ -143,7 +143,7 @@ final class ShaderResourcesTest {
             i+=count*4;
         }
         assertTrue(anyHit);assertTrue(ignore);assertTrue(fetch);assertTrue(cutoff);assertTrue(transCutoff);assertTrue(stride);
-        assertEquals(java.util.Set.of(2,3,5),bindings);assertFalse(capabilities.contains(11));
+        assertEquals(java.util.Set.of(2,3,5,7),bindings);assertFalse(capabilities.contains(11));
         var raygen=shader("chunks.rgen");var zeros=new HashSet<Integer>();var flags=new java.util.ArrayList<Integer>();
         for(int i=20;i<raygen.limit();) {
             int h=raygen.getInt(i),n=h>>>16,op=h&0xffff;assertTrue(n>0);
