@@ -27,7 +27,9 @@ final class ChunkMaterialTableTest {
         assertEquals(0,bytes.getLong(48)); assertEquals(0,bytes.getLong(64)); assertEquals(0,bytes.getInt(76));
         assertEquals(8,bytes.getInt(20)); assertEquals(4,bytes.getInt(24));
         assertEquals(-2,bytes.getInt(32)); assertEquals(4,bytes.getInt(36)); assertEquals(4,bytes.getInt(40));
+        assertEquals(6,bytes.getInt(128),"Terrain material stores UV2/light word offset without changing the 144-byte row");
         assertEquals(-3,bytes.getInt(176)); assertEquals(5,bytes.getInt(184)); assertEquals(0,bytes.getInt(188));
+        assertEquals(6,bytes.getInt(272));
     }
     @Test void comparisonModeChangesOnlyReservedMetadataWordNotGeometryOrUVLayout() {
         var texel=ByteBuffer.allocate(ChunkMaterialTable.ROW_BYTES).order(ByteOrder.nativeOrder());

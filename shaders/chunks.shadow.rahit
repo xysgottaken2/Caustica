@@ -116,8 +116,12 @@ uvec3 triangleIndices(Material m,uint primitive) {
 void main() {
     if(gl_InstanceID>=materials.rows.length()) { ignoreIntersectionEXT; }
     Material m=materials.rows[gl_InstanceID];
-    // SOLID geometries carry OPAQUE; no force-opaque ray flag may bypass this stage on CUTOUT.
-    if((uint(m.section.w)&(13u|16u))==0u) return;
+    // The shadow ray uses cullMask=1, so the camera-only viewmodel mask=2
+    // never reaches this shader. SOLID rows have no layer bit at all and must
+    // therefore be accepted here; the previous flags test returned them before
+    // closest-hit, disabling terrain shadows in practice.
+    bool viewmodel=(uint(m.section.w)&64u)!=0u;
+    if(viewmodel) { ignoreIntersectionEXT; return; }
     bool entity=(uint(m.section.w)&8u)!=0u;
     bool particle=(uint(m.section.w)&16u)!=0u;
     bool particleBlock=particle && m.entityMeta.z!=0u;

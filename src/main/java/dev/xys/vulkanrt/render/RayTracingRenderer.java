@@ -135,7 +135,13 @@ public final class RayTracingRenderer {
     }
 
     public static void captureProjection(Matrix4fc projection) { PROJECTION.set(projection); projectionCaptured = true; }
-    public static void worldChanged() { resetRequested = true; }
+    public static void worldChanged() {
+        resetRequested = true;
+        // FluidRenderer runs during section rebuilds, not every frame. Drop the
+        // persistent fluid classification only when vanilla invalidates the
+        // compiled world, never from beginFrame().
+        dev.xys.vulkanrt.geometry.BlockTintDiagnostics.resetSections();
+    }
 
     private static void waiting(String reason) {
         if (!reason.equals(lastGate)) { lastGate = reason; LOG.info("[RT] Pass waiting: {}", reason); }
@@ -152,6 +158,11 @@ public final class RayTracingRenderer {
         return value == null ? new Vector3f(r, g, b) : new Vector3f(value);
     }
 
+    /** Matches SkyRenderer.renderSunMoonAndStars for the vanilla 26.3 basis. */
+    static Vector3f vanillaSunDirection(float sunAngle) {
+        return new Vector3f(-(float)Math.sin(sunAngle), (float)Math.cos(sunAngle), 0.0f).normalize();
+    }
+
     /** Snapshot the same extracted state consumed by vanilla SkyRenderer/LightmapRenderer.
      * No clock, weather or dimension constants are synthesized here. */
     private static Lighting lighting(GameRenderer renderer) {
@@ -159,7 +170,13 @@ public final class RayTracingRenderer {
         var sky = level.skyRenderState;
         var light = renderer.gameRenderState().lightmapRenderState;
         boolean celestialSky = sky.skybox != DimensionType.Skybox.NONE && sky.skybox != DimensionType.Skybox.END;
-        Vector3f sun = new Vector3f(0.0f, (float)Math.cos(sky.sunAngle), (float)Math.sin(sky.sunAngle)).normalize();
+        // SkyRenderer uses Y -90 degrees followed by X sunAngle around a
+        // celestial body initially on +Y. This is the actual vanilla sun
+        // direction in world coordinates: (-sin(angle), cos(angle), 0).
+        // The former (0, cos, sin) basis rotated the light by 90 degrees,
+        // which made most terrain receive no direct sun and put shadows in
+        // the wrong direction.
+        Vector3f sun = vanillaSunDirection(sky.sunAngle);
         float rain = Math.max(0.0f, Math.min(1.0f, sky.rainBrightness));
         float direct = celestialSky ? Math.max(0.0f, light.skyFactor) * rain : 0.0f;
         return new Lighting(sun, direct,

@@ -3,7 +3,7 @@
 #extension GL_EXT_buffer_reference2 : require
 #extension GL_EXT_buffer_reference_uvec2 : require
 
-struct Hit { vec3 color; uint found; ivec3 section; uint primitive; vec2 uv; uint sampled; ivec2 atlasSize; vec2 quadSpan; uint mode; int levels; vec4 baseTint; vec4 overlayTint; vec4 sampleColor; vec2 baseUv; uint overlayState; uint face; uint layer; uint materialFlags; uvec4 alphaStats; vec4 cutoutSample; ivec4 cutoutSection; float distance; float alpha; uvec2 previous; uvec4 transStats; vec4 transSample; ivec4 transSection; uint entityRecord; vec3 position; vec3 normal; };
+struct Hit { vec3 color; uint found; ivec3 section; uint primitive; vec2 uv; uint sampled; ivec2 atlasSize; vec2 quadSpan; uint mode; int levels; vec4 baseTint; vec4 overlayTint; vec4 sampleColor; vec2 baseUv; uint overlayState; uint face; uint layer; uint materialFlags; uvec4 alphaStats; vec4 cutoutSample; ivec4 cutoutSection; float distance; float alpha; uvec2 previous; uvec4 transStats; vec4 transSample; ivec4 transSection; uint entityRecord; vec3 position; vec3 normal; vec4 light; };
 layout(location=0) rayPayloadInEXT Hit hit;
 hitAttributeEXT vec2 barycentric;
 struct Material { uvec4 addressLayout; uvec4 attributes; ivec4 section; uvec4 overlay; uvec4 mapping; uvec4 indices; uvec4 entityMeta; uvec4 entityColors; uvec4 entityInfo; };
@@ -106,6 +106,16 @@ vec3 positionAt(Vertices vertices,Material m,uint index) {
     uint b=index*m.addressLayout.z+m.mapping.w;
     return vec3(uintBitsToFloat(vertices.words[b]),uintBitsToFloat(vertices.words[b+1u]),uintBitsToFloat(vertices.words[b+2u]));
 }
+vec2 lightAt(Vertices vertices,Material m,uint index) {
+    // Terrain UV2 is the vanilla packed block/sky light field. Keep it
+    // interpolated exactly like UV/color; this is the real lightmap already
+    // emitted by Minecraft, not a CPU readback or invented torch list.
+    if(m.entityInfo.x==0xffffffffu) return vec2(0.0);
+    uint word=vertices.words[index*m.addressLayout.z+m.entityInfo.x];
+    float block=float(word&65535u)/240.0;
+    float sky=float(word>>16u)/240.0;
+    return clamp(vec2(block,sky),vec2(0.0),vec2(1.0));
+}
 // Snapshot of vanilla's real sorted indices. SHORT loads are packed uint words (no shaderInt16).
 uvec3 triangleIndices(Material m,uint primitive) {
     uint base=(primitive/2u)*4u;
@@ -122,7 +132,7 @@ uvec3 triangleIndices(Material m,uint primitive) {
 }
 void main() {
     // gl_InstanceID is the TLAS input row, independent of unchanged customIndex/SBT offsets.
-    hit.entityRecord=0xffffffffu; hit.found=1u; hit.sampled=0u; hit.distance=gl_HitTEXT; hit.alpha=1.0; hit.layer=0u; hit.primitive=uint(gl_PrimitiveID);
+    hit.entityRecord=0xffffffffu; hit.found=1u; hit.sampled=0u; hit.distance=gl_HitTEXT; hit.alpha=1.0; hit.layer=0u; hit.primitive=uint(gl_PrimitiveID); hit.light=vec4(0.0);
     hit.color=vec3(1,0,1); // Invalid metadata must be visibly different from a successful atlas sample.
     if (gl_InstanceID >= materials.rows.length()) return;
     Material m=materials.rows[gl_InstanceID];
@@ -175,6 +185,12 @@ void main() {
     hit.previous=uvec2(uint(gl_InstanceID),uint(gl_PrimitiveID));
     hit.sampleColor=albedo;
     hit.color=albedo.rgb*color.rgb;
+    bool terrain=!entity && !particle && !viewmodel;
+    if(terrain) {
+        hit.light.xy=lightAt(vertices,m,indices.x)*w.x
+                    +lightAt(vertices,m,indices.y)*w.y
+                    +lightAt(vertices,m,indices.z)*w.z;
+    }
     vec3 localNormal=normalize(cross(positionAt(vertices,m,indices.y)-positionAt(vertices,m,indices.x),positionAt(vertices,m,indices.z)-positionAt(vertices,m,indices.x)));
     vec3 worldNormal=normalize(gl_ObjectToWorldEXT*vec4(localNormal,0.0));
     if(dot(worldNormal,gl_WorldRayDirectionEXT)>0.0) worldNormal=-worldNormal;

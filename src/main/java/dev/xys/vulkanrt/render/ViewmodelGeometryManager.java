@@ -123,8 +123,13 @@ public final class ViewmodelGeometryManager implements AutoCloseable {
         // Vanilla hand vertices are camera-oriented by PoseStack.mulPose(inverse view).
         // Apply FOV compensation in that same local basis, then translate once to the
         // anchor used by the shared world TLAS.
+        // ViewmodelCapture receives vertices after vanilla's renderItemInHand
+        // PoseStack has applied the inverse camera rotation. They are already in
+        // camera-local space. Rotate that space back to world exactly once;
+        // conjugating by cameraViewRotation here applied the camera a second time
+        // and allowed the hand to drift through nearby blocks.
         Matrix4f viewToWorld = new Matrix4f(cameraViewRotation).invert();
-        Matrix4f cameraRelative = viewToWorld.mul(new Matrix4f().scaling(fovScale, fovScale, 1.0f)).mul(cameraViewRotation);
+        Matrix4f cameraRelative = viewToWorld.mul(new Matrix4f().scaling(fovScale, fovScale, 1.0f));
         Matrix4f translation = new Matrix4f().translation(anchor.cameraX(cameraX), anchor.cameraY(cameraY), anchor.cameraZ(cameraZ)).mul(cameraRelative);
         for (Piece piece : current) {
             int texture = slot(textures, piece.texture());

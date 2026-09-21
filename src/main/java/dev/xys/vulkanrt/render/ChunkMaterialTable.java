@@ -1,6 +1,7 @@
 package dev.xys.vulkanrt.render;
 
 import dev.xys.vulkanrt.geometry.SectionGeometryLayout;
+import dev.xys.vulkanrt.geometry.TriangleMesh;
 import net.minecraft.core.SectionPos;
 import org.lwjgl.system.MemoryUtil;
 import java.nio.ByteBuffer;
@@ -47,6 +48,13 @@ public final class ChunkMaterialTable implements AutoCloseable {
     static int attribute(SectionGeometryLayout layout, String name, String format, int bytes) {
         var attr = layout.attributes().stream().filter(a -> a.name().equals(name)).findFirst()
                 .orElseThrow(() -> new IllegalArgumentException("Missing terrain attribute " + name));
+        return validateAttribute(layout, attr, format, bytes);
+    }
+    private static int optionalAttribute(SectionGeometryLayout layout, String name, String format, int bytes) {
+        var attr = layout.attributes().stream().filter(a -> a.name().equals(name)).findFirst().orElse(null);
+        return attr == null ? -1 : validateAttribute(layout, attr, format, bytes);
+    }
+    private static int validateAttribute(SectionGeometryLayout layout, TriangleMesh.Attribute attr, String format, int bytes) {
         if (!attr.format().equals(format) || attr.offset() < 0 || attr.offset() % 4 != 0 || attr.offset() > layout.stride()-bytes)
             throw new IllegalArgumentException("Unsupported terrain attribute " + attr);
         return attr.offset()/4;
@@ -57,6 +65,11 @@ public final class ChunkMaterialTable implements AutoCloseable {
         if (entry.vertexAddress() == 0 || (entry.vertexAddress() & 3) != 0 || layout.stride()%4 != 0)
             throw new IllegalArgumentException("Invalid material vertex address/stride");
         int uv = attribute(layout,"UV0","RG32_FLOAT",8), color = attribute(layout,"Color","RGBA8_UNORM",4);
+        // UV2 is retained in the vanilla interleaved copy. It is optional for
+        // diagnostic/minimal meshes, but real 26.3 terrain carries it at
+        // RG16_SINT and the shader uses it for the existing block/sky light
+        // field (torch light included).
+        int light = optionalAttribute(layout,"UV2","RG16_SINT",4);
         // GLSL uvec2 physical address avoids requiring shaderInt64 or descriptor indexing.
         bytes.putLong(offset, entry.vertexAddress());
         bytes.putInt(offset+8,layout.stride()/4).putInt(offset+12,uv);
@@ -78,6 +91,10 @@ public final class ChunkMaterialTable implements AutoCloseable {
             bytes.putInt(offset+96,p.texture()).putFloat(offset+100,p.cutoff()).putInt(offset+104,p.blockAtlas()?1:0).putInt(offset+108,-1);
             bytes.putInt(offset+112,0).putInt(offset+116,0).putInt(offset+120,0).putInt(offset+124,0);
             bytes.putInt(offset+128,0).putInt(offset+132,0).putInt(offset+136,-1).putInt(offset+140,0);
+        } else {
+            // For terrain rows entityInfo.x is repurposed as a word offset;
+            // entity rows keep their vanilla overlay texture metadata above.
+            bytes.putInt(offset+128, light < 0 ? 0xffffffff : light);
         }
         var overlay=entry.overlay();
         bytes.putLong(offset+48,overlay==null?0:overlay.vertices.address());

@@ -21,7 +21,14 @@ public final class BlockTintDiagnostics {
      * the existing TRANSLUCENT draw, never to invent a second mesh or a CPU material. */
     private static final Set<Long> FLUID_SECTIONS=ConcurrentHashMap.newKeySet();
     private static final Set<Long> NON_FLUID_TRANSLUCENT_SECTIONS=ConcurrentHashMap.newKeySet();
-    public static void beginFrame() { COUNT.set(0); FLUID_SECTIONS.clear(); NON_FLUID_TRANSLUCENT_SECTIONS.clear(); }
+    /**
+     * The fluid compiler runs when a section is rebuilt, not once per frame. Keep
+     * the section classification across frames; clearing it from the frame hook
+     * made unchanged water silently lose its WATER material bit after the first
+     * frame. The registry is reset when the world/compiled geometry changes.
+     */
+    public static void beginFrame() { COUNT.set(0); }
+    public static void resetSections() { FLUID_SECTIONS.clear(); NON_FLUID_TRANSLUCENT_SECTIONS.clear(); }
     /** Conservative water eligibility: a translucent section is reflective only when the
      * vanilla fluid path emitted it and no block-model translucent quad was emitted there. */
     public static boolean hasPureFluid(long section) {
