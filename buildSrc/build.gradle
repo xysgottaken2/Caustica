@@ -1,0 +1,12 @@
+plugins { id 'groovy' }
+repositories { mavenCentral() }
+dependencies {
+    implementation gradleApi()
+    implementation localGroovy()
+    implementation 'org.ow2.asm:asm:9.10.1'
+    testImplementation platform('org.junit:junit-bom:5.14.4')
+    testImplementation 'org.junit.jupiter:junit-jupiter'
+    testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+}
+java { toolchain.languageVersion = JavaLanguageVersion.of(25) }
+test { useJUnitPlatform() }

@@ -1,0 +1,156 @@
+#version 460
+#extension GL_EXT_ray_tracing : require
+#extension GL_EXT_buffer_reference2 : require
+#extension GL_EXT_buffer_reference_uvec2 : require
+struct ShadowPayload { uint enabled; uint blocked; uint discarded; uint translucentSkipped; };
+layout(location=1) rayPayloadInEXT ShadowPayload shadow;
+hitAttributeEXT vec2 barycentric;
+struct Material { uvec4 addressLayout; uvec4 attributes; ivec4 section; uvec4 overlay; uvec4 mapping; uvec4 indices; uvec4 entityMeta; uvec4 entityColors; uvec4 entityInfo; };
+layout(set=0,binding=2,std430) readonly buffer Materials { Material rows[]; } materials;
+layout(set=0,binding=3) uniform sampler2D blockAtlas;
+layout(buffer_reference,std430,buffer_reference_align=4) readonly buffer Vertices { uint words[]; };
+// Literal descriptor indices: no descriptor indexing / non-uniform sampler feature is required.
+layout(set=0,binding=5) uniform sampler2D entityTextures[12];
+layout(set=0,binding=7) uniform sampler2D particleAtlas;
+vec4 readEntitySampler(sampler2D tex,vec2 uv,uint mode) {
+ ivec2 size=textureSize(tex,0);
+ ivec2 p=clamp(ivec2(floor(clamp(uv,0.0,1.0)*vec2(size))),ivec2(0),size-1);
+ return mode==0u?texelFetch(tex,p,0):textureLod(tex,uv,0.0);
+}
+vec4 entitySample(uint slot,vec2 uv,uint mode) {
+ switch(slot) {
+ case 0u: return readEntitySampler(entityTextures[0],uv,mode);
+ case 1u: return readEntitySampler(entityTextures[1],uv,mode);
+ case 2u: return readEntitySampler(entityTextures[2],uv,mode);
+ case 3u: return readEntitySampler(entityTextures[3],uv,mode);
+ case 4u: return readEntitySampler(entityTextures[4],uv,mode);
+ case 5u: return readEntitySampler(entityTextures[5],uv,mode);
+ case 6u: return readEntitySampler(entityTextures[6],uv,mode);
+ case 7u: return readEntitySampler(entityTextures[7],uv,mode);
+ case 8u: return readEntitySampler(entityTextures[8],uv,mode);
+ case 9u: return readEntitySampler(entityTextures[9],uv,mode);
+ case 10u: return readEntitySampler(entityTextures[10],uv,mode);
+ case 11u: return readEntitySampler(entityTextures[11],uv,mode);
+ } return vec4(1,0,1,1);
+}
+ivec2 entitySize(uint slot) {
+ switch(slot) {
+ case 0u: return textureSize(entityTextures[0],0);
+ case 1u: return textureSize(entityTextures[1],0);
+ case 2u: return textureSize(entityTextures[2],0);
+ case 3u: return textureSize(entityTextures[3],0);
+ case 4u: return textureSize(entityTextures[4],0);
+ case 5u: return textureSize(entityTextures[5],0);
+ case 6u: return textureSize(entityTextures[6],0);
+ case 7u: return textureSize(entityTextures[7],0);
+ case 8u: return textureSize(entityTextures[8],0);
+ case 9u: return textureSize(entityTextures[9],0);
+ case 10u: return textureSize(entityTextures[10],0);
+ case 11u: return textureSize(entityTextures[11],0);
+ } return ivec2(1);
+}
+vec4 particleSample(vec2 uv,uint mode) {
+ ivec2 size=textureSize(particleAtlas,0);
+ ivec2 p=clamp(ivec2(floor(clamp(uv,0.0,1.0)*vec2(size))),ivec2(0),size-1);
+ return mode==0u?texelFetch(particleAtlas,p,0):textureLod(particleAtlas,uv,0.0);
+}
+int particleLevels() { return textureQueryLevels(particleAtlas); }
+int entityLevels(uint slot) {
+ switch(slot) {
+ case 0u: return textureQueryLevels(entityTextures[0]);
+ case 1u: return textureQueryLevels(entityTextures[1]);
+ case 2u: return textureQueryLevels(entityTextures[2]);
+ case 3u: return textureQueryLevels(entityTextures[3]);
+ case 4u: return textureQueryLevels(entityTextures[4]);
+ case 5u: return textureQueryLevels(entityTextures[5]);
+ case 6u: return textureQueryLevels(entityTextures[6]);
+ case 7u: return textureQueryLevels(entityTextures[7]);
+ case 8u: return textureQueryLevels(entityTextures[8]);
+ case 9u: return textureQueryLevels(entityTextures[9]);
+ case 10u: return textureQueryLevels(entityTextures[10]);
+ case 11u: return textureQueryLevels(entityTextures[11]);
+ } return 1;
+}
+vec4 entityOverlay(uint slot,ivec2 p) {
+ switch(slot) {
+ case 0u: return texelFetch(entityTextures[0],clamp(p,ivec2(0),textureSize(entityTextures[0],0)-1),0);
+ case 1u: return texelFetch(entityTextures[1],clamp(p,ivec2(0),textureSize(entityTextures[1],0)-1),0);
+ case 2u: return texelFetch(entityTextures[2],clamp(p,ivec2(0),textureSize(entityTextures[2],0)-1),0);
+ case 3u: return texelFetch(entityTextures[3],clamp(p,ivec2(0),textureSize(entityTextures[3],0)-1),0);
+ case 4u: return texelFetch(entityTextures[4],clamp(p,ivec2(0),textureSize(entityTextures[4],0)-1),0);
+ case 5u: return texelFetch(entityTextures[5],clamp(p,ivec2(0),textureSize(entityTextures[5],0)-1),0);
+ case 6u: return texelFetch(entityTextures[6],clamp(p,ivec2(0),textureSize(entityTextures[6],0)-1),0);
+ case 7u: return texelFetch(entityTextures[7],clamp(p,ivec2(0),textureSize(entityTextures[7],0)-1),0);
+ case 8u: return texelFetch(entityTextures[8],clamp(p,ivec2(0),textureSize(entityTextures[8],0)-1),0);
+ case 9u: return texelFetch(entityTextures[9],clamp(p,ivec2(0),textureSize(entityTextures[9],0)-1),0);
+ case 10u: return texelFetch(entityTextures[10],clamp(p,ivec2(0),textureSize(entityTextures[10],0)-1),0);
+ case 11u: return texelFetch(entityTextures[11],clamp(p,ivec2(0),textureSize(entityTextures[11],0)-1),0);
+ } return vec4(0,0,0,1);
+}
+vec2 uvAt(Vertices v,Material m,uint index) {
+    uint i=index*m.addressLayout.z+m.addressLayout.w;
+    return vec2(uintBitsToFloat(v.words[i]),uintBitsToFloat(v.words[i+1u]));
+}
+vec4 colorAt(Vertices v,Material m,uint index) {
+    if((uint(m.section.w)&8u)!=0u) return unpackUnorm4x8(m.entityColors[index&3u]);
+    return unpackUnorm4x8(v.words[index*m.addressLayout.z+m.attributes.x]);
+}
+vec3 positionAt(Vertices v,Material m,uint index) {
+    uint i=index*m.addressLayout.z+m.mapping.w;
+    return vec3(uintBitsToFloat(v.words[i]),uintBitsToFloat(v.words[i+1u]),uintBitsToFloat(v.words[i+2u]));
+}
+// Snapshot of vanilla's real sorted indices. SHORT loads are packed uint words (no shaderInt16).
+uvec3 triangleIndices(Material m,uint primitive) {
+    uint base=(primitive/2u)*4u;
+    if(m.indices.z==0u) return base+((primitive&1u)==0u?uvec3(0,1,2):uvec3(2,3,0));
+    uint first=primitive*3u;
+    if(first+2u>=m.indices.w) return uvec3(0xffffffffu);
+    Vertices indexData=Vertices(m.indices.xy);
+    uvec3 result;
+    for(uint corner=0u;corner<3u;corner++) {
+        uint index=first+corner;
+        result[corner]=m.indices.z==2u ? ((indexData.words[index/2u]>>((index&1u)*16u))&65535u) : indexData.words[index];
+    }
+    return result;
+}
+void main() {
+    if(gl_InstanceID>=materials.rows.length()) { ignoreIntersectionEXT; }
+    Material m=materials.rows[gl_InstanceID];
+    // The shadow ray uses cullMask=1, so the camera-only viewmodel mask=2
+    // never reaches this shader. SOLID rows have no layer bit at all and must
+    // therefore be accepted here; the previous flags test returned them before
+    // closest-hit, disabling terrain shadows in practice.
+    bool viewmodel=(uint(m.section.w)&64u)!=0u;
+    if(viewmodel) { ignoreIntersectionEXT; return; }
+    bool entity=(uint(m.section.w)&8u)!=0u;
+    bool particle=(uint(m.section.w)&16u)!=0u;
+    bool particleBlock=particle && m.entityMeta.z!=0u;
+    bool translucent=(uint(m.section.w)&4u)!=0u;
+    if(translucent) { shadow.translucentSkipped++; ignoreIntersectionEXT; return; }
+    uint primitive=uint(gl_PrimitiveID),base=(primitive/2u)*4u;
+    if(primitive>=m.attributes.z) { ignoreIntersectionEXT; }
+    uvec3 indices=triangleIndices(m,primitive);
+    if(any(greaterThanEqual(indices,uvec3(m.attributes.y)))) { ignoreIntersectionEXT; }
+    Vertices v=Vertices(m.addressLayout.xy);
+    // FaceInfo/BakedQuad winding points outward in object/section space. Do not change SOLID's
+    // existing two-sided instance flags; honor the CUTOUT pipeline's isCull() here instead.
+    if((uint(m.section.w)&2u)!=0u) {
+        vec3 a=positionAt(v,m,indices.x),b=positionAt(v,m,indices.y),c=positionAt(v,m,indices.z);
+        if(dot(cross(b-a,c-a),gl_ObjectRayDirectionEXT)*(entity && m.entityInfo.y!=0u?-1.0:1.0)>=0.0) { ignoreIntersectionEXT; }
+    }
+    if((entity || particle) && uintBitsToFloat(m.entityMeta.y)==0.0) {
+        shadow.blocked=1u; terminateRayEXT; return;
+    }
+    vec3 w=vec3(1.0-barycentric.x-barycentric.y,barycentric);
+    vec2 uv=uvAt(v,m,indices.x)*w.x+uvAt(v,m,indices.y)*w.y+uvAt(v,m,indices.z)*w.z;
+    vec4 color=colorAt(v,m,indices.x)*w.x+colorAt(v,m,indices.y)*w.y+colorAt(v,m,indices.z)*w.z;
+    if(any(isnan(uv)) || any(isinf(uv))) { ignoreIntersectionEXT; }
+    ivec2 size=entity?entitySize(m.entityMeta.x):(particle && !particleBlock?textureSize(particleAtlas,0):textureSize(blockAtlas,0));
+    ivec2 texel=clamp(ivec2(floor(clamp(uv,0.0,1.0)*vec2(size))),ivec2(0),size-1);
+    // Same atlas view, sampling mode and LOD as the closest-hit; not a second sampler/atlas.
+    vec4 sampleColor=entity?entitySample(m.entityMeta.x,uv,m.attributes.w):particle?(particleBlock?(m.attributes.w==1u ? textureLod(blockAtlas,uv,0.0) : texelFetch(blockAtlas,texel,0)):particleSample(uv,m.attributes.w)):(m.attributes.w==1u ? textureLod(blockAtlas,uv,0.0) : texelFetch(blockAtlas,texel,0));
+    float alpha=sampleColor.a*color.a;
+    bool discardAlpha=isnan(alpha) || isinf(alpha) || (entity ? alpha<uintBitsToFloat(m.entityMeta.y) : (particle && !translucent ? alpha<uintBitsToFloat(m.entityMeta.y) : (translucent ? alpha<0.1 : alpha<0.5)));
+    if(discardAlpha) { shadow.discarded++; ignoreIntersectionEXT; return; }
+    shadow.blocked=1u; terminateRayEXT; return;
+}

@@ -1,0 +1,22 @@
+{
+  "schemaVersion": 1,
+  "id": "native_vulkan_rt",
+  "version": "${version}",
+  "name": "Native Vulkan RT \u2014 Experimental",
+  "description": "Experimental shared Vulkan KHR RT scene for Minecraft 26.3: SOLID/CUTOUT/TRANSLUCENT terrain, normal entities and FallingBlockEntity. Entity/translucent GPU runtime validation pending.",
+  "license": "MIT",
+  "environment": "client",
+  "entrypoints": {
+    "client": [
+      "dev.xys.vulkanrt.RayTracingMod"
+    ]
+  },
+  "depends": {
+    "fabricloader": ">=${loader}",
+    "minecraft": "${minecraft}",
+    "java": ">=25"
+  },
+  "mixins": [
+    "native_vulkan_rt.mixins.json"
+  ]
+}
