@@ -70,6 +70,9 @@ jobs:
     name: JVM, ABI and JAR checks (no GPU)
     runs-on: ubuntu-24.04
     timeout-minutes: 30
+    # `contents: write` is only used to publish failure diagnostics to the ci-logs-* ref.
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: Set up Java 25
@@ -90,25 +93,30 @@ jobs:
       # JUnit stays separate so a contract failure is reported as its own step.
       - name: Test the ABI verifier and hook contracts (synthetic classfiles)
         run: ./gradlew --no-daemon -p buildSrc test
-      - name: Compile, test and verify the mod against resolved 26.3 bytecode
-        id: build
+      # Each stage is its own step: the failing step name is the first diagnostic, before any log.
+      - name: Compile the mod against Minecraft 26.3
         run: |
           set -o pipefail
-          ./gradlew --no-daemon check verifyMinecraftAbi verifyModJar 2>&1 | tee build-output.log
-      - name: Summarise compiler diagnostics
-        if: failure()
-        shell: bash
+          : > build-output.log
+          ./gradlew --no-daemon compileJava 2>&1 | tee -a build-output.log
+      - name: Run the renderer unit tests
         run: |
-          {
-            echo "### Gradle diagnostics"
-            echo '```'
-            grep -n -iE "error:|cannot find symbol|does not exist|FAILED|What went wrong|Could not find|Caused by" build-output.log | head -n 200
-            echo '```'
-            echo "### Tail"
-            echo '```'
-            tail -n 120 build-output.log
-            echo '```'
-          } >> "${GITHUB_STEP_SUMMARY}"
+          set -o pipefail
+          ./gradlew --no-daemon test 2>&1 | tee -a build-output.log
+      - name: Verify the 26.3 ABI contract and hook call sites
+        run: |
+          set -o pipefail
+          ./gradlew --no-daemon verifyMinecraftAbi 2>&1 | tee -a build-output.log
+      - name: Package the JAR and verify its contents
+        run: |
+          set -o pipefail
+          ./gradlew --no-daemon jar verifyModJar 2>&1 | tee -a build-output.log
+      - name: Capture failure diagnostics
+        if: failure()
+        uses: ./.github/actions/capture-diagnostics
+        with:
+          log: build-output.log
+          label: jvm
       - name: Upload build log and reports
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -286,6 +294,8 @@ jobs:
     needs:
       - native-windows
       - native-linux
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       # The vendor DLSS runtimes are never committed: they come from NVIDIA's own SDK checkout.
@@ -374,16 +384,12 @@ jobs:
           with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as out:
               out.write(f'jar={jar.as_posix()}\nsha256={digest}\n')
           PYTHON
-      - name: Summarise Gradle diagnostics
+      - name: Capture failure diagnostics
         if: failure()
-        shell: bash
-        run: |
-          {
-            echo "### Gradle diagnostics (bundled JAR)"
-            echo '```'
-            grep -n -iE "error:|cannot find symbol|does not exist|FAILED|What went wrong|Could not find|Caused by" build-output.log | head -n 200
-            echo '```'
-          } >> "${GITHUB_STEP_SUMMARY}"
+        uses: ./.github/actions/capture-diagnostics
+        with:
+          log: build-output.log
+          label: package
       - name: Upload bundled mod JAR (GPU runtime unverified)
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
