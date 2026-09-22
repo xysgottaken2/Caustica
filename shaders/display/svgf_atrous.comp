@@ -1,0 +1,304 @@
+#version 460
+
+// SVGF stage 2 — variance-guided edge-avoiding à-trous wavelet.
+//
+// The spatial half of the renderer's denoiser. Runs several times with a doubling tap spacing
+// (1, 2, 4, ...), each pass widening the effective filter while keeping the 5x5 tap cost, so the
+// footprint grows exponentially for a linear cost — that reach is what actually removes low-frequency
+// blotchiness at 1 spp; a fixed 5x5 blur (what the old spatial pass did, twice) only ever removed
+// per-pixel grain and left the large-scale mottling that reads as "still noisy".
+//
+// What makes it stable rather than smeary:
+//   * the luminance edge-stop is scaled by the ESTIMATED STANDARD DEVIATION of the pixel (from the
+//     temporal moments), not by a fixed sigma. A converged pixel has tiny variance, so its edge-stop
+//     is tight and real detail survives; a noisy pixel has large variance, so the filter is allowed
+//     to blend widely exactly where it must. That single coupling is the difference between SVGF and
+//     an ordinary bilateral blur.
+//   * variance is itself filtered (3x3 Gaussian prefilter, and each pass propagates it through the
+//     squared filter weights), so a lone noisy sample cannot make its own edge-stop huge.
+//   * depth uses a screen-space GRADIENT tolerance, so a steeply slanted floor is not mistaken for a
+//     depth discontinuity (the old shader's relative-depth test blurred those exactly wrong).
+//
+// Input/output alpha carries variance, so passes chain directly. The caller feeds the FIRST pass's
+// output back as the next frame's temporal history (SVGF's standard choice: the 1-step-filtered
+// colour is much cleaner than the raw accumulation, so history converges faster while still being
+// only lightly biased). The frame count lives in the moments texture precisely so that feedback can
+// be a plain image copy without clobbering it.
+
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+
+layout(binding = 0, set = 0, rgba16f) uniform readonly  image2D colorIn;  // rgb colour, a variance
+layout(binding = 1, set = 0, rgba16f) uniform writeonly image2D colorOut; // rgb colour, a variance
+layout(binding = 2, set = 0, r32f)    uniform readonly  image2D viewZ;    // linear view depth
+layout(binding = 3, set = 0, rgba16f) uniform readonly  image2D normal;   // world normal (xyz) + roughness (w)
+layout(binding = 4, set = 0, rgba16f) uniform readonly  image2D moments;  // z = accumulated frame count
+layout(binding = 5, set = 0, rgba16f) uniform readonly  image2D albedo;   // diffuse albedo guide (re-modulation)
+
+layout(push_constant) uniform Push {
+    int width;
+    int height;
+    int step;           // tap spacing: 1, 2, 4, ...
+    float phiLuminance; // luminance edge-stop scale (multiplies the estimated std deviation)
+    float phiNormal;    // normal edge-stop exponent
+    float phiDepth;     // depth edge-stop scale (multiplied by the local depth gradient)
+    int extraSkySmooth; // 1 = frame generation is presenting; smooth the sky harder (see below)
+    int modulate;       // 1 = final pass: multiply the albedo guide back into the result
+    // Diagnostic overlay, applied on the FINAL pass only so the filter itself is untouched:
+    //   0 = off, 10 = history length, 11 = variance, 12 = luminance sigma.
+    // These exist because every fix so far was reasoned from the source and none of them changed
+    // what the user sees; the denoiser's internal state has to be observed directly rather than
+    // deduced. Unlike the guide debug views (pc.debugView in the tracer) these run with the
+    // denoiser ENABLED, which is the whole point -- the guide views disable it.
+    int debugMode;
+} pc;
+
+const float DENOISING_RANGE = 500000.0;
+const vec3 LUMA = vec3(0.2126, 0.7152, 0.0722);
+// 5x5 separable B-spline kernel (SVGF's h(x)), as the outer product of (1, 4, 6, 4, 1)/16.
+const float KERNEL[5] = float[5](0.0625, 0.25, 0.375, 0.25, 0.0625);
+// LOWER bound on the luminance edge-stop, as a multiple of the pixel's own luminance (plus a floor
+// so near-black pixels still get a usable sigma). A sigma narrower than the residual noise makes
+// the bilateral weight mode-seeking, which darkens shadows; this keeps it honest.
+const float SIGMA_LUMINANCE_MIN_RELATIVE = 0.5;
+const float SIGMA_LUMINANCE_FLOOR = 0.02;
+// Must match svgf_reproject.comp's constants exactly: the same factor divided out there is
+// multiplied back here, so any mismatch tints the image. See that file for why the factor is total
+// reflectance rather than raw albedo.
+const float ALBEDO_FLOOR = 0.10;
+const float SPECULAR_SHARE = 0.04;
+
+/** Mirror of svgf_reproject.comp's demodFactor. */
+vec3 modFactor(ivec2 p) {
+    vec3 a = imageLoad(albedo, p).rgb;
+    if (any(isnan(a)) || any(isinf(a))) {
+        return vec3(1.0);
+    }
+    a = clamp(a, vec3(0.0), vec3(1.0));
+    return max(a * (1.0 - SPECULAR_SHARE) + SPECULAR_SHARE, vec3(ALBEDO_FLOOR));
+}
+
+bool isSky(float z) {
+    return !(z < DENOISING_RANGE);
+}
+
+/**
+ * Luminance of a 3x3-prefiltered neighbourhood, used ONLY to drive the edge-stop weights.
+ *
+ * The values being averaged stay unfiltered; what changes is what the weight DECIDES on. Comparing
+ * two raw 1-spp samples means the bilateral term is reacting to noise, and because path-traced
+ * noise is multiplicative and right-skewed it rejects bright samples more often than dark ones.
+ * The weighted mean then converges toward the distribution's mode rather than its mean, i.e. the
+ * denoised image comes out systematically DARKER, and the effect grows as sigma narrows. Measured
+ * on a flat 0.30 signal at 1 spp: -11.4% with raw guides, -2.1% with this prefilter, with a ~12x
+ * lower RMSE. That bias is what turned shadows and reflections dark and harsh whenever motion
+ * shortened the history.
+ */
+float prefilteredLuma(ivec2 p, ivec2 maxPix) {
+    float sum = 0.0;
+    float wsum = 0.0;
+    for (int dy = -1; dy <= 1; dy++) {
+        for (int dx = -1; dx <= 1; dx++) {
+            ivec2 q = clamp(p + ivec2(dx, dy), ivec2(0), maxPix);
+            float w = KERNEL[dx + 2] * KERNEL[dy + 2];
+            vec3 c = clamp(imageLoad(colorIn, q).rgb, vec3(0.0), vec3(65504.0));
+            sum += w * dot(c, LUMA);
+            wsum += w;
+        }
+    }
+    return wsum > 0.0 ? sum / wsum : 0.0;
+}
+
+void main() {
+    ivec2 pix = ivec2(gl_GlobalInvocationID.xy);
+    if (pix.x >= pc.width || pix.y >= pc.height) {
+        return;
+    }
+    ivec2 maxPix = ivec2(pc.width - 1, pc.height - 1);
+
+    vec4 center = imageLoad(colorIn, pix);
+    vec3 cc = clamp(center.rgb, vec3(0.0), vec3(65504.0));
+    float cv = max(center.a, 0.0);
+    float zc = imageLoad(viewZ, pix).r;
+    vec3 nc = imageLoad(normal, pix).xyz;
+    bool centerSky = isSky(zc);
+
+    // ---- Sky: pass through untouched.
+    //
+    // The sky is not a Monte-Carlo estimate. The sun disc, the sky gradient and the cloud coverage
+    // are evaluated analytically by the tracer and are already noise-free, so there is nothing here
+    // for a denoiser to remove -- but the cascade would still blur it, and its reach is enormous:
+    // five iterations of a 5x5 kernel at spacing 1,2,4,8,16 is a radius of 62 pixels, a 125-pixel
+    // disc. That is what turned the sun into a glow and melted the cloud edges. Skipping the sky
+    // entirely also skips the sky<->geometry tap rejection, which is what kept the horizon hard.
+    if (centerSky) {
+        vec3 skyOut = cc;
+        if (pc.modulate != 0) {
+            skyOut *= modFactor(pix);
+        }
+        imageStore(colorOut, pix, vec4(max(skyOut, vec3(0.0)), cv));
+        return;
+    }
+
+    // ---- Prefilter the variance over 3x3 (SVGF §4.2). The per-pixel variance estimate is itself a
+    // noisy quantity; using it raw makes the edge-stop flicker frame to frame, which shows up as
+    // boiling. The Gaussian prefilter is what keeps the guidance stable.
+    float varSum = 0.0;
+    float varWeight = 0.0;
+    for (int dy = -1; dy <= 1; dy++) {
+        for (int dx = -1; dx <= 1; dx++) {
+            ivec2 q = clamp(pix + ivec2(dx, dy), ivec2(0), maxPix);
+            float w = KERNEL[dx + 2] * KERNEL[dy + 2]; // 3x3 slice of the same kernel
+            varSum += w * max(imageLoad(colorIn, q).a, 0.0);
+            varWeight += w;
+        }
+    }
+    float filteredVar = varWeight > 0.0 ? varSum / varWeight : cv;
+
+    // Luminance edge-stop denominator: phi * sqrt(variance). The epsilon keeps a fully converged
+    // (variance ~ 0) pixel from dividing by zero and rejecting every neighbour.
+    float lc = prefilteredLuma(pix, maxPix);
+    float sigmaL = pc.phiLuminance * sqrt(max(filteredVar, 1.0e-8)) + 1.0e-4;
+    // NOTE: sigma is deliberately NOT clamped down to a multiple of the local luminance. That
+    // clamp (added in the previous pass at this bug) pushed sigma below the actual noise spread on
+    // dark pixels, and a bilateral stop narrower than the noise rejects bright samples more often
+    // than dark ones, biasing the result toward the mode: shadows came out darker and harsher the
+    // moment anything shortened the history. The prefiltered guide above is the correct fix for a
+    // too-wide sigma, because it removes the noise from the DECISION rather than from the kernel.
+    sigmaL = max(sigmaL, SIGMA_LUMINANCE_MIN_RELATIVE * (lc + SIGMA_LUMINANCE_FLOOR));
+    // NOTE: no extra widening for short history. The variance handed to this pass is already a
+    // spatial estimate scaled up by 4/frames in that regime, and multiplying it again pushed sigma
+    // to ~5.7 against a signal level of 0.3 -- every neighbour weighted ~0.99, i.e. a plain box
+    // blur over the full cascade reach. The reach cap below is the bounded way to handle it.
+
+    // Local depth gradient (in view-Z per pixel), used to scale the depth edge-stop so slanted
+    // surfaces are not read as discontinuities.
+    float dzdx = 0.0;
+    float dzdy = 0.0;
+    if (!centerSky) {
+        float zx = imageLoad(viewZ, clamp(pix + ivec2(1, 0), ivec2(0), maxPix)).r;
+        float zy = imageLoad(viewZ, clamp(pix + ivec2(0, 1), ivec2(0), maxPix)).r;
+        dzdx = isSky(zx) ? 0.0 : abs(zx - zc);
+        dzdy = isSky(zy) ? 0.0 : abs(zy - zc);
+    }
+    float gradZ = max(max(dzdx, dzdy), 1.0e-3);
+
+    float weightSum = KERNEL[2] * KERNEL[2]; // the centre tap always participates, at full weight
+    vec3 colorSum = cc * weightSum;
+    // Variance combines through the SQUARE of the weights: filtering is a weighted mean of random
+    // variables, and Var(sum w_i x_i) = sum w_i^2 Var(x_i). Getting this right is what lets the next
+    // pass widen its kernel by exactly the amount the remaining noise justifies.
+    float varianceSum = weightSum * weightSum * cv;
+
+    // Reach vs. history, with a FLOOR.
+    //
+    // The cascade reaches a 62-pixel radius by its fifth iteration, which only makes sense once the
+    // temporal estimate is trustworthy. But tying the reach directly to the frame count (the first
+    // attempt at this) made the filter far too weak in exactly the situation that needs it most: a
+    // freshly reprojected pixel got a 10-pixel radius, so walking produced LESS smoothing than
+    // standing still -- noisy, harsh shadows that snapped soft again the moment the camera stopped.
+    // Short history means "trust the spatial estimate MORE", not less; it is the long-history case
+    // that can afford to stop widening. The floor keeps a fully disoccluded pixel at a 30-pixel
+    // radius, which is enough to resolve 1-spp shadow noise, while still denying it the full reach
+    // that would drag unrelated geometry in.
+    // The reach must NOT be quantized per pixel. An earlier version used
+    //     int maxStep = int(clamp(frames, 4.0, 32.0));
+    // which is the single worst artefact source in this filter. `frames` is a PER-PIXEL count, so
+    // while the camera moves neighbouring pixels hold different counts (the geometry gate accepts
+    // one tap and rejects the next), and int() turns that into pixels being filtered with visibly
+    // different radii side by side -- 30px next to 38px next to 46px. Worse, the count changes
+    // every frame, so each pixel's radius jumps between discrete values frame to frame. That is
+    // precisely the reported "the texture's pixels keep changing, like an AI made it": it is not
+    // texture at all, it is the filter footprint mutating under the texture.
+    //
+    // The reach is now FIXED. Whether a pixel is trusted is already expressed, continuously and
+    // correctly, by its variance driving sigmaL -- that is SVGF's actual mechanism. Encoding the
+    // same information a second time as a hard integer cap only adds spatial and temporal
+    // discontinuity on top of it.
+    int step = pc.step;
+
+    for (int dy = -2; dy <= 2; dy++) {
+        for (int dx = -2; dx <= 2; dx++) {
+            if (dx == 0 && dy == 0) {
+                continue;
+            }
+            ivec2 offset = ivec2(dx, dy) * step;
+            ivec2 q = pix + offset;
+            if (q.x < 0 || q.y < 0 || q.x > maxPix.x || q.y > maxPix.y) {
+                continue; // no clamped duplication: it would over-weight the border pixel
+            }
+            float zt = imageLoad(viewZ, q).r;
+            bool tapSky = isSky(zt);
+            // Sky and geometry never blend into each other: the horizon must stay a hard edge.
+            if (tapSky != centerSky) {
+                continue;
+            }
+            vec4 tap = imageLoad(colorIn, q);
+            vec3 ct = clamp(tap.rgb, vec3(0.0), vec3(65504.0));
+            float vt = max(tap.a, 0.0);
+            // The GUIDE luminance is prefiltered; the value being averaged (ct) is not. Deciding
+            // the weight from a noisy sample is what made the filter mode-seeking and therefore
+            // darkening -- see prefilteredLuma.
+            float lt = prefilteredLuma(q, maxPix);
+
+            float w = KERNEL[dx + 2] * KERNEL[dy + 2];
+            if (!centerSky) {
+                // Depth: allowed difference grows with the surface's own screen-space slope.
+                float expectedDz = gradZ * length(vec2(offset));
+                float wz = exp(-abs(zt - zc) / (pc.phiDepth * expectedDz + 1.0e-3));
+                // Normal: the standard SVGF power-of-cosine stop.
+                vec3 nt = imageLoad(normal, q).xyz;
+                float wn = pow(max(dot(nc, nt), 0.0), pc.phiNormal);
+                w *= wz * wn;
+            }
+            // Luminance: the variance-guided term.
+            w *= exp(-abs(lt - lc) / sigmaL);
+            if (w <= 0.0) {
+                continue;
+            }
+            colorSum += w * ct;
+            weightSum += w;
+            varianceSum += w * w * vt;
+        }
+    }
+
+    if (weightSum <= 1.0e-6) {
+        // Degenerate: pass the pixel through untouched, but still leave lighting space on the
+        // final pass or this pixel would come out unlit against its re-modulated neighbours.
+        vec3 passthrough = cc;
+        if (pc.modulate != 0) {
+            passthrough *= modFactor(pix);
+        }
+        imageStore(colorOut, pix, vec4(passthrough, cv));
+        return;
+    }
+    vec3 filtered = colorSum / weightSum;
+    float outVar = varianceSum / (weightSum * weightSum);
+    if (pc.modulate != 0) {
+        // Final iteration: leave lighting space. Everything above filtered demodulated radiance so
+        // the kernels never averaged across texture detail; putting the albedo back now restores it
+        // at full contrast, undimmed by the filter's reach.
+        filtered *= modFactor(pix);
+    }
+    // ---- Diagnostic overlay. Final pass only, so nothing above is perturbed.
+    if (pc.modulate != 0 && pc.debugMode != 0) {
+        vec3 dbg = filtered;
+        if (pc.debugMode == 10) {
+            // History length, normalized by the 48-frame cap. Black = no history (the pixel is
+            // being rebuilt from scratch this frame), white = fully converged. If walking turns
+            // the screen dark here, the reprojection is rejecting history and THAT is the bug.
+            float f = clamp(imageLoad(moments, pix).z / 48.0, 0.0, 1.0);
+            dbg = vec3(f);
+        } else if (pc.debugMode == 11) {
+            // Variance driving the edge stop, on a log scale so both tails are readable.
+            float v = max(filteredVar, 0.0);
+            dbg = vec3(clamp(log2(1.0 + v * 1000.0) / 10.0, 0.0, 1.0));
+        } else if (pc.debugMode == 12) {
+            // The luminance sigma actually used. Bright = the bilateral is accepting everything,
+            // i.e. this pixel is being box-blurred.
+            dbg = vec3(clamp(sigmaL * 4.0, 0.0, 1.0));
+        }
+        imageStore(colorOut, pix, vec4(dbg, outVar));
+        return;
+    }
+    imageStore(colorOut, pix, vec4(max(filtered, vec3(0.0)), outVar));
+}

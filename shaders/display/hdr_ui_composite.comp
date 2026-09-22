@@ -1,0 +1,80 @@
+#version 460
+
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+
+// PQ-encoded ([0,1], ST.2084) HDR world image; the UI is composited into it in place, then blitted to the
+// swapchain. Alpha blending is only correct in linear light, so this pass decodes to linear nits, blends,
+// then re-encodes before storing back.
+layout(binding = 0, set = 0, rgba16f) uniform image2D hdrImage;
+// Vanilla UI overlay (rgba8). Vanilla GUI uses premultiplied TRANSLUCENT blend, so rgb = C*A (sRGB-encoded),
+// a = A. Sampled (the overlay is an MC render target kept in GENERAL layout); same resolution as hdrImage.
+layout(binding = 1, set = 0) uniform sampler2D overlayTex;
+
+layout(push_constant) uniform Push {
+    float paperWhiteNits; // absolute nits SDR paper white maps to
+} pc;
+
+const float PQ_M1 = 0.1593017578125;
+const float PQ_M2 = 78.84375;
+const float PQ_C1 = 0.8359375;
+const float PQ_C2 = 18.8515625;
+const float PQ_C3 = 18.6875;
+
+float pqEncode(float nits) {
+    float y = pow(max(nits, 0.0) / 10000.0, PQ_M1);
+    return pow((PQ_C1 + PQ_C2 * y) / (1.0 + PQ_C3 * y), PQ_M2);
+}
+
+float pqDecode(float e) {
+    float ep = pow(max(e, 0.0), 1.0 / PQ_M2);
+    float num = max(ep - PQ_C1, 0.0);
+    float den = max(PQ_C2 - PQ_C3 * ep, 1e-6);
+    return 10000.0 * pow(num / den, 1.0 / PQ_M1);
+}
+
+vec3 srgbToLinear(vec3 c) {
+    bvec3 hi = greaterThan(c, vec3(0.04045));
+    vec3 lo = c / 12.92;
+    vec3 hiV = pow((c + 0.055) / 1.055, vec3(2.4));
+    return mix(lo, hiV, hi);
+}
+
+// VK_COLOR_SPACE_HDR10_ST2084_EXT mandates BT.2020 primaries as its container gamut — hdrImage's PQ-encoded
+// values are BT.2020 (display.comp converts before encoding), but the sRGB-authored UI is BT.709/sRGB. Both
+// directions are needed here: decode the world to BT.709 to blend against the UI, then convert the blended
+// result back to BT.2020 before re-encoding. (ITU-R BT.2087.)
+const mat3 BT2020_TO_BT709 = mat3(
+     1.6604910, -0.1245505, -0.0181508,
+    -0.5876411,  1.1329008, -0.1005789,
+    -0.0728499, -0.0083503,  1.1187297
+);
+const mat3 BT709_TO_BT2020 = mat3(
+    0.6274039, 0.0690973, 0.0163916,
+    0.3292830, 0.9195406, 0.0880132,
+    0.0433131, 0.0113612, 0.8955953
+);
+
+void main() {
+    ivec2 pix = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 size = imageSize(hdrImage);
+    if (pix.x >= size.x || pix.y >= size.y) {
+        return;
+    }
+
+    vec4 ui = texelFetch(overlayTex, pix, 0); // premultiplied: rgb = C*A (sRGB), a = A
+    float a = ui.a;
+    vec3 worldPq = imageLoad(hdrImage, pix).rgb;
+    if (a > 0.0) {
+        vec3 worldNits2020 = vec3(pqDecode(worldPq.r), pqDecode(worldPq.g), pqDecode(worldPq.b));
+        vec3 worldNits709 = BT2020_TO_BT709 * worldNits2020;
+        // Un-premultiply to the sRGB-authored colour, decode to linear, place at paper white, alpha-over.
+        // UI is authored for SDR perception, so it lands near paper white — NOT pushed through the world's
+        // highlight range.
+        vec3 straight = clamp(ui.rgb / a, 0.0, 1.0);
+        vec3 uiNits709 = srgbToLinear(straight) * pc.paperWhiteNits;
+        vec3 blendedNits709 = worldNits709 * (1.0 - a) + uiNits709 * a;
+        vec3 blendedNits2020 = BT709_TO_BT2020 * blendedNits709;
+        worldPq = vec3(pqEncode(blendedNits2020.r), pqEncode(blendedNits2020.g), pqEncode(blendedNits2020.b));
+    }
+    imageStore(hdrImage, pix, vec4(worldPq, 1.0));
+}

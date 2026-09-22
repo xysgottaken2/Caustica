@@ -1,0 +1,30 @@
+#version 460
+
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+
+// Native frame generation UI pass: composites the vanilla UI overlay (premultiplied sRGB rgba8)
+// over an SDR generated frame IN PLACE. The generated frame carries the HUD-less world (the hand,
+// screen effects and GUI live on the overlay, not in it), so this is what puts the UI back —
+// identical on every generated frame, which is exactly why the hotbar/hand/FPS overlay stop
+// wobbling under frame generation.
+//
+// Blend: premultiplied-over in the sRGB-encoded space, the same way the real frame composites the
+// same overlay (RtUiOverlay's TRANSLUCENT_PREMULTIPLIED_ALPHA blend) — so generated and real
+// frames carry pixel-identical UI.
+layout(binding = 0, rgba8) uniform image2D worldImg;  // generated HUD-less frame, composited in place
+layout(binding = 1, set = 0) uniform sampler2D overlayTex; // premultiplied: rgb = C*A (sRGB), a = A
+
+void main() {
+    ivec2 pix = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 size = imageSize(worldImg);
+    if (pix.x >= size.x || pix.y >= size.y) {
+        return;
+    }
+    vec4 ui = texelFetch(overlayTex, pix, 0);
+    if (ui.a <= 0.0) {
+        return; // no UI here: keep the interpolated world pixel as-is
+    }
+    vec3 world = imageLoad(worldImg, pix).rgb;
+    vec3 outc = ui.rgb + world * (1.0 - ui.a);
+    imageStore(worldImg, pix, vec4(outc, 1.0));
+}

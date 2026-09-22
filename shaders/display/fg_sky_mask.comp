@@ -1,0 +1,58 @@
+#version 460
+
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+
+// The SDR FG outputs are rgba8 images, the HDR outputs rgba16f — the same source compiles to two
+// SPIR-V variants (see the compileShaders task; -DCAUSTICA_FG_MASK_RGBA8 picks this one).
+#ifdef CAUSTICA_FG_MASK_RGBA8
+layout(binding = 0, rgba8)   uniform           image2D generated; // FG output, sky-masked in place
+layout(binding = 1, rgba8)   uniform readonly  image2D present;   // the real presented frame
+#else
+layout(binding = 0, rgba16f) uniform           image2D generated;
+layout(binding = 1, rgba16f) uniform readonly  image2D present;
+#endif
+layout(binding = 2, r32f)    uniform readonly  image2D depth;     // render-res reversed-Z NDC depth
+
+layout(push_constant) uniform Push {
+    int displayWidth;
+    int displayHeight;
+    int renderWidth;
+    int renderHeight;
+} pc;
+
+// Sky detection threshold on reversed-Z NDC depth. True sky sits at near/1e6 ~ 5e-8 (the miss
+// path places the hit at 1e6 blocks along the ray); the farthest real terrain (LOD at a few
+// hundred blocks) stays >= ~1e-4. 1e-5 separates the two with orders of magnitude of margin.
+const float SKY_Z = 1.0e-5;
+
+void main() {
+    ivec2 pix = ivec2(gl_GlobalInvocationID.xy);
+    if (pix.x >= pc.displayWidth || pix.y >= pc.displayHeight) {
+        return;
+    }
+    // Frame generation's block-based interpolation cannot handle sky: sky pixels carry ~0 depth
+    // and textureless gradients, so its motion/disocclusion logic emits black blocks and gray
+    // inpainting smudges there (and only there). Replace the sky region of the generated frame
+    // with the real frame's sky — sky content (sun/moon/clouds) moves slowly enough that holding
+    // it at the real frame's position for the half-frame the generated frame covers is invisible,
+    // and it removes every FG artifact from the sky by construction.
+    //
+    // Map this display pixel onto the render-res depth grid and take the MIN depth (farthest =
+    // most sky-like) over the covered render pixels: that dilates the mask by up to one render
+    // pixel onto geometry at the horizon, which is where FG's disocclusion artifacts concentrate.
+    // The copied pixels come from the real frame, so masked edge pixels stay real content.
+    vec2 scale = vec2(float(pc.renderWidth) / float(pc.displayWidth),
+                      float(pc.renderHeight) / float(pc.displayHeight));
+    ivec2 r0 = ivec2(floor(vec2(pix) * scale));
+    ivec2 r1 = max(ivec2(floor((vec2(pix) + vec2(1.0)) * scale)), r0 + ivec2(1, 1));
+    float zMin = 1.0;
+    for (int y = r0.y; y < r1.y; y++) {
+        for (int x = r0.x; x < r1.x; x++) {
+            ivec2 q = clamp(ivec2(x, y), ivec2(0), ivec2(pc.renderWidth - 1, pc.renderHeight - 1));
+            zMin = min(zMin, imageLoad(depth, q).r);
+        }
+    }
+    if (zMin < SKY_Z) {
+        imageStore(generated, pix, imageLoad(present, pix));
+    }
+}

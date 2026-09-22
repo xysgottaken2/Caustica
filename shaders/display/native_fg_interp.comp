@@ -1,0 +1,117 @@
+#version 460
+
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+
+// Caustica native frame generation: motion-vector interpolation between the previous and current
+// presented frames. The path tracer supplies an EXACT, jitter-free motion vector per render pixel
+// (prev - current, in render pixels), so we back-warp both real frames to the generated frame's
+// time and blend them, using a forward/backward consistency check to catch occlusion/disocclusion
+// and fall back toward the newer frame there instead of smearing stale content.
+//
+// The SDR generated frames are rgba8, the HDR ones rgba16f — compiled to two SPIR-V variants
+// (see the compileShaders task; -DCAUSTICA_NFG_RGBA8 picks this one).
+//
+// NOTE: all colour sampling is inlined against the global images below — glslang does not accept
+// image format qualifiers on function parameters, so image-typed helper parameters are not an
+// option (the earlier draft of this shader died on exactly that).
+#ifdef CAUSTICA_NFG_RGBA8
+layout(binding = 0, rgba8)   uniform writeonly image2D outImg;
+layout(binding = 1, rgba8)   uniform readonly  image2D curFrame;
+layout(binding = 2, rgba8)   uniform readonly  image2D prevFrame;
+#else
+layout(binding = 0, rgba16f) uniform writeonly image2D outImg;
+layout(binding = 1, rgba16f) uniform readonly  image2D curFrame;
+layout(binding = 2, rgba16f) uniform readonly  image2D prevFrame;
+#endif
+layout(binding = 3, rg16f)   uniform readonly  image2D motion; // render-res MVs, prev - current (render px)
+
+layout(push_constant) uniform Push {
+    int displayWidth;
+    int displayHeight;
+    int renderWidth;
+    int renderHeight;
+    float t;   // temporal position of this generated frame: 0 = prev, 1 = cur
+} pc;
+
+const vec3 LUMA = vec3(0.2126, 0.7152, 0.0722);
+
+vec2 fetchMotion(ivec2 p) {
+    p = clamp(p, ivec2(0), ivec2(pc.renderWidth - 1, pc.renderHeight - 1));
+    return imageLoad(motion, p).rg; // render pixels
+}
+
+vec2 bilinearMotion(vec2 uv) {
+    vec2 px = uv * vec2(pc.renderWidth, pc.renderHeight) - 0.5;
+    ivec2 p0 = ivec2(floor(px));
+    vec2 f = clamp(fract(px), vec2(0.0), vec2(1.0));
+    vec2 m00 = fetchMotion(p0);
+    vec2 m10 = fetchMotion(p0 + ivec2(1, 0));
+    vec2 m01 = fetchMotion(p0 + ivec2(0, 1));
+    vec2 m11 = fetchMotion(p0 + ivec2(1, 1));
+    return mix(mix(m00, m10, f.x), mix(m01, m11, f.x), f.y);
+}
+
+void main() {
+    ivec2 pix = ivec2(gl_GlobalInvocationID.xy);
+    if (pix.x >= pc.displayWidth || pix.y >= pc.displayHeight) {
+        return;
+    }
+    vec2 dispSize = vec2(pc.displayWidth, pc.displayHeight);
+    ivec2 maxPix = ivec2(pc.displayWidth - 1, pc.displayHeight - 1);
+    vec2 q = vec2(pix) + 0.5;          // output pixel centre (display px)
+    vec2 uv = q / dispSize;
+
+    // Motion vector (prev - current), sampled at this pixel and scaled render px -> display px.
+    vec2 motionScale = dispSize / vec2(pc.renderWidth, pc.renderHeight);
+    vec2 mv = bilinearMotion(uv) * motionScale;
+
+    // Back-project the generated-frame pixel to the two real frames. Linear motion between them:
+    //   x(t) = p_cur + mv * (1 - t),  so  p_cur = q - mv*(1-t)  and  p_prev = q + mv*t.
+    vec2 p_cur  = q - mv * (1.0 - pc.t);
+    vec2 p_prev = q + mv * pc.t;
+
+    // Manual bilinear sample of the CURRENT frame at p_cur (clamped to the frame).
+    vec2 pxA = p_cur - 0.5;
+    ivec2 p0A = ivec2(floor(pxA));
+    vec2 fA = clamp(fract(pxA), vec2(0.0), vec2(1.0));
+    vec3 cA00 = imageLoad(curFrame, clamp(p0A,                ivec2(0), maxPix)).rgb;
+    vec3 cA10 = imageLoad(curFrame, clamp(p0A + ivec2(1, 0),  ivec2(0), maxPix)).rgb;
+    vec3 cA01 = imageLoad(curFrame, clamp(p0A + ivec2(0, 1),  ivec2(0), maxPix)).rgb;
+    vec3 cA11 = imageLoad(curFrame, clamp(p0A + ivec2(1, 1),  ivec2(0), maxPix)).rgb;
+    vec3 c_cur = mix(mix(cA00, cA10, fA.x), mix(cA01, cA11, fA.x), fA.y);
+
+    // Manual bilinear sample of the PREVIOUS frame at p_prev (clamped to the frame).
+    vec2 pxB = p_prev - 0.5;
+    ivec2 p0B = ivec2(floor(pxB));
+    vec2 fB = clamp(fract(pxB), vec2(0.0), vec2(1.0));
+    vec3 cB00 = imageLoad(prevFrame, clamp(p0B,                ivec2(0), maxPix)).rgb;
+    vec3 cB10 = imageLoad(prevFrame, clamp(p0B + ivec2(1, 0),  ivec2(0), maxPix)).rgb;
+    vec3 cB01 = imageLoad(prevFrame, clamp(p0B + ivec2(0, 1),  ivec2(0), maxPix)).rgb;
+    vec3 cB11 = imageLoad(prevFrame, clamp(p0B + ivec2(1, 1),  ivec2(0), maxPix)).rgb;
+    vec3 c_prev = mix(mix(cB00, cB10, fB.x), mix(cB01, cB11, fB.x), fB.y);
+
+    // Forward/backward consistency: the motion re-sampled at the back-projected current position
+    // should match the motion here. A mismatch means an occlusion/disocclusion boundary, where the
+    // naive blend would smear content that only exists in one of the frames.
+    vec2 mv2 = bilinearMotion(p_cur / dispSize) * motionScale;
+    float fb_err = length(mv2 - mv);
+    float occ_motion = smoothstep(1.5, 4.0, fb_err);
+
+    // Secondary colour signal: at a correctly motion-compensated point the two frames show the same
+    // surface, so their colours nearly match. A large relative difference also marks a boundary.
+    // Thresholds are lenient so residual path-trace noise does not masquerade as occlusion.
+    float lum_cur  = dot(c_cur,  LUMA);
+    float lum_prev = dot(c_prev, LUMA);
+    float col_diff = abs(lum_cur - lum_prev) / max(0.5 * (lum_cur + lum_prev), 1.0e-4);
+    float occ_color = smoothstep(0.15, 0.5, col_diff);
+
+    float occ = max(occ_motion, occ_color);
+
+    // Temporal blend, pushed toward the NEWER (current) frame in unreliable regions: the generated
+    // frame is presented just before the current real one, and falling back to current content avoids
+    // ghosting from stale previous-frame pixels that no longer belong at this location.
+    float w = mix(pc.t, 1.0, occ);
+    vec3 col = mix(c_prev, c_cur, w);
+
+    imageStore(outImg, pix, vec4(col, 1.0));
+}

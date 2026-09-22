@@ -1,29 +1,85 @@
-# Componentes e referências de terceiros
+# Third-Party Notices
 
-## Gradle Wrapper
+Caustica's project-owned code is licensed under `LGPL-3.0-or-later`. This file
+documents third-party components and license boundaries that are not changed by
+Caustica's license.
 
-`gradlew`, `gradlew.bat` e `gradle/wrapper/gradle-wrapper.jar` são o wrapper
-Gradle, Apache License 2.0. Os scripts mantêm seus avisos originais.
-Obtidos do repositório FabricMC/fabric-loom, tag `v1.18.2`, commit
-`6056fe796865f1d88149e93c62ddf2158aa30782`.
+## NVIDIA DLSS / NGX SDK
 
-SHA-256 do JAR wrapper:
-`7a9ce74cff467ca1bf60a4fcd9f05185acceda4d0f382434d393e17864262c5d`.
+Caustica can build and distribute release artifacts that include NVIDIA DLSS/NGX
+SDK runtime components, including DLSS Ray Reconstruction and Frame Generation
+libraries. These NVIDIA components are proprietary third-party software and are
+not licensed under the LGPL.
 
-Origem do Gradle: https://github.com/gradle/gradle
-Licença: [gradle/LICENSE](https://github.com/gradle/gradle/blob/v9.7.0/LICENSE).
-Uma cópia da licença Apache-2.0 está em `gradle/wrapper/LICENSE`.
+The NVIDIA SDK components remain subject to the NVIDIA RTX SDKs license:
 
-## Dependências resolvidas, não incorporadas ao mod
+<https://github.com/NVIDIA/DLSS/blob/main/LICENSE.txt>
 
-Fabric Loom (build), Fabric Loader, ASM (verificação de build), JUnit (testes),
-as bibliotecas e o cliente oficial Minecraft são obtidos por Gradle/Loom.
-O JAR do mod não deve incorporar classes Minecraft, RenderPearl ou LWJGL.
-Consulte as licenças dos respectivos projetos antes de redistribuir dependências.
+The LGPL license grant for Caustica does not grant rights to NVIDIA SDK
+components. Redistribution and use of those components must comply with
+NVIDIA's license terms.
 
-## Referência arquitetural
+This software contains source code provided by NVIDIA Corporation.
 
-Caustica: https://github.com/xysgottaken2/Caustica, commit
-`3c54fc201f93598246db62ebb1947dfb1e274e92`, LGPL-3.0-or-later.
-Nenhum shader, renderer, DLL NGX/DLSS ou código nativo do Caustica foi copiado.
-A licença MIT do código novo não relicencia essas referências.
+Bundled NVIDIA SDK runtime libraries may include files matching:
+
+- `caustica/natives/windows-x64/nvngx_dlssd.dll`
+- `caustica/natives/windows-x64/nvngx_dlssg.dll`
+- `caustica/natives/linux-x64/libnvidia-ngx-dlssd.so*`
+- `caustica/natives/linux-x64/libnvidia-ngx-dlssg.so*`
+
+Caustica's `ngxshim` native library is project-owned glue code and follows
+Caustica's project license unless otherwise noted.
+
+## AMD FidelityFX SDK (FSR 3)
+
+Caustica can build and distribute release artifacts that include AMD FidelityFX
+runtime components for FSR 3 upscaling. The signed `amd_fidelityfx_vk.dll`
+runtime is provided by AMD under the FidelityFX SDK license (MIT) and is not
+part of Caustica's LGPL grant:
+
+<https://github.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK/blob/main/LICENSE.txt>
+
+Redistribution and use of those components must comply with AMD's license
+terms. Bundled AMD runtime libraries may include files matching:
+
+- `caustica/natives/windows-x64/amd_fidelityfx_vk.dll`
+
+Caustica's `fsrshim` native library is project-owned glue code and follows
+Caustica's project license unless otherwise noted.
+
+## Intel XeSS SDK (XeSS Super Resolution)
+
+Caustica can build and distribute release artifacts that include Intel XeSS
+runtime components for XeSS upscaling. The prebuilt `libxess.dll` runtime is
+provided by Intel under the Intel Simplified Software License (Version
+October 2022) and is not part of Caustica's LGPL grant:
+
+<https://github.com/intel/xess/blob/main/LICENSE.txt>
+
+Redistribution and use of those components must comply with Intel's license
+terms. Bundled Intel runtime libraries may include files matching:
+
+- `caustica/natives/windows-x64/libxess.dll`
+
+Caustica's `xessshim` native library is project-owned glue code and follows
+Caustica's project license unless otherwise noted.
+
+## NVIDIA NRD (Real-time Denoisers) + NRI
+
+Caustica can build and distribute release artifacts that include NVIDIA NRD
+(REBLUR denoisers) statically linked into the `nrdshim` native library, along
+with its NRI rendering-interface dependency. Both are third-party components
+with their own licenses (NRD: NVIDIA proprietary source license; NRI: MIT) and
+are not licensed under the LGPL:
+
+<https://github.com/NVIDIA-RTX/NRD/blob/master/LICENSE.txt>
+<https://github.com/NVIDIA-RTX/NRI/blob/main/LICENSE.txt>
+
+Redistribution and use of those components must comply with their license
+terms. Bundled NRD binaries may include files matching:
+
+- `caustica/natives/windows-x64/nrdshim.dll`
+
+Caustica's `nrdshim` glue code is project-owned and follows Caustica's project
+license except for the statically linked NRD/NRI portions noted above.

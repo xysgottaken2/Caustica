@@ -1,0 +1,89 @@
+#version 460
+
+// NRD/REBLUR back-end: decode the denoised per-lobe outputs, RE-MODULATE the material that was
+// divided out before denoising, and sum them into the single radiance image the upscale stage
+// consumes.
+//
+// The demodulation half lives in world.rgen.slang (nrdMaterialFactors in world_core.slang). Both
+// sides derive the factors from the SAME guide textures — gAlbedo.rgb, gSpecAlbedo.rgb and
+// gNormal.w — never from values internal to the tracer, so the round trip is exact by construction:
+// whatever was divided out is multiplied back here, pixel for pixel.
+//
+// Why demodulate at all: NRD is designed for pure radiance ("BRDF should be applied AFTER
+// denoising"). With the material baked in, REBLUR's spatial kernels average across albedo detail
+// and bleed colour across block edges — which reads as smearing and was previously blamed on the
+// temporal filter.
+
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+
+layout(binding = 0, set = 0, rgba16f) uniform readonly  image2D nrdDiff;   // OUT_DIFF (denoised, YCoCg, demodulated)
+layout(binding = 1, set = 0, rgba16f) uniform readonly  image2D nrdSpec;   // OUT_SPEC (denoised, YCoCg, demodulated)
+layout(binding = 2, set = 0, rgba16f) uniform writeonly image2D combined;  // upscale source
+layout(binding = 3, set = 0, rgba16f) uniform readonly  image2D rawColor;  // the raw trace (sky passthrough / fallback)
+layout(binding = 4, set = 0, rgba16f) uniform readonly  image2D albedo;    // gAlbedo: diffuse albedo guide
+layout(binding = 5, set = 0, r32f)    uniform readonly  image2D viewZ;     // linear view depth
+layout(binding = 6, set = 0, rgba16f) uniform readonly  image2D specAlbedo;// gSpecAlbedo: pre-integrated specular albedo
+layout(binding = 7, set = 0, rgba16f) uniform readonly  image2D normal;    // xyz normal, w LINEAR roughness
+
+layout(push_constant) uniform Push {
+    int width;
+    int height;
+    float denoisingRange; // pixels beyond this viewZ are sky: passed through raw
+} pc;
+
+// NRD's NRD_MATERIAL_FACTOR_MIN_SCALE / NRD_ROUGHNESS_FACTOR_MIN_SCALE. These MUST match
+// world_core.slang's constants of the same name; RtShaderConstantMirrorTest pins them together.
+const float NRD_MATERIAL_FACTOR_MIN_SCALE = 0.02;
+const float NRD_ROUGHNESS_FACTOR_MIN_SCALE = 0.1;
+
+// Inverse of NRD's _NRD_LinearToYCoCg, matching _NRD_YCoCgToLinear exactly (including its max(.,0)).
+vec3 yCoCgToLinear(vec3 c) {
+    float t = c.x - c.z;
+    return max(vec3(t + c.y, c.x + c.z, t - c.y), vec3(0.0));
+}
+
+vec3 sanitize(vec3 c) {
+    if (any(isnan(c)) || any(isinf(c))) {
+        return vec3(0.0);
+    }
+    return clamp(c, vec3(0.0), vec3(65504.0));
+}
+
+// Mirror of world_core.slang's nrdMaterialFactors. Any change must be made in BOTH places or the
+// denoised image comes out with the wrong material applied.
+void nrdMaterialFactors(vec3 alb, vec3 specAlb, float roughness,
+                        out vec3 diffFactor, out vec3 specFactor) {
+    vec3 fenv = clamp(specAlb, vec3(0.0), vec3(1.0));
+    diffFactor = mix(vec3(NRD_MATERIAL_FACTOR_MIN_SCALE), vec3(1.0),
+            clamp((1.0 - fenv) * clamp(alb, vec3(0.0), vec3(1.0)), vec3(0.0), vec3(1.0)));
+    specFactor = fenv * mix(vec3(NRD_ROUGHNESS_FACTOR_MIN_SCALE), vec3(1.0), clamp(roughness, 0.0, 1.0));
+    specFactor = mix(vec3(NRD_MATERIAL_FACTOR_MIN_SCALE), vec3(1.0),
+            clamp(specFactor, vec3(0.0), vec3(1.0)));
+}
+
+void main() {
+    ivec2 pix = ivec2(gl_GlobalInvocationID.xy);
+    if (pix.x >= pc.width || pix.y >= pc.height) {
+        return;
+    }
+    // Sky: REBLUR treats anything beyond denoisingRange as INF and its temporal machinery returns
+    // black/garbage there, so the raw trace passes through untouched. The raw image is the correct
+    // source rather than the per-lobe pair: it carries the sky exactly as the tracer wrote it,
+    // including the sun/moon discs and clouds, with no demodulation round trip at all.
+    float z = imageLoad(viewZ, pix).r;
+    if (!(z < pc.denoisingRange)) {
+        imageStore(combined, pix, vec4(sanitize(imageLoad(rawColor, pix).rgb), 1.0));
+        return;
+    }
+
+    vec3 diffRadiance = sanitize(yCoCgToLinear(imageLoad(nrdDiff, pix).rgb));
+    vec3 specRadiance = sanitize(yCoCgToLinear(imageLoad(nrdSpec, pix).rgb));
+
+    vec3 diffFactor;
+    vec3 specFactor;
+    nrdMaterialFactors(imageLoad(albedo, pix).rgb, imageLoad(specAlbedo, pix).rgb,
+            imageLoad(normal, pix).w, diffFactor, specFactor);
+
+    vec3 result = sanitize(diffRadiance * diffFactor + specRadiance * specFactor);
+    imageStore(combined, pix, vec4(result, 1.0));
+}

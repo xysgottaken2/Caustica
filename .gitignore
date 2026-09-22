@@ -1,17 +1,21 @@
 .gradle/
-# Ignore generated output, not source packages named dev/xys/vulkanrt/build.
+.idea/
 /build/
 /buildSrc/build/
+native/*/build/
 run/
-.idea/
-*.iml
-.classpath
-.project
-.settings/
-.vscode/
-# Local-only Minecraft decompilation, downloads and SDKs. Never redistribute.
-research/
+out/
+logs/
+/logs
 third_party/
+bin/
 *.log
-hs_err_pid*
-replay_pid*
+*.class
+
+# Vendor upscaler runtimes are never committed. CI stages them from the official SDKs
+# (NVIDIA/DLSS, AMD FidelityFX, Intel XeSS) into build/native/*/release before bundling.
+src/main/resources/caustica/natives/**/*.dll
+src/main/resources/caustica/natives/**/*.so
+
+# The Gradle wrapper JAR stays tracked.
+!gradle/wrapper/gradle-wrapper.jar
