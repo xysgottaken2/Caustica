@@ -344,17 +344,57 @@ jobs:
           pattern: xessshim-*
           path: build/native/xess_shim/release
           merge-multiple: true
-      - name: Build the bundled JAR
+      # The bundle*Natives tasks are never up to date and `jar` is rebuilt whenever their inputs
+      # change, so the bundled-natives assertion has to run inside the very same Gradle invocation as
+      # the build. A second `./gradlew verifyModJar` without -PngxPlatforms/DLSS_SDK would silently
+      # re-bundle for the runner's own platform and ship a JAR without the requested natives.
+      - name: Build the bundled JAR and verify the requested natives
         env:
           DLSS_SDK: ${{ github.workspace }}/${{ env.DLSS_SDK_PATH }}
         run: |
           set -o pipefail
-          ./gradlew --no-daemon build \
+          ./gradlew --no-daemon build verifyModJar \
             -PngxPlatforms=windows-x64,linux-x64 \
             -PngxVendorConfig=${{ env.NGX_VENDOR_CONFIG }} \
-            -PngxShimConfig=${{ env.NGX_SHIM_CONFIG }} 2>&1 | tee build-output.log
+            -PngxShimConfig=${{ env.NGX_SHIM_CONFIG }} \
+            -PexpectBundledNatives=windows-x64,linux-x64 2>&1 | tee build-output.log
       - name: Verify the bundled JAR carries every requested native
-        run: ./gradlew --no-daemon verifyModJar -PexpectBundledNatives=windows-x64,linux-x64
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PYTHON' 2>&1 | tee -a build-output.log
+          from pathlib import Path
+          from zipfile import ZipFile
+
+          # Mirrors the native set the bundle*Natives tasks package in the step above (the NGX vendor
+          # entries keep their upstream file names, which may carry a version suffix).
+          expected = {
+              "windows-x64": ["ngxshim.dll", "nvngx_dlssd.dll", "nvngx_dlssg.dll", "fsrshim.dll",
+                              "amd_fidelityfx_vk.dll", "nrdshim.dll", "xessshim.dll", "libxess.dll"],
+              "linux-x64": ["libngxshim.so", "libnvidia-ngx-dlssd.so", "libnvidia-ngx-dlssg.so"],
+          }
+          jars = sorted(p for p in Path("build/libs").glob("*.jar")
+                        if not p.name.endswith(("-sources.jar", "-javadoc.jar")))
+          if len(jars) != 1:
+              raise SystemExit(f"error: expected exactly one mod JAR, found {jars}")
+          print(f"checking {jars[0]}")
+          with ZipFile(jars[0]) as archive:
+              names = archive.namelist()
+          problems = []
+          for platform, required in expected.items():
+              prefix = f"caustica/natives/{platform}/"
+              present = sorted({n[len(prefix):] for n in names
+                                if n.startswith(prefix) and not n.endswith("/")})
+              print(f"{platform}: {present}")
+              if not present:
+                  problems.append(f"error: no natives bundled for {platform}")
+              for name in required:
+                  if not any(entry == name or entry.startswith(name) for entry in present):
+                      problems.append(f"error: {platform} is missing {name}")
+          if problems:
+              raise SystemExit("\n".join(problems))
+          print("ok: every requested native is bundled")
+          PYTHON
       - name: Inspect the actual mod JAR
         shell: bash
         run: |
