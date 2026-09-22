@@ -35,12 +35,51 @@ unproven.
 | Loom 1.17-SNAPSHOT + `fabric.loom.disableObfuscation` | Loom **1.18.2** with the `net.fabricmc.fabric-loom` no-remap marker plugin | 26.3 is distributed with official names, so no mappings/remapping step exists |
 | Minecraft 26.2 / Loader 0.19.3 / Fabric API 0.153.0+26.2 | Minecraft **26.3** / Loader **0.19.5** / Fabric API **0.161.0+26.3** | Pinned in `gradle.properties`; `clientOnlyMinecraftJar()` keeps RenderPearl in the resolved client JAR |
 
+## Breakage that only the compiler could find
+
+The static cross-check above resolves types and descriptors, but three 26.2 call sites were still
+wrong against the resolved 26.3 dependency set. All three were found by the first CI compile and are
+fixed:
+
+- `RtContext` explicitly aligned buffers: LWJGL's VMA binding has **no** `vmaCreateBufferWithAlignment`
+  (the alignment overload only exists in the C API). Aligned buffers now request a
+  `VMA_ALLOCATION_CREATE_DEDICATED_MEMORY_BIT` block — dedicated memory is page-aligned, which covers
+  the acceleration-structure scratch and SBT strides — and the returned device address is still
+  verified, so a driver that returns something coarser fails loudly instead of corrupting the SBT.
+- `VulkanDiagnostics`: in LWJGL 3.4.3 the `VkDeviceFault*EXT` record structs are subclass aliases of
+  the `VkDeviceFault*KHR` ones (and `VkDeviceFaultCountsKHR` does not exist), so reading the EXT
+  buffers through their accessors no longer converts. The fault address/vendor records are now
+  declared as `...KHR` while the `VK_EXT_device_fault` entry point and feature struct are kept.
+- `RtNameTagFeature.GlyphCapture`: `VertexConsumer` gained the abstract `setUv3(float, float)` in
+  26.3 (the `UV3` vertex semantic); the glyph capture ignores it like the other capture paths do.
+
+The packaging job also had to learn that `bundle*Natives` is never up to date and rewrites its
+native roots, so `jar` is rebuilt whenever those properties change: `verifyModJar
+-PexpectBundledNatives=...` now runs in the *same* Gradle invocation as the build. Re-invoking
+Gradle without `-PngxPlatforms`/`DLSS_SDK` silently re-bundled for the runner's own platform and
+produced a JAR without the Windows natives.
+
+## CI evidence
+
+Run [`35734998325`](https://github.com/xysgottaken2/test-3/actions/runs/35734998325) (commit
+`58649c7`) and the pull-request run `35735004183` are green on all four jobs:
+
+- *JVM, ABI and JAR checks (no GPU)* — buildSrc contract tests, `compileJava` against 26.3, the
+  renderer unit-test suite (24 classes, 123 tests), `verifyMinecraftAbi`
+  ("155 member signatures verified"), `jar verifyModJar`.
+- *Build Windows shims (NGX, FSR, NRD, XeSS)* and *Build Linux NGX shim* — the shim libraries.
+- *Build bundled mod JAR* — rebuilds the JAR with those artifacts and asserts the requested natives
+  (`windows-x64`: NGX shim + `nvngx_dlssd`/`nvngx_dlssg`, FSR shim + `amd_fidelityfx_vk`, NRD and
+  XeSS shims; `linux-x64`: the NGX shim and vendor `.so`s) are present.
+
+Both runs predate the final documentation change in this file, which does not affect any build input.
+
 ## Preserved from this repository
 
 The previous bootstrap was replaced, but its verification work was kept and retargeted:
 
 - `buildSrc/.../AbiContract.groovy` + `VerifyMinecraftAbi.groovy` and
-  `docs/minecraft-26.3-abi.tsv` (35 critical signatures, checked against resolved classfiles).
+  `docs/minecraft-26.3-abi.tsv` (155 member signatures, checked against resolved classfiles).
 - `TerrainHookContract.groovy` / `EntityHookContract.groovy`: bytecode call-site guards for the
   terrain extraction/upload ordering and the entity quad-upload emission points the hooks depend on,
   with their `buildSrc` unit tests.
@@ -61,7 +100,7 @@ environment, correctness was established by cross-checking the port against the 
 (`mc-dataminning/build-changes`, tag `26.3`, the same decompilation used for the ABI contract):
 
 - Every `com.mojang.*` / `net.minecraft.*` type referenced by the mod resolves in the 26.3 tree.
-- All 24 mixins' target classes, injection points, `@Accessor` fields and `@Invoker` methods exist
+- All 25 mixins' target classes, injection points, `@Accessor` fields and `@Invoker` methods exist
   with matching descriptors in 26.3.
 - Calls made on Minecraft/RenderPearl typed receivers (including one level of supertype traversal)
   resolve against the 26.3 declarations.

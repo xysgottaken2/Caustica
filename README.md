@@ -65,11 +65,18 @@ them the build still succeeds and the corresponding option is simply not offered
 
 ## Verification status and limits
 
-`verifyMinecraftAbi` checks the 35 critical 26.3 signatures in
+`verifyMinecraftAbi` checks the 155 member signatures in
 [`docs/minecraft-26.3-abi.tsv`](docs/minecraft-26.3-abi.tsv) against resolved classfiles, and
 `verifyModJar` checks the packaged metadata, registered mixins, compiled shaders and bundled
 natives. `buildSrc` additionally asserts the bytecode call sites the terrain and entity hooks
 depend on.
+
+CI (`.github/workflows/ci.yml`) runs four jobs: a GPU-less JVM lane (buildSrc contract tests →
+compile against 26.3 → the renderer unit tests → the ABI contract and hook call sites → JAR
+metadata, mixin registration and shaders), the Windows and Linux shim builds, and a packaging job
+that rebuilds the JAR with those shim artifacts and asserts that every requested native platform is
+really inside it. A failing job publishes its trimmed Gradle diagnostics to a `ci-logs-*` ref,
+because Actions logs and artifacts expire long before the code does.
 
 **CI does not run the game.** A green build proves that the sources compile against 26.3, that the
 shaders validate as SPIR-V, and that the documented injection points still exist in the client
