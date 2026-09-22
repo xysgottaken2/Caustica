@@ -272,6 +272,11 @@ final class RtNameTagFeature implements RtOverlayFeature {
         }
 
         @Override
+        public VertexConsumer setUv3(float u, float v) {
+            return this; // name-tag glyphs carry a single UV layer; UV3 is unused here
+        }
+
+        @Override
         public VertexConsumer setUv1(int u, int v) {
             return this; // overlay coords unused (no damage-tint pass here)
         }

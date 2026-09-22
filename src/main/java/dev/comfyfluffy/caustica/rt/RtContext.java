@@ -284,13 +284,18 @@ public final class RtContext {
             if (hostVisible) {
                 aci.flags(hostAccessFlags | Vma.VMA_ALLOCATION_CREATE_MAPPED_BIT);
             }
+            if (addressAlignment != 0L) {
+                // LWJGL's VMA binding does not expose vmaCreateBufferWithAlignment (the alignment
+                // overload lives in the C API only), so ask for a dedicated block instead: its base
+                // address sits on a whole-memory page, which satisfies AS scratch / SBT granularity.
+                // The resulting address is still verified below and creation fails loudly if a driver
+                // hands back something coarser than the request.
+                aci.flags(aci.flags() | Vma.VMA_ALLOCATION_CREATE_DEDICATED_MEMORY_BIT);
+            }
             LongBuffer pBuf = stack.mallocLong(1);
             PointerBuffer pAlloc = stack.mallocPointer(1);
             VmaAllocationInfo info = VmaAllocationInfo.calloc(stack);
-            int createResult = addressAlignment == 0L
-                    ? Vma.vmaCreateBuffer(vma, bci, aci, pBuf, pAlloc, info)
-                    : Vma.vmaCreateBufferWithAlignment(vma, bci, aci, addressAlignment, pBuf, pAlloc, info);
-            check(createResult, addressAlignment == 0L ? "vmaCreateBuffer" : "vmaCreateBufferWithAlignment");
+            check(Vma.vmaCreateBuffer(vma, bci, aci, pBuf, pAlloc, info), "vmaCreateBuffer");
             handle = pBuf.get(0);
             allocation = pAlloc.get(0);
             RtDebugLabels.nameBuffer(this, handle, label);

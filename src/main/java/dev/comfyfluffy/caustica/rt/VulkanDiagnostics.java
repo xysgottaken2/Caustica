@@ -22,10 +22,10 @@ import org.lwjgl.vulkan.VK12;
 import org.lwjgl.vulkan.VkDevice;
 import org.lwjgl.vulkan.VkDeviceCreateInfo;
 import org.lwjgl.vulkan.VkDeviceDiagnosticsConfigCreateInfoNV;
-import org.lwjgl.vulkan.VkDeviceFaultAddressInfoEXT;
+import org.lwjgl.vulkan.VkDeviceFaultAddressInfoKHR;
 import org.lwjgl.vulkan.VkDeviceFaultCountsEXT;
 import org.lwjgl.vulkan.VkDeviceFaultInfoEXT;
-import org.lwjgl.vulkan.VkDeviceFaultVendorInfoEXT;
+import org.lwjgl.vulkan.VkDeviceFaultVendorInfoKHR;
 import org.lwjgl.vulkan.VkInstanceCreateInfo;
 import org.lwjgl.vulkan.VkLayerProperties;
 import org.lwjgl.vulkan.VkPhysicalDeviceFaultFeaturesEXT;
@@ -311,10 +311,10 @@ public final class VulkanDiagnostics {
                 CausticaMod.LOGGER.warn("Capping Vulkan fault records to {} (driver reported address={}, vendor={})",
                         MAX_FAULT_RECORDS, counts.addressInfoCount(), counts.vendorInfoCount());
             }
-            VkDeviceFaultAddressInfoEXT.Buffer addresses = addressCount == 0
-                    ? null : VkDeviceFaultAddressInfoEXT.calloc(addressCount, stack);
-            VkDeviceFaultVendorInfoEXT.Buffer vendors = vendorCount == 0
-                    ? null : VkDeviceFaultVendorInfoEXT.calloc(vendorCount, stack);
+            VkDeviceFaultAddressInfoKHR.Buffer addresses = addressCount == 0
+                    ? null : VkDeviceFaultAddressInfoKHR.calloc(addressCount, stack);
+            VkDeviceFaultVendorInfoKHR.Buffer vendors = vendorCount == 0
+                    ? null : VkDeviceFaultVendorInfoKHR.calloc(vendorCount, stack);
             long requestedVendorBytes = deviceFaultVendorBinaryRequested
                     && counts.vendorBinarySize() <= MAX_VENDOR_BINARY_BYTES ? counts.vendorBinarySize() : 0L;
             if (counts.vendorBinarySize() > MAX_VENDOR_BINARY_BYTES) {
@@ -342,7 +342,7 @@ public final class VulkanDiagnostics {
                     info.descriptionString(), counts.addressInfoCount(), counts.vendorInfoCount(), counts.vendorBinarySize());
             if (addresses != null) {
                 for (int i = 0; i < Math.min(addressCount, counts.addressInfoCount()); i++) {
-                    VkDeviceFaultAddressInfoEXT address = addresses.get(i);
+                    VkDeviceFaultAddressInfoKHR address = addresses.get(i);
                     String resource = resolveBuffer(address.reportedAddress());
                     CausticaMod.LOGGER.error("Vulkan fault address[{}]: type={}, address=0x{}, precision=0x{}, resource={}",
                             i, addressType(address.addressType()), Long.toUnsignedString(address.reportedAddress(), 16),
@@ -351,7 +351,7 @@ public final class VulkanDiagnostics {
             }
             if (vendors != null) {
                 for (int i = 0; i < Math.min(vendorCount, counts.vendorInfoCount()); i++) {
-                    VkDeviceFaultVendorInfoEXT vendor = vendors.get(i);
+                    VkDeviceFaultVendorInfoKHR vendor = vendors.get(i);
                     CausticaMod.LOGGER.error("Vulkan vendor fault[{}]: description='{}', code=0x{}, data=0x{}",
                             i, vendor.descriptionString(), Long.toUnsignedString(vendor.vendorFaultCode(), 16),
                             Long.toUnsignedString(vendor.vendorFaultData(), 16));
