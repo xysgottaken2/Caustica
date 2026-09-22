@@ -1,6 +1,6 @@
 # Caustica
 
-Caustica is an experimental ray-traced renderer for Minecraft 26.2's Vulkan backend.
+Caustica is an experimental ray-traced renderer for Minecraft 26.2 and 26.3's Vulkan backend.
 It replaces the vanilla world view with hardware ray tracing and NVIDIA DLSS
 features while keeping Minecraft's familiar UI and gameplay intact.
 
@@ -36,7 +36,7 @@ changes while the renderer is being built.
 
 ## Installation
 
-1. Install Fabric Loader for Minecraft `26.2`.
+1. Install Fabric Loader for Minecraft `26.2` or `26.3`.
 2. Install Fabric API.
 3. Put the Caustica jar in your Minecraft `mods` folder.
 4. Launch the game with the Vulkan graphics backend.
