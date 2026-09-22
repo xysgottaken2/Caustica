@@ -1,0 +1,258 @@
+#version 460
+
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+
+layout(binding = 0, set = 0, rgba8) uniform writeonly image2D outputImage; // LDR world target image
+layout(binding = 1, set = 0, rgba16f) uniform readonly image2D rtImage; // HDR RT radiance
+layout(binding = 2, set = 0, r32f) uniform readonly image2D exposureImage; // 1x1 linear exposure scale
+layout(binding = 3, set = 0, rgba16f) uniform writeonly image2D hdrImage; // PQ-encoded ([0,1], ST.2084) HDR display
+
+// HDR display parameters. hdrEnabled gates the parallel PQ write; the SDR tonemap path always runs because
+// vanilla main-target presentation still consumes LDR.
+layout(push_constant) uniform Push {
+    int hdrEnabled;        // 0 = SDR only, 1 = also write the PQ HDR image
+    float paperWhiteNits;  // absolute nits SDR paper white maps to
+    float headroom;        // highlight headroom above paper white (peakNits / paperWhiteNits, >= 1)
+    int tonemapOperator;   // 0 AgX, 1 PBR Neutral, 2 ACES, 3 Filmic, 4 Linear, 5 Psychov
+    float tonemapExposureEv;
+    float tonemapGamma;
+    float tonemapSaturation;
+    float tonemapContrast;
+} pc;
+
+// Tonemap seam: map HDR RT radiance to displayable LDR before copying back to the main target.
+// The path tracer emits true HDR radiance, so exposure is applied from the compositor-owned 1x1 image
+// before the AgX view transform. DLSS-RR still consumes HDR pre-tonemap.
+
+const mat3 AGX_INSET = mat3(
+    0.842479062253094, 0.042328242261012, 0.042375654905705,
+    0.078433599999999, 0.878468636469772, 0.078433600000000,
+    0.079223745147764, 0.079166127460543, 0.879142973793104
+);
+
+const mat3 AGX_OUTSET = mat3(
+    1.196879005120170, -0.052896851757456, -0.052971635514443,
+    -0.098020881140137, 1.151903129904170, -0.098043450117124,
+    -0.099029744079720, -0.098961176844843, 1.151073672641160
+);
+
+const float AGX_MIN_EV = -12.47393;
+const float AGX_MAX_EV = 4.026069;
+
+vec3 agxDefaultContrast(vec3 x) {
+    vec3 x2 = x * x;
+    vec3 x4 = x2 * x2;
+    return 15.5 * x4 * x2
+        - 40.14 * x4 * x
+        + 31.96 * x4
+        - 6.868 * x2 * x
+        + 0.4298 * x2
+        + 0.1191 * x
+        - 0.00232;
+}
+
+vec3 agx(vec3 color) {
+    color = AGX_INSET * max(color, vec3(0.0));
+    color = clamp(log2(max(color, vec3(1.0e-10))), AGX_MIN_EV, AGX_MAX_EV);
+    color = (color - AGX_MIN_EV) / (AGX_MAX_EV - AGX_MIN_EV);
+    color = agxDefaultContrast(color);
+    color = AGX_OUTSET * color;
+    return clamp(color, 0.0, 1.0);
+}
+
+// Khronos glTF Sample Viewer / model-viewer "PBR Neutral" tonemapper. It preserves midtones and
+// only compresses near display white, with a small hue-preserving desaturation for clipped highlights.
+vec3 pbrNeutral(vec3 color) {
+    color = max(color, vec3(0.0));
+    const float startCompression = 0.76;
+    const float desaturation = 0.15;
+    float x = min(color.r, min(color.g, color.b));
+    float offset = x < 0.08 ? x - 6.25 * x * x : 0.04;
+    color -= offset;
+    float peak = max(color.r, max(color.g, color.b));
+    if (peak < startCompression) {
+        return clamp(color, 0.0, 1.0);
+    }
+    float d = 1.0 - startCompression;
+    float newPeak = 1.0 - d * d / (peak + d - startCompression);
+    color *= newPeak / peak;
+    float g = 1.0 - 1.0 / (desaturation * (peak - newPeak) + 1.0);
+    return clamp(mix(color, vec3(newPeak), g), 0.0, 1.0);
+}
+
+// Common ACES fitted curve (Narkowicz 2015), cheap and familiar for games.
+vec3 acesFitted(vec3 color) {
+    color = max(color, vec3(0.0));
+    return clamp((color * (2.51 * color + 0.03)) /
+            (color * (2.43 * color + 0.59) + 0.14), 0.0, 1.0);
+}
+
+// Uncharted-style filmic shoulder with an implicit gamma-ish toe, retained as a high-contrast option.
+vec3 filmic(vec3 color) {
+    vec3 x = max(vec3(0.0), color - 0.004);
+    return clamp((x * (6.2 * x + 0.5)) / (x * (6.2 * x + 1.7) + 0.06), 0.0, 1.0);
+}
+
+// Psychov (RenoDX PsychoV-17 inspired) – psychovisual tonemapper with hue-preserving luminance
+// compression, Naka-Rushton style shoulder and soft highlight desaturation.
+// Intended as soft-cinema look: preserves midtone contrast, rolls highlights smoothly to white
+// and keeps saturated colors from clipping harshly.
+//
+// Lightweight approximation of the full RenoDX pipeline (which uses CIE 170-2 LMS, MB chromaticity,
+// adaptive hue, etc.). For Caustica we keep it cheap but perceptually motivated.
+vec3 psychov(vec3 color) {
+    color = max(color, vec3(0.0));
+    // --- Luminance (BT.709) ---
+    float luma = dot(color, vec3(0.2126, 0.7152, 0.0722));
+    // Naka-Rushton / Michaelis-Menten like compression per channel + luminance
+    // Keep hue by mapping luminance first, then scaling color
+    float mappedLuma = (luma * (0.60 + luma * 0.45)) / (luma * (0.60 + luma * 0.35) + 1.05);
+    mappedLuma = max(mappedLuma, 0.0);
+    float scale = luma > 1e-6 ? mappedLuma / luma : 0.0;
+    vec3 c = color * scale;
+
+    // Per-channel S-curve (Uchimura-style piecewise: toe + linear + shoulder)
+    // Constants tuned for soft cinema: P=1, a=0.85, m=0.22, l=0.35, c=0.75
+    const float P = 1.0;
+    const float a = 0.85;
+    const float m = 0.22;
+    const float l = 0.35;
+    const float cc = 0.75;
+    const float b = 0.0;
+    float l0 = ((P - m) * l) / a;
+    float L0 = m - m / a;
+    float L1 = m + (1.0 - m) / a;
+    float S0 = m + l0;
+    float S1 = m + a * l0;
+    float C2 = (a * P) / (P - S1);
+    float CP = -C2 / P;
+
+    vec3 w0 = vec3(1.0 - smoothstep(0.0, m, c));
+    vec3 w2 = vec3(step(m + l0, c));
+    vec3 w1 = vec3(1.0 - w0 - w2);
+
+    vec3 T = vec3(m * pow(c / max(vec3(m), vec3(1e-6)), vec3(cc)) + b);
+    vec3 S = vec3(P - (P - S1) * exp(CP * (c - S0)));
+    vec3 L = vec3(m + a * (c - m));
+
+    vec3 mapped = T * w0 + L * w1 + S * w2;
+
+    // Soft highlight desaturation (like PBR Neutral but milder) to keep psychovisual purity
+    float peak = max(mapped.r, max(mapped.g, mapped.b));
+    if (peak > 0.85) {
+        float d = (peak - 0.85) / (1.15 - 0.85);
+        d = clamp(d, 0.0, 1.0);
+        float desat = 0.18 * d;
+        float g = 1.0 - 1.0 / (desat * (peak - 0.85) + 1.0);
+        mapped = mix(mapped, vec3(peak), g * 0.6);
+    }
+
+    return clamp(mapped, 0.0, 1.0);
+}
+
+vec3 applyLook(vec3 color) {
+    float contrast = max(pc.tonemapContrast, 0.0);
+    float saturation = max(pc.tonemapSaturation, 0.0);
+    float gamma = max(pc.tonemapGamma, 1.0e-4);
+
+    color = clamp((color - 0.5) * contrast + 0.5, 0.0, 1.0);
+    float luma = dot(color, vec3(0.2126, 0.7152, 0.0722));
+    color = clamp(mix(vec3(luma), color, saturation), 0.0, 1.0);
+    return pow(color, vec3(1.0 / gamma));
+}
+
+vec3 tonemap(vec3 hdr, float exposure) {
+    // Base exposed color
+    vec3 c = hdr * exposure * exp2(pc.tonemapExposureEv);
+
+    // ---- Exposure compensation / gain calibration ----
+    // AgX is the reference (gain 1.0). Other operators are historically much darker,
+    // forcing players to raise Gamma. Apply a per-operator base gain before the curve
+    // to calibrate brightness while preserving the operator's shape.
+    float baseGain = 1.0;
+    if (pc.tonemapOperator == 1) {
+        baseGain = 1.45; // PBR Neutral needs lift
+    } else if (pc.tonemapOperator == 2) {
+        baseGain = 1.55; // ACES
+    } else if (pc.tonemapOperator == 3) {
+        baseGain = 1.50; // Filmic
+    } else if (pc.tonemapOperator == 4) {
+        baseGain = 1.0; // Linear
+    } else if (pc.tonemapOperator == 5) {
+        baseGain = 1.25; // Psychov – balanced soft-cinema
+    } else {
+        baseGain = 1.0; // AgX
+    }
+    c *= baseGain;
+
+    vec3 mapped;
+    if (pc.tonemapOperator == 1) {
+        mapped = pbrNeutral(c);
+    } else if (pc.tonemapOperator == 2) {
+        mapped = acesFitted(c);
+    } else if (pc.tonemapOperator == 3) {
+        mapped = filmic(c);
+    } else if (pc.tonemapOperator == 4) {
+        mapped = clamp(max(c, vec3(0.0)), 0.0, 1.0);
+    } else if (pc.tonemapOperator == 5) {
+        mapped = psychov(c);
+    } else {
+        mapped = agx(c);
+    }
+    return applyLook(mapped);
+}
+
+const float PQ_M1 = 0.1593017578125;
+const float PQ_M2 = 78.84375;
+const float PQ_C1 = 0.8359375;
+const float PQ_C2 = 18.8515625;
+const float PQ_C3 = 18.6875;
+
+float pqEncode(float nits) {
+    float y = pow(max(nits, 0.0) / 10000.0, PQ_M1);
+    return pow((PQ_C1 + PQ_C2 * y) / (1.0 + PQ_C3 * y), PQ_M2);
+}
+
+// VK_COLOR_SPACE_HDR10_ST2084_EXT mandates BT.2020 primaries as its container gamut (not just the ST.2084
+// transfer function) — but every color we compute (textures, tonemap) is authored/blended in BT.709/sRGB
+// primaries. Feeding BT.709 numbers straight into a BT.2020-tagged buffer makes the display read them as
+// (more saturated) BT.2020 coordinates, oversaturating everything. This matrix converts linear-light
+// BT.709 -> BT.2020 right before the PQ encode, which is the container's actual gamut. (ITU-R BT.2087.)
+const mat3 BT709_TO_BT2020 = mat3(
+    0.6274039, 0.0690973, 0.0163916,
+    0.3292830, 0.9195406, 0.0880132,
+    0.0433131, 0.0113612, 0.8955953
+);
+
+// HDR display mapping: map exposed scene-linear radiance to absolute nits, then PQ-encode (ST.2084) for
+// direct presentation to a PQ/HDR10 swapchain. SDR-range values (<= 1.0 after exposure) stay identity so
+// paper white lands exactly at paperWhiteNits. Highlights above 1.0 roll off smoothly and asymptote to
+// `headroom`, i.e. the brightest pixels approach peakNits. No SDR clamp here — that is the point.
+vec3 tonemapHdr(vec3 hdr, float exposure) {
+    vec3 c = max(hdr * exposure * exp2(pc.tonemapExposureEv), vec3(0.0));
+    vec3 lo = min(c, vec3(1.0));
+    vec3 hi = max(c - vec3(1.0), vec3(0.0));
+    float k = max(pc.headroom - 1.0, 0.0);
+    vec3 rolled = (k > 0.0) ? (k * hi) / (k + hi) : vec3(0.0); // -> k as hi -> inf
+    vec3 paperReferred = lo + rolled;                          // 1.0 == paper white, max -> headroom
+    vec3 nits709 = paperReferred * pc.paperWhiteNits;
+    vec3 nits2020 = BT709_TO_BT2020 * nits709;
+    return vec3(pqEncode(nits2020.r), pqEncode(nits2020.g), pqEncode(nits2020.b));
+}
+
+void main() {
+    ivec2 pix = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 size = imageSize(outputImage);
+    if (pix.x >= size.x || pix.y >= size.y) {
+        return;
+    }
+
+    vec4 rt = imageLoad(rtImage, pix);
+    float exposure = max(imageLoad(exposureImage, ivec2(0)).r, 0.0);
+    vec3 ldr = tonemap(rt.rgb, exposure);
+    imageStore(outputImage, pix, vec4(ldr, 1.0));
+
+    if (pc.hdrEnabled != 0) {
+        imageStore(hdrImage, pix, vec4(tonemapHdr(rt.rgb, exposure), 1.0));
+    }
+}

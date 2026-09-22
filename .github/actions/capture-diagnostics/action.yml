@@ -1,0 +1,65 @@
+name: Capture failure diagnostics
+description: >-
+  Gradle output has to survive Actions log/artifact retention and log-api limits, so the
+  trimmed diagnostics are published as an annotation and, when a token with write access is
+  available, as a commit on the dedicated `ci-logs-*` ref that reviewers can fetch with git.
+
+inputs:
+  log:
+    description: Path to the captured build log
+    required: false
+    default: build-output.log
+  label:
+    description: Short job label used for the diagnostics ref and annotation title
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Extract diagnostics
+      if: always()
+      shell: bash
+      run: |
+        set -uo pipefail
+        pattern='error:|cannot find symbol|does not exist|FAILED|What went wrong|Could not find|Caused by|Execution failed|Exception'
+        mkdir -p "${RUNNER_TEMP}/diagnostics"
+        grep -n -iE "${pattern}" "${{ inputs.log }}" 2>/dev/null | head -n 400 \
+          > "${RUNNER_TEMP}/diagnostics/errors.txt" || true
+        tail -n 300 "${{ inputs.log }}" 2>/dev/null > "${RUNNER_TEMP}/diagnostics/tail.txt" || true
+        head -n 300 "${{ inputs.log }}" 2>/dev/null > "${RUNNER_TEMP}/diagnostics/head.txt" || true
+        {
+          echo "run=${{ github.run_id }} job=${{ github.job }} ref=${{ github.ref_name }} sha=${{ github.sha }}"
+          echo "workflow=${{ github.workflow }} event=${{ github.event_name }}"
+          echo "--- errors ---"
+          cat "${RUNNER_TEMP}/diagnostics/errors.txt"
+        } > "${RUNNER_TEMP}/diagnostics/meta.txt" || true
+        echo "diagnostics captured: $(wc -l < "${RUNNER_TEMP}/diagnostics/errors.txt" 2>/dev/null || echo 0) matching lines"
+
+    - name: Annotate the build failure
+      if: always()
+      shell: bash
+      run: |
+        set -uo pipefail
+        count=0
+        while IFS= read -r line && [ "${count}" -lt 10 ]; do
+          cleaned=$(printf '%s' "${line}" | sed -e 's/\r//g' -e 's/%/%25/g' | head -c 480)
+          echo "::error title=Gradle (${{ inputs.label }})::${cleaned}"
+          count=$((count + 1))
+        done < "${RUNNER_TEMP}/diagnostics/errors.txt"
+
+    - name: Publish diagnostics to the ci-logs ref
+      if: always()
+      continue-on-error: true
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        set -uo pipefail
+        cd "${RUNNER_TEMP}/diagnostics"
+        git init -q -b main .
+        git config user.name "arena-ci"
+        git config user.email "arena-ci@users.noreply.github.com"
+        git add -A
+        git commit -q -m "ci diagnostics: run ${{ github.run_id }} (${{ inputs.label }})"
+        git push -f "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" \
+          "HEAD:refs/heads/ci-logs-${{ inputs.label }}"

@@ -1,162 +1,636 @@
-import dev.xys.vulkanrt.build.VerifyMinecraftAbi
+import dev.comfyfluffy.caustica.build.GenerateShaderRecords
+import dev.comfyfluffy.caustica.build.VerifyMinecraftAbi
 import groovy.json.JsonSlurper
 import java.util.zip.ZipFile
 
 plugins {
-    // The no-remap plugin: 26.3 is distributed with official names.
-    id 'net.fabricmc.fabric-loom' version "${loom_version}"
+	// No-remap plugin: Minecraft 26.3 is distributed with official (readable) names.
+	id "net.fabricmc.fabric-loom" version "${loom_version}"
+	id "maven-publish"
 }
 
 version = project.mod_version
 group = project.maven_group
-base { archivesName = 'native-vulkan-rt' }
 
-repositories { mavenCentral() }
-
-loom {
-    // Client-only mod; keep the complete client JAR, including RenderPearl.
-    clientOnlyMinecraftJar()
-    runs {
-        client {
-            client()
-            runDir 'run'
-            vmArg '--enable-native-access=ALL-UNNAMED'
-            vmArg "-Dnativevulkanrt.enabled=${providers.gradleProperty('rt').getOrElse('false')}"
-            vmArg "-Dnativevulkanrt.scene=${providers.gradleProperty('rtScene').getOrElse('triangle')}"
-            if (providers.gradleProperty('rtValidation').getOrElse('false').toBoolean()) {
-                programArgs '--vulkanValidation', '--renderDebugLabels'
-            }
-            programArgs '--graphicsBackend', 'VULKAN'
-        }
-    }
+base {
+	archivesName = project.archives_base_name
 }
 
-sourceSets { shaderCompiler }
-def osName = System.getProperty('os.name').toLowerCase(Locale.ROOT)
-def cpuArch = System.getProperty('os.arch').toLowerCase(Locale.ROOT)
-def arm64 = cpuArch in ['aarch64', 'arm64']
-def lwjglNatives = osName.contains('win') ? (arm64 ? 'natives-windows-arm64' : 'natives-windows') :
-        osName.contains('mac') ? (arm64 ? 'natives-macos-arm64' : 'natives-macos') :
-        (arm64 ? 'natives-linux-arm64' : 'natives-linux')
+repositories {
+	maven {
+		name = "Fabric"
+		url = "https://maven.fabricmc.net/"
+	}
+	mavenCentral()
+}
+
+loom {
+	// Client-only mod; keep the complete client JAR, including RenderPearl.
+	clientOnlyMinecraftJar()
+	runs {
+		client {
+			client()
+			setConfigName("Fabric Client")
+			ideConfigGenerated = true
+			runDir "run"
+			// java.lang.foreign restricted methods (FFM bindings to the vendor upscaler DLLs).
+			vmArg "--enable-native-access=ALL-UNNAMED"
+			// NVIDIA NGX (DLSS) allocates ~1MB on the stack during init, which overflows the
+			// default 1MB thread stack.
+			vmArg "-Xss16m"
+			programArgs "--graphicsBackend", "VULKAN"
+			// NixOS fix: Gradle forks drop the dev-shell's LD_LIBRARY_PATH; the driver path is
+			// needed so NGX can dlopen libnvidia-ngx.so.1.
+			if (file("/run/opengl-driver/lib").exists()) {
+				def inherited = System.getenv("LD_LIBRARY_PATH")
+				environmentVariable "LD_LIBRARY_PATH",
+						inherited ? "/run/opengl-driver/lib:${inherited}" : "/run/opengl-driver/lib"
+			}
+		}
+	}
+}
 
 dependencies {
-    shaderCompilerImplementation 'org.lwjgl:lwjgl:3.4.3'
-    shaderCompilerImplementation 'org.lwjgl:lwjgl-shaderc:3.4.3'
-    shaderCompilerRuntimeOnly "org.lwjgl:lwjgl:3.4.3:${lwjglNatives}"
-    shaderCompilerRuntimeOnly "org.lwjgl:lwjgl-shaderc:3.4.3:${lwjglNatives}"
+	minecraft "com.mojang:minecraft:${project.minecraft_version}"
+	implementation "net.fabricmc:fabric-loader:${project.loader_version}"
+	implementation "net.fabricmc.fabric-api:fabric-api:${project.fabric_api_version}"
+	testImplementation platform("org.junit:junit-bom:5.14.4")
+	testImplementation "org.junit.jupiter:junit-jupiter"
+	testRuntimeOnly "org.junit.platform:junit-platform-launcher"
 
-    minecraft "com.mojang:minecraft:${project.minecraft_version}"
-    implementation "net.fabricmc:fabric-loader:${project.loader_version}"
-    // LWJGL/Vulkan/SDL/ShaderC/VMA are provided by Minecraft. Do not bundle a second copy.
-    // Fabric API is not needed: integration uses validated 26.3 Mixins directly.
-    testImplementation platform('org.junit:junit-bom:5.14.4')
-    testImplementation 'org.junit.jupiter:junit-jupiter'
-    testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
-    // Native struct-layout tests use LWJGL core memory allocation, not a GPU/Vulkan loader.
-    testRuntimeOnly "org.lwjgl:lwjgl:3.4.3:${lwjglNatives}"
+	// Layered TOML config (config/caustica.toml) — NightConfig, the same library NeoForge's
+	// ModConfigSpec is built on. Nested into the JAR as jar-in-jar by Loom's `include`.
+	include implementation("com.electronwill.night-config:core:3.8.3")
+	include implementation("com.electronwill.night-config:toml:3.8.3")
+}
+
+processResources {
+	inputs.property "version", project.version
+	duplicatesStrategy = DuplicatesStrategy.EXCLUDE
+
+	filesMatching("fabric.mod.json") {
+		expand "version": inputs.properties.version
+	}
+}
+
+// Compile GLSL and Slang sources to SPIR-V at build time instead of tracking binaries. Requires
+// glslangValidator, slangc, and spirv-val from the Vulkan SDK or PATH.
+def shaderGenRoot = layout.buildDirectory.dir("generated/shaders") // classpath root -> /caustica/rt/*.spv
+
+def resolveVulkanTool = { String name ->
+	def exe = org.gradle.internal.os.OperatingSystem.current().windows ? ".exe" : ""
+	def sdk = System.getenv("VULKAN_SDK")
+	if (sdk) {
+		def fromSdk = file("${sdk}/Bin/${name}${exe}")
+		if (fromSdk.exists()) {
+			return fromSdk.absolutePath
+		}
+	}
+	return "${name}${exe}" // fall back to PATH; exec fails with a clear message if absent
+}
+
+abstract class CompileShaders extends DefaultTask {
+	@InputDirectory abstract DirectoryProperty getSrcDir()
+	@OutputDirectory abstract DirectoryProperty getOutDir()
+	@Input abstract Property<String> getGlslang()
+	@Input abstract Property<String> getSpirvVal()
+	@Input abstract Property<String> getSlangc()
+
+	@Inject abstract ExecOperations getExecOps()
+
+	// world.rgen.slang → "world.rgen"; world.rahit → "world.rahit" (GLSL names pass through).
+	static String outBase(File src) {
+		return src.name.endsWith(".slang") ? src.name.substring(0, src.name.length() - 6) : src.name
+	}
+
+	@TaskAction
+	void compile() {
+		def outDirFile = outDir.get().asFile
+		// Slang stages are named <name>.<stage>.slang (world.rahit.slang → world.rahit.spv); module files
+		// like world_common.slang match no stage glob and are picked up only via `import`.
+		def stageIncludes = ["rgen", "rchit", "rahit", "rmiss", "rcall", "comp", "vert", "frag"]
+				.collectMany { stage -> ["**/*.${stage}", "**/*.${stage}.slang"] }
+		def validate = { File spv ->
+			execOps.exec {
+				commandLine spirvVal.get(), "--target-env", "vulkan1.2", spv.absolutePath
+			}
+		}
+		def compileOne = { File src, File spv, List<String> defines ->
+			execOps.exec {
+				// -g (OpLine/OpSource debug info), not -gVS: the NonSemantic.Shader.DebugInfo form (-gVS)
+				// emits OpExtInstWithForwardRefsKHR (SPV_KHR_relaxed_extended_instruction), which trips a
+				// validation error unless the shaderRelaxedExtendedInstruction device feature is enabled.
+				// -g keeps source-level debug info for Nsight/RenderDoc without needing that extension.
+				commandLine([glslang.get(), "-V", "--target-env", "vulkan1.2", "-g"] + defines
+						+ [src.absolutePath, "-o", spv.absolutePath])
+			}
+			validate(spv)
+		}
+		def compileOneSlang = { File src, File spv, List<String> extra ->
+			execOps.exec {
+				// Embed Slang source and line mappings in SPIR-V for RenderDoc/Nsight source debugging.
+				commandLine([slangc.get(), src.absolutePath, "-target", "spirv",
+						"-profile", "spirv_1_5", "-matrix-layout-column-major",
+						"-warnings-as-errors", "all", "-warnings-disable", "41012", "-g"] + extra
+						+ ["-o", spv.absolutePath])
+			}
+			validate(spv)
+		}
+		def shaderFiles = srcDir.get().asFileTree.matching {
+			include stageIncludes
+		}.files.sort { it.absolutePath }
+		def duplicateOutputs = shaderFiles
+				.groupBy { "${outBase(it)}.spv" }
+				.findAll { entry -> entry.value.size() > 1 }
+		if (!duplicateOutputs.isEmpty()) {
+			throw new GradleException("Duplicate shader output name(s): "
+					+ duplicateOutputs.collect { entry -> "${entry.key} from ${entry.value*.path.join(', ')}" }.join("; "))
+		}
+		// Compile into Gradle's task-temporary directory. A compiler or validator failure leaves the last
+		// successful published output intact instead of emptying build/generated/shaders halfway through.
+		def scratchDir = new File(temporaryDir, "spv")
+		if (scratchDir.exists() && !scratchDir.deleteDir()) {
+			throw new GradleException("failed to clear shader scratch directory ${scratchDir}")
+		}
+		scratchDir.mkdirs()
+		shaderFiles.each { src ->
+			def base = outBase(src)
+			def spv = new File(scratchDir, "${base}.spv")
+			if (src.name.endsWith(".slang")) {
+				def worldIndirectRaygen = base == "world.rgen"
+				if (worldIndirectRaygen) {
+					// Keep a capability-free TraceRay fallback for devices without EXT SER, and
+					// publish the reordered variant separately when the extension is available.
+					compileOneSlang(src, spv, [])
+					compileOneSlang(src, new File(scratchDir, "world_ser.rgen.spv"),
+							["-DCAUSTICA_ENABLE_EXT_SER", "-capability", "spvShaderInvocationReorderEXT"])
+				} else {
+					// Pass A intentionally uses ordinary TraceRay.
+					compileOneSlang(src, spv, [])
+				}
+			} else {
+				compileOne(src, spv, [])
+				if (base == "fg_sky_mask.comp") {
+					// The FG outputs are rgba8 (SDR) or rgba16f (HDR); compile the format variant
+					// of the sky-mask shader from the same source (ifdef switch on the layouts).
+					compileOne(src, new File(scratchDir, "fg_sky_mask_rgba8.comp.spv"),
+							["-DCAUSTICA_FG_MASK_RGBA8"])
+				}
+				if (base == "native_fg_interp.comp") {
+					// Same format split for the native frame-generation interpolator (SDR frames
+					// are rgba8, HDR frames rgba16f).
+					compileOne(src, new File(scratchDir, "native_fg_interp_rgba8.comp.spv"),
+							["-DCAUSTICA_NFG_RGBA8"])
+				}
+			}
+		}
+		outDirFile.mkdirs()
+		outDirFile.listFiles().findAll { it.isFile() && it.name.endsWith(".spv") }.each { it.delete() }
+		scratchDir.listFiles().findAll { it.isFile() }.each { src ->
+			java.nio.file.Files.move(src.toPath(), new File(outDirFile, src.name).toPath(),
+					java.nio.file.StandardCopyOption.REPLACE_EXISTING)
+		}
+	}
+}
+
+def compileShaders = tasks.register("compileShaders", CompileShaders) {
+	group = "build"
+	description = "Compiles shaders/** shader sources to SPIR-V and validates them."
+	srcDir = file("shaders")
+	outDir = layout.buildDirectory.dir("generated/shaders/caustica/rt")
+	glslang = resolveVulkanTool("glslangValidator")
+	spirvVal = resolveVulkanTool("spirv-val")
+	slangc = resolveVulkanTool("slangc")
+}
+
+def generateShaderRecords = tasks.register("generateShaderRecords", GenerateShaderRecords) {
+	group = "build"
+	description = "Generates typed Java shader records and serializers from Slang reflection."
+	worldSourceDir = file("shaders/world")
+	probeSource = file("shaders/world/world_layout_probe.slang")
+	slangc = resolveVulkanTool("slangc")
+	spirvVal = resolveVulkanTool("spirv-val")
+	outDir = layout.buildDirectory.dir("generated/sources/shaderRecords")
+}
+
+tasks.named("test", Test) {
+	useJUnitPlatform()
+}
+
+sourceSets.main.java.srcDir(files(layout.buildDirectory.dir("generated/sources/shaderRecords")).builtBy(generateShaderRecords))
+
+// Emit the .spv into the main resources so they land in the jar / on the runClient classpath at the
+// same /caustica/rt/ path the loader (RtPipeline/RtBlendPipeline) reads. builtBy wires the dependency.
+sourceSets.main.resources.srcDir(files(shaderGenRoot).builtBy(compileShaders))
+
+def ngxNativeGenRoot = layout.buildDirectory.dir("generated/ngx-natives")
+def requestedTaskNames = gradle.startParameter.taskNames.collect { it.toLowerCase(java.util.Locale.ROOT) }
+def isRunClientInvocation = requestedTaskNames.any { it == "runclient" || it.endsWith(":runclient") }
+def ngxShimConfig = (findProperty("ngxShimConfig") ?: findProperty("ngxNativeConfig") ?: "release")
+		.toString().toLowerCase(java.util.Locale.ROOT)
+def normalizeNgxVendorConfig = { String config ->
+	def normalized = config.toLowerCase(java.util.Locale.ROOT)
+	if (normalized == "release") {
+		return "rel"
+	}
+	if (normalized == "debug") {
+		return "dev"
+	}
+	if (normalized != "rel" && normalized != "dev") {
+		throw new GradleException("Unknown NGX vendor config '${config}'. Expected 'rel' or 'dev'.")
+	}
+	return normalized
+}
+def ngxVendorConfig = normalizeNgxVendorConfig(
+		findProperty("ngxVendorConfig") ?: findProperty("ngxVendorConfigName") ?: "rel")
+def ngxVendorEnv = providers.environmentVariable("NGX_VENDOR_CONFIG")
+if (ngxVendorEnv.isPresent() && !findProperty("ngxVendorConfig")) {
+	// CI passes the vendor config through the environment; an invalid value must fail loudly.
+	ngxVendorConfig = normalizeNgxVendorConfig(ngxVendorEnv.get())
+}
+def ngxNativeRoot = layout.buildDirectory.dir("native/ngx_shim").get().asFile
+def ngxShimOutDir = new File(ngxNativeRoot, ngxShimConfig)
+def currentNgxPlatform = {
+	def os = org.gradle.internal.os.OperatingSystem.current()
+	def arch = System.getProperty("os.arch", "").toLowerCase(java.util.Locale.ROOT)
+	def x64 = arch == "x86_64" || arch == "amd64"
+	if (os.windows && x64) {
+		return "windows-x64"
+	}
+	if (os.linux && x64) {
+		return "linux-x64"
+	}
+	return null
+}()
+def ngxNativePlatforms = [
+	[
+		name: "windows-x64",
+		shimIncludes: [
+			"ngxshim.dll"
+		],
+		vendorRoot: { dlssSdkRoot, vendorConfig -> new File(dlssSdkRoot, "lib/Windows_x86_64/${vendorConfig}") },
+		vendorIncludes: [
+			"nvngx_dlssd.dll",
+			"nvngx_dlssg.dll"
+		]
+	],
+	[
+		name: "linux-x64",
+		shimIncludes: [
+			"libngxshim.so"
+		],
+		vendorRoot: { dlssSdkRoot, vendorConfig -> new File(dlssSdkRoot, "lib/Linux_x86_64/${vendorConfig}") },
+		vendorIncludes: [
+			"libnvidia-ngx-dlssd.so*",
+			"libnvidia-ngx-dlssg.so*"
+		]
+	]
+]
+def ngxNativePlatformByName = ngxNativePlatforms.collectEntries { platform -> [(platform.name): platform] }
+def requestedNgxPlatformsRaw = (findProperty("ngxPlatforms") ?: "current").toString()
+		.split(",")
+		.collect { it.trim() }
+		.findAll { !it.isEmpty() }
+def selectedNgxNativePlatforms
+if (requestedNgxPlatformsRaw.size() == 1 && requestedNgxPlatformsRaw[0].equalsIgnoreCase("all")) {
+	selectedNgxNativePlatforms = ngxNativePlatforms
+} else if (requestedNgxPlatformsRaw.size() == 1 && requestedNgxPlatformsRaw[0].equalsIgnoreCase("current")) {
+	if (currentNgxPlatform == null || !ngxNativePlatformByName.containsKey(currentNgxPlatform)) {
+		throw new GradleException("No NGX native platform is configured for this host.")
+	}
+	selectedNgxNativePlatforms = [ngxNativePlatformByName[currentNgxPlatform]]
+} else {
+	def unknownPlatforms = requestedNgxPlatformsRaw.findAll { !ngxNativePlatformByName.containsKey(it) }
+	if (!unknownPlatforms.empty) {
+		throw new GradleException("Unknown NGX platform(s): ${unknownPlatforms.join(', ')}")
+	}
+	selectedNgxNativePlatforms = requestedNgxPlatformsRaw.collect { ngxNativePlatformByName[it] }
+}
+
+def dlssSdkEnv = providers.environmentVariable("DLSS_SDK")
+def dlssSdkRootProvider = dlssSdkEnv.map { file(it) }
+
+// Opt-in by the same pattern as FSR/NRD/XeSS: a checkout or CI job without the built shim and the
+// vendor runtimes still builds; the DLSS toggles then stay hidden at runtime. The package job
+// asserts the bundled natives explicitly, so a silent omission cannot ship unnoticed.
+def bundleNgxNatives = tasks.register("bundleNgxNatives") {
+	group = "build"
+	description = "Bundles NGX shim and ${ngxVendorConfig} DLSS native libraries into the mod resources."
+
+	inputs.property "ngxShimConfig", ngxShimConfig
+	inputs.property "ngxVendorConfig", ngxVendorConfig
+
+	selectedNgxNativePlatforms.each { platform ->
+		inputs.files(fileTree(ngxShimOutDir) {
+			include platform.shimIncludes
+		}).withPropertyName("ngxNatives.${platform.name}.shim")
+		inputs.files(fileTree(platform.vendorRoot(dlssSdkRootProvider.getOrElse(file("__missing_dlss_sdk__")), ngxVendorConfig)) {
+			include platform.vendorIncludes
+		}).withPropertyName("ngxNatives.${platform.name}.vendor")
+	}
+	outputs.dir(ngxNativeGenRoot)
+	outputs.upToDateWhen { false }
+
+	doLast {
+		delete(ngxNativeGenRoot)
+		def missing = []
+		def dlssSdkRoot = dlssSdkRootProvider.orNull
+		if (dlssSdkRoot == null) {
+			logger.lifecycle("DLSS_SDK is not set; bundling without DLSS natives.")
+		}
+		selectedNgxNativePlatforms.each { platform ->
+			def platformShimFiles = fileTree(ngxShimOutDir) {
+				include platform.shimIncludes
+			}.files
+			if (platformShimFiles.empty) {
+				missing += "${platform.name} shim library in ${ngxShimOutDir}"
+			}
+		}
+		if (dlssSdkRoot != null) {
+			selectedNgxNativePlatforms.each { platform ->
+				def platformVendorRoot = platform.vendorRoot(dlssSdkRoot, ngxVendorConfig)
+				def missingVendorIncludes = platform.vendorIncludes.findAll { vendorInclude ->
+					fileTree(platformVendorRoot) {
+						include vendorInclude
+					}.files.empty
+				}
+				if (!missingVendorIncludes.empty) {
+					missing += "${platform.name} vendor libraries ${missingVendorIncludes.join(', ')} in ${platformVendorRoot}"
+				}
+			}
+		}
+		if (!missing.empty) {
+			if (dlssSdkRoot == null) {
+				logger.warn("Bundling without DLSS natives: missing " + missing.join("; "))
+				return
+			}
+			throw new GradleException("Missing NGX native inputs:\n - " + missing.join("\n - "))
+		}
+
+		copy {
+			selectedNgxNativePlatforms.each { platform ->
+				from(fileTree(ngxShimOutDir) {
+					include platform.shimIncludes
+				}) {
+					into "caustica/natives/${platform.name}"
+				}
+				from(fileTree(platform.vendorRoot(dlssSdkRoot, ngxVendorConfig))) {
+					include platform.vendorIncludes
+					into "caustica/natives/${platform.name}"
+				}
+			}
+			into ngxNativeGenRoot
+		}
+	}
+}
+
+sourceSets.main.resources.srcDir(files(ngxNativeGenRoot).builtBy(bundleNgxNatives))
+
+// ===== AMD FSR natives (optional) =====
+// FSR 3 rides the AMD FidelityFX runtime: native/fsr_shim builds fsrshim.dll against the SDK's
+// signed prebuilt amd_fidelityfx_vk.dll and copies the runtime next to it. Bundling is OPT-IN —
+// a checkout without the built shim (every non-Windows host today) still builds the mod, with the
+// upscaler selector simply not offering FSR 3.
+def fsrNativeGenRoot = layout.buildDirectory.dir("generated/fsr-natives")
+def fsrShimOutDir = new File(layout.buildDirectory.dir("native/fsr_shim").get().asFile, "release")
+
+def bundleFsrNatives = tasks.register("bundleFsrNatives") {
+	group = "build"
+	description = "Bundles the FSR shim and AMD FidelityFX runtime into the mod resources (when built)."
+
+	inputs.files(fileTree(fsrShimOutDir) {
+		include "fsrshim.dll"
+		include "amd_fidelityfx_vk.dll"
+	}).withPropertyName("fsrNatives.windows-x64")
+	outputs.dir(fsrNativeGenRoot)
+	outputs.upToDateWhen { false }
+
+	doLast {
+		delete(fsrNativeGenRoot)
+		def shimFiles = fileTree(fsrShimOutDir) {
+			include "fsrshim.dll", "amd_fidelityfx_vk.dll"
+		}.files
+		if (shimFiles.empty) {
+			logger.lifecycle("FSR natives not found in ${fsrShimOutDir}; bundling without FSR support.")
+			return
+		}
+		def missing = ["fsrshim.dll", "amd_fidelityfx_vk.dll"].findAll { name ->
+			shimFiles.every { it.name != name }
+		}
+		if (!missing.empty) {
+			logger.warn("Incomplete FSR natives in ${fsrShimOutDir} (missing ${missing.join(', ')}); " +
+					"bundling without FSR support.")
+			return
+		}
+		copy {
+			from(fsrShimOutDir) {
+				include "fsrshim.dll", "amd_fidelityfx_vk.dll"
+				into "caustica/natives/windows-x64"
+			}
+			into fsrNativeGenRoot
+		}
+	}
+}
+
+sourceSets.main.resources.srcDir(files(fsrNativeGenRoot).builtBy(bundleFsrNatives))
+
+// ===== NRD natives (optional) =====
+// Same opt-in pattern: CI builds native/nrd_shim (NRD + NRI statically linked, SPIR-V embedded) and
+// drops nrdshim.dll into build/native/nrd_shim/release; local checkouts without it still build, and
+// the NRD toggle simply stays hidden (NrdRuntime.platformSupported probes the bundled resource).
+def nrdNativeGenRoot = layout.buildDirectory.dir("generated/nrd-natives")
+def nrdShimOutDir = new File(layout.buildDirectory.dir("native/nrd_shim").get().asFile, "release")
+
+def bundleNrdNatives = tasks.register("bundleNrdNatives") {
+	group = "build"
+	description = "Bundles the NRD shim into the mod resources (when built)."
+
+	inputs.files(fileTree(nrdShimOutDir) {
+		include "nrdshim.dll"
+	}).withPropertyName("nrdNatives.windows-x64")
+	outputs.dir(nrdNativeGenRoot)
+	outputs.upToDateWhen { false }
+
+	doLast {
+		delete(nrdNativeGenRoot)
+		def shimFiles = fileTree(nrdShimOutDir) {
+			include "nrdshim.dll"
+		}.files
+		if (shimFiles.empty) {
+			logger.lifecycle("NRD natives not found in ${nrdShimOutDir}; bundling without NRD support.")
+			return
+		}
+		copy {
+			from(nrdShimOutDir) {
+				include "nrdshim.dll"
+				into "caustica/natives/windows-x64"
+			}
+			into nrdNativeGenRoot
+		}
+	}
+}
+
+sourceSets.main.resources.srcDir(files(nrdNativeGenRoot).builtBy(bundleNrdNatives))
+
+// ===== XeSS natives (optional) =====
+// Same opt-in pattern: CI builds native/xess_shim (loads Intel's prebuilt libxess.dll at run time)
+// and drops xessshim.dll + libxess.dll into build/native/xess_shim/release; local checkouts without
+// them still build, and the XeSS upscaler option simply stays hidden (XessRuntime.platformSupported
+// probes the bundled resource).
+def xessNativeGenRoot = layout.buildDirectory.dir("generated/xess-natives")
+def xessShimOutDir = new File(layout.buildDirectory.dir("native/xess_shim").get().asFile, "release")
+
+def bundleXessNatives = tasks.register("bundleXessNatives") {
+	group = "build"
+	description = "Bundles the XeSS shim and Intel XeSS runtime into the mod resources (when built)."
+
+	inputs.files(fileTree(xessShimOutDir) {
+		include "xessshim.dll"
+		include "libxess.dll"
+	}).withPropertyName("xessNatives.windows-x64")
+	outputs.dir(xessNativeGenRoot)
+	outputs.upToDateWhen { false }
+
+	doLast {
+		delete(xessNativeGenRoot)
+		def shimFiles = fileTree(xessShimOutDir) {
+			include "xessshim.dll", "libxess.dll"
+		}.files
+		if (shimFiles.empty) {
+			logger.lifecycle("XeSS natives not found in ${xessShimOutDir}; bundling without XeSS support.")
+			return
+		}
+		def missing = ["xessshim.dll", "libxess.dll"].findAll { name ->
+			shimFiles.every { it.name != name }
+		}
+		if (!missing.empty) {
+			logger.warn("Incomplete XeSS natives in ${xessShimOutDir} (missing ${missing.join(', ')}); " +
+					"bundling without XeSS support.")
+			return
+		}
+		copy {
+			from(xessShimOutDir) {
+				include "xessshim.dll", "libxess.dll"
+				into "caustica/natives/windows-x64"
+			}
+			into xessNativeGenRoot
+		}
+	}
+}
+
+sourceSets.main.resources.srcDir(files(xessNativeGenRoot).builtBy(bundleXessNatives))
+
+tasks.withType(JavaCompile).configureEach {
+	it.options.release = 25
+	it.options.encoding = "UTF-8"
+	// Keep going past the default 100 diagnostics: the 26.2 → 26.3 port is verified by CI.
+	it.options.compilerArgs += ["-Xmaxerrs", "500"]
 }
 
 java {
-    toolchain.languageVersion = JavaLanguageVersion.of(25)
-    withSourcesJar()
+	toolchain.languageVersion = JavaLanguageVersion.of(25)
+	withSourcesJar()
 }
 
-tasks.withType(JavaCompile).configureEach {
-    options.release = 25
-    options.encoding = 'UTF-8'
+tasks.withType(ProcessResources).configureEach {
+	duplicatesStrategy = DuplicatesStrategy.EXCLUDE
 }
 
 tasks.withType(AbstractArchiveTask).configureEach {
-    preserveFileTimestamps = false
-    reproducibleFileOrder = true
+	duplicatesStrategy = DuplicatesStrategy.EXCLUDE
+	preserveFileTimestamps = false
+	reproducibleFileOrder = true
 }
 
-def shaderOutput = layout.buildDirectory.dir('generated/rt-shaders')
-tasks.register('compileRtShaders', JavaExec) {
-    group = 'build'
-    description = 'Compile the RT stages consumed by RayTracingPipeline using pinned ShaderC natives.'
-    dependsOn tasks.named('shaderCompilerClasses')
-    classpath = sourceSets.shaderCompiler.runtimeClasspath
-    mainClass = 'dev.xys.vulkanrt.build.CompileRtShaders'
-    javaLauncher = javaToolchains.launcherFor { languageVersion = JavaLanguageVersion.of(25) }
-    jvmArgs '--enable-native-access=ALL-UNNAMED'
-    inputs.files(fileTree('shaders') { include '*.rgen', '*.rmiss', '*.rchit', '*.rahit', '*.comp' })
-    outputs.dir(shaderOutput)
-    args layout.projectDirectory.dir('shaders').asFile.absolutePath,
-            shaderOutput.get().dir('assets/native_vulkan_rt/spirv').asFile.absolutePath
-    doFirst { delete(shaderOutput) }
-}
-// Use the task provider so sourcesJar/processResources retain the producer dependency as well.
-sourceSets.main.resources.srcDir(tasks.named('compileRtShaders'))
-processResources {
-    dependsOn tasks.named('compileRtShaders')
-    def values = [version: project.version.toString(), minecraft: project.minecraft_version,
-                  loader: project.loader_version]
-    inputs.properties(values)
-    filesMatching('fabric.mod.json') { expand(values) }
+tasks.named("jar", Jar).configure {
+	from(rootProject.files("LICENSE.md", "COPYING", "COPYING.LESSER", "THIRD_PARTY_NOTICES.md")) {
+		into "META-INF"
+	}
 }
 
-jar {
-    from('LICENSE')
+publishing {
+	publications {
+		create("mavenJava", MavenPublication) {
+			artifactId = project.archives_base_name
+			from components.java
+		}
+	}
 }
 
-tasks.register('verifyMinecraftAbi', VerifyMinecraftAbi) {
-    group = 'verification'
-    description = 'Checks the researched 26.3 integration points against resolved classfiles; does not load Vulkan.'
-    minecraftClasspath.from(configurations.compileClasspath)
-    contractFile.set(layout.projectDirectory.file('docs/minecraft-26.3-abi.tsv'))
-    reportFile.set(layout.buildDirectory.file('reports/minecraft-abi.txt'))
+// ===== 26.3 integration verification (ported from the previous bootstrap) =====
+// These tasks inspect resolved bytecode and the packaged JAR only; they never load Vulkan or a GPU.
+tasks.register("verifyMinecraftAbi", VerifyMinecraftAbi) {
+	group = "verification"
+	description = "Checks the researched 26.3 integration points against resolved classfiles; does not load Vulkan."
+	minecraftClasspath.from(configurations.compileClasspath)
+	contractFile.set(layout.projectDirectory.file("docs/minecraft-26.3-abi.tsv"))
+	reportFile.set(layout.buildDirectory.file("reports/minecraft-abi.txt"))
 }
 
-tasks.register('verifyModJar') {
-    group = 'verification'
-    description = 'Checks client metadata, entrypoint and absence of bundled game/native code.'
-    dependsOn tasks.named('jar')
-    inputs.file(tasks.named('jar').flatMap { it.archiveFile })
-    doLast {
-        new ZipFile(tasks.named('jar').get().archiveFile.get().asFile).withCloseable { zip ->
-            def entry = zip.getEntry('fabric.mod.json')
-            if (entry == null) throw new GradleException('Missing fabric.mod.json')
-            def metadata = zip.getInputStream(entry).withCloseable { new JsonSlurper().parse(it) }
-            if (metadata.environment != 'client' || metadata.depends.minecraft != project.minecraft_version ||
-                    metadata.version != project.version.toString() || metadata.depends.java != '>=25' ||
-                    metadata.depends.fabricloader != ">=${project.loader_version}" ||
-                    metadata.entrypoints.client != ['dev.xys.vulkanrt.RayTracingMod'] ||
-                    metadata.mixins != ['native_vulkan_rt.mixins.json']) {
-                throw new GradleException('Unexpected mod metadata')
-            }
-            if (zip.getEntry('dev/xys/vulkanrt/RayTracingMod.class') == null || zip.getEntry('LICENSE') == null) {
-                throw new GradleException('Missing compiled entrypoint or license')
-            }
-            ['primary.rgen.spv', 'primary.rmiss.spv', 'primary.rchit.spv', 'chunks.rgen.spv', 'chunks.rmiss.spv', 'chunks.shadow.rmiss.spv', 'chunks.rchit.spv', 'chunks.rahit.spv', 'chunks.shadow.rchit.spv', 'chunks.shadow.rahit.spv', 'overlay.comp.spv', 'entity-local.comp.spv'].each { shader ->
-                if (zip.getEntry("assets/native_vulkan_rt/spirv/${shader}") == null) {
-                    throw new GradleException("Missing executable RT shader ${shader}")
-                }
-            }
-            def mixinEntry = zip.getEntry('native_vulkan_rt.mixins.json')
-            if (mixinEntry == null) throw new GradleException('Missing Vulkan integration mixins')
-            def mixins = zip.getInputStream(mixinEntry).withCloseable { new JsonSlurper().parse(it) }
-            def requiredHooks = ['VulkanBackendMixin', 'FrontendGpuDeviceAccessor', 'RenderSystemMixin',
-                                 'GameRendererMixin', 'VulkanCommandEncoderMixin', 'VulkanDeviceMixin', 'LevelRendererMixin', 'ChunkSectionsToRenderMixin']
-            if (!mixins.required || mixins.injectors.defaultRequire != 1 || !mixins.client.containsAll(requiredHooks)) {
-                throw new GradleException('Required RT hooks are not registered with fail-fast injection checks')
-            }
-            mixins.client.each { name ->
-                def entryName = mixins.package.replace('.', '/') + '/' + name + '.class'
-                if (zip.getEntry(entryName) == null) throw new GradleException("Missing compiled Mixin ${entryName}")
-            }
-            def forbidden = zip.entries().findAll {
-                it.name.startsWith('net/minecraft/') || it.name.startsWith('com/mojang/') ||
-                    it.name.startsWith('org/lwjgl/') || it.name.endsWith('.dll') || it.name.endsWith('.so')
-            }
-            if (!forbidden.empty) throw new GradleException("Unexpected bundled runtime: ${forbidden*.name}")
-        }
-    }
+// Pass -PexpectBundledNatives=windows-x64,linux-x64 (the package job) to require the vendor natives
+// that only exist after the shim jobs have run. Without it the check stays platform-agnostic.
+def expectedNativePlatforms = (findProperty("expectBundledNatives") ?: "").toString()
+		.split(",").collect { it.trim() }.findAll { !it.isEmpty() }
+
+tasks.register("verifyModJar") {
+	group = "verification"
+	description = "Checks client metadata, mixin registration, packaged shaders and shim bundling."
+	dependsOn tasks.named("jar")
+	inputs.file(tasks.named("jar").flatMap { it.archiveFile })
+	inputs.property("expectBundledNatives", expectedNativePlatforms.join(","))
+	doLast {
+		new ZipFile(tasks.named("jar").get().archiveFile.get().asFile).withCloseable { zip ->
+			def entry = zip.getEntry("fabric.mod.json")
+			if (entry == null) throw new GradleException("Missing fabric.mod.json")
+			def metadata = zip.getInputStream(entry).withCloseable { new JsonSlurper().parse(it) }
+			if (metadata.environment != "client" || metadata.id != "caustica" ||
+					metadata.depends.minecraft != project.minecraft_version ||
+					metadata.version != project.version.toString() || metadata.depends.java != ">=25" ||
+					metadata.depends.fabricloader != ">=${project.loader_version}" ||
+					metadata.entrypoints.main != ["dev.comfyfluffy.caustica.CausticaMod"] ||
+					metadata.entrypoints.client != ["dev.comfyfluffy.caustica.client.CausticaClient"] ||
+					metadata.mixins != ["caustica.mixins.json"]) {
+				throw new GradleException("Unexpected mod metadata: ${metadata}")
+			}
+			if (zip.getEntry("dev/comfyfluffy/caustica/CausticaMod.class") == null ||
+					zip.getEntry("META-INF/LICENSE.md") == null) {
+				throw new GradleException("Missing compiled entrypoint or license")
+			}
+			["world.rgen.spv", "world.rchit.spv", "world.rahit.spv", "world.rmiss.spv",
+			 "world_primary.rgen.spv", "shadow.rmiss.spv", "display.comp.spv", "svgf_reproject.comp.spv",
+			 "exposure_hist.comp.spv", "sdr_present.comp.spv", "hdr_ui_composite.comp.spv",
+			 "overlay_fullscreen_triangle.vert.spv", "block_outline.vert.spv"].each { shader ->
+				if (zip.getEntry("caustica/rt/${shader}") == null) {
+					throw new GradleException("Missing executable shader caustica/rt/${shader}")
+				}
+			}
+			def mixinEntry = zip.getEntry("caustica.mixins.json")
+			if (mixinEntry == null) throw new GradleException("Missing RT integration mixins")
+			def mixins = zip.getInputStream(mixinEntry).withCloseable { new JsonSlurper().parse(it) }
+			def requiredHooks = ["VulkanBackendMixin", "GpuDeviceAccessor", "RenderSystemMixin",
+								 "GameRendererMixin", "LevelRendererMixin", "VulkanGpuSurfaceMixin"]
+			if (!mixins.required || mixins.injectors.defaultRequire != 1 ||
+					!mixins.client.containsAll(requiredHooks)) {
+				throw new GradleException("Required RT hooks are not registered with fail-fast injection checks")
+			}
+			mixins.client.each { name ->
+				def entryName = mixins.package.replace(".", "/") + "/" + name + ".class"
+				if (zip.getEntry(entryName) == null) throw new GradleException("Missing compiled Mixin ${entryName}")
+			}
+			expectedNativePlatforms.each { platform ->
+				def prefix = "caustica/natives/${platform}/"
+				if (!zip.entries().any { it.name.startsWith(prefix) }) {
+					throw new GradleException("Expected bundled natives for ${platform} in ${prefix}")
+				}
+			}
+			def forbidden = zip.entries().findAll {
+				it.name.startsWith("net/minecraft/") || it.name.startsWith("com/mojang/") ||
+						it.name.startsWith("org/lwjgl/")
+			}
+			if (!forbidden.empty) throw new GradleException("Unexpected bundled runtime: ${forbidden*.name}")
+		}
+	}
 }
 
-test {
-    useJUnitPlatform()
-    jvmArgs '--enable-native-access=ALL-UNNAMED'
-}
-check { dependsOn tasks.named('verifyMinecraftAbi'), tasks.named('verifyModJar') }
-tasks.named('runClient') { dependsOn tasks.named('verifyMinecraftAbi') }
+check { dependsOn tasks.named("verifyMinecraftAbi"), tasks.named("verifyModJar") }
+tasks.named("runClient") { dependsOn tasks.named("verifyMinecraftAbi") }

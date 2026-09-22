@@ -1,0 +1,67 @@
+#version 460
+
+layout(local_size_x = 1, local_size_y = 1, local_size_z = 1) in;
+
+layout(std430, binding = 0, set = 0) readonly buffer Histogram {
+    uint bins[256];
+} hist;
+layout(binding = 1, set = 0, r32f) uniform image2D exposureImage;
+layout(std430, binding = 2, set = 0) buffer ExposureState {
+    float previous;
+    uint initialized;
+} stateBuf;
+
+layout(push_constant) uniform Push {
+    uint pixelCount;
+    float key;
+    float minEv;
+    float maxEv;
+    float adaptUp;
+    float adaptDown;
+    float frameTimeSeconds;
+    float evBias;
+} pc;
+
+const float LOG_MIN = -12.0;
+const float LOG_MAX = 12.0;
+const float LOG_STEP = (LOG_MAX - LOG_MIN) / 256.0;
+
+float binCenter(uint bin) {
+    return LOG_MIN + (float(bin) + 0.5) * LOG_STEP;
+}
+
+void main() {
+    uint total = max(pc.pixelCount, 1u);
+    uint lowCount = uint(floor(float(total) * 0.50));
+    uint highCount = max(lowCount + 1u, uint(ceil(float(total) * 0.95)));
+
+    uint cumulative = 0u;
+    float weightedLogLum = 0.0;
+    uint weightedCount = 0u;
+    for (uint i = 0u; i < 256u; ++i) {
+        uint count = hist.bins[i];
+        uint start = cumulative;
+        uint end = cumulative + count;
+        uint takeStart = max(start, lowCount);
+        uint takeEnd = min(end, highCount);
+        if (takeEnd > takeStart) {
+            uint take = takeEnd - takeStart;
+            weightedLogLum += binCenter(i) * float(take);
+            weightedCount += take;
+        }
+        cumulative = end;
+    }
+
+    float avgLogLum = weightedCount > 0u ? weightedLogLum / float(weightedCount) : 0.0;
+    float target = pc.key * exp2(pc.evBias - avgLogLum);
+    target = clamp(target, exp2(pc.minEv), exp2(pc.maxEv));
+
+    float prev = stateBuf.initialized == 0u ? target : max(stateBuf.previous, 1.0e-4);
+    float rate = target > prev ? pc.adaptUp : pc.adaptDown;
+    float alpha = stateBuf.initialized == 0u ? 1.0 : 1.0 - exp(-pc.frameTimeSeconds / max(rate, 1.0e-4));
+    float exposure = mix(prev, target, clamp(alpha, 0.0, 1.0));
+
+    stateBuf.previous = exposure;
+    stateBuf.initialized = 1u;
+    imageStore(exposureImage, ivec2(0), vec4(exposure, 0.0, 0.0, 0.0));
+}

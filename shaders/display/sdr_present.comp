@@ -1,0 +1,55 @@
+#version 460
+
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+
+// Destination PQ-encoded ([0,1], ST.2084) image, blitted to the PQ swapchain after this pass.
+layout(binding = 0, set = 0, rgba16f) uniform image2D outImage;
+// Minecraft's SDR main target (rgba8, sRGB-encoded), sampled in GENERAL layout. Holds the complete
+// non-RT frame (menu panorama + GUI), which the HDR present path would otherwise raw-copy into the
+// PQ swapchain and misdisplay (SDR bytes reinterpreted as PQ codes).
+layout(binding = 1, set = 0) uniform sampler2D sdrTex;
+
+layout(push_constant) uniform Push {
+    float paperWhiteNits; // absolute nits SDR paper white maps to
+} pc;
+
+const float PQ_M1 = 0.1593017578125;
+const float PQ_M2 = 78.84375;
+const float PQ_C1 = 0.8359375;
+const float PQ_C2 = 18.8515625;
+const float PQ_C3 = 18.6875;
+
+float pqEncode(float nits) {
+    float y = pow(max(nits, 0.0) / 10000.0, PQ_M1);
+    return pow((PQ_C1 + PQ_C2 * y) / (1.0 + PQ_C3 * y), PQ_M2);
+}
+
+vec3 srgbToLinear(vec3 c) {
+    bvec3 hi = greaterThan(c, vec3(0.04045));
+    vec3 lo = c / 12.92;
+    vec3 hiV = pow((c + 0.055) / 1.055, vec3(2.4));
+    return mix(lo, hiV, hi);
+}
+
+// VK_COLOR_SPACE_HDR10_ST2084_EXT mandates BT.2020 primaries as its container gamut, but the SDR main
+// target is authored/composited in BT.709/sRGB primaries — convert before the PQ encode. (ITU-R BT.2087.)
+const mat3 BT709_TO_BT2020 = mat3(
+    0.6274039, 0.0690973, 0.0163916,
+    0.3292830, 0.9195406, 0.0880132,
+    0.0433131, 0.0113612, 0.8955953
+);
+
+void main() {
+    ivec2 pix = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 size = imageSize(outImage);
+    if (pix.x >= size.x || pix.y >= size.y) {
+        return;
+    }
+    // Decode the sRGB-authored SDR frame to linear, place it at paper white (nits), convert to BT.2020
+    // primaries, then PQ-encode. No highlight roll-off: SDR content tops out at 1.0 (= paper white), well
+    // below the HDR peak.
+    vec3 nits709 = srgbToLinear(texelFetch(sdrTex, pix, 0).rgb) * pc.paperWhiteNits;
+    vec3 nits2020 = BT709_TO_BT2020 * nits709;
+    vec3 pq = vec3(pqEncode(nits2020.r), pqEncode(nits2020.g), pqEncode(nits2020.b));
+    imageStore(outImage, pix, vec4(pq, 1.0));
+}

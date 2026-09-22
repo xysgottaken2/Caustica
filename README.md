@@ -1,91 +1,99 @@
-# Native Vulkan RT — Minecraft Java 26.3
+# Caustica — Minecraft 26.3
 
-## 0.9.0-experimental — entidades e FallingBlockEntity no TLAS compartilhado
+Hardware-ray-traced renderer for Minecraft's Vulkan backend. It replaces the vanilla world view
+with path tracing and the vendor upscaling/denoising stack (DLSS Ray Reconstruction, DLSS Frame
+Generation, FSR 3, XeSS, NRD, SVGF) while keeping Minecraft's UI and gameplay intact.
 
-A implementação captura a emissão/upload vanilla de **jogador (AvatarRenderer),
-zumbi, vaca, porco, galinha, itens comuns dropados e FallingBlockEntity**. Areia,
-cascalho e concreto em pó usam `MovingBlockFeatureRenderer`, não `SectionMesh`.
-Geometria local compartilhável, transformação afim da instância e materiais são
-separados: movimento/animação rígida atualiza o TLAS; geometria inalterada reutiliza
-BLAS sem nova cópia/normalização GPU.
+![Caustica ray-traced Minecraft scene](docs/gallery/2026-07-09_21.25.14.jpg)
 
-É o **mesmo renderer, device, fila, pipeline RT, SBT e TLAS** de
-SOLID + CUTOUT + TRANSLUCENT. Não há readback, retesselação própria, atlas
-reduzido/copiado ou textura substituta. TEXEL continua padrão/referência. Texturas,
-UV, Color/tint/alpha e overlay vêm dos dados e bindings reais do vanilla.
+This repository carries Caustica ported to **Minecraft 26.3**. The renderer source was imported from
+[`xysgottaken2/testingcasutica`](https://github.com/xysgottaken2/testingcasutica) at the furthest
+26.3-ported state available there, and this repository's verification harness (Minecraft ABI
+contract + hook call-site contracts) was kept on top of it. See
+[Porting 26.2 → 26.3](docs/port-26.2-to-26.3.md) for exactly what changed and what is still
+unverified.
 
-**Experimental: os 14 cenários visuais da 0.9.0 ainda estão pendentes.**
-SOLID/TEXEL/grass overlay/CUTOUT são a base anteriormente validada pelo usuário;
-TRANSLUCENT 0.8.0 passou no CI, mas continua sem validação visual confirmada.
-CI/ABI/SPIR-V não equivalem a execução em GPU. Este ambiente local não tem Java/GPU.
+## Features
 
-- [Investigação 26.3, implementação, limites e checklist dos 14 cenários](docs/entities-0.9.0.md).
-- JAR: **`native-vulkan-rt-0.9.0-experimental.jar`**, artifact
-  **`native-vulkan-rt-experimental`**; uploads e relatórios independentes
-  `test-ubuntu` / `test-windows` no [PR #1](https://github.com/xysgottaken2/test-3/pull/1).
-- Uso: substituir o JAR e abrir o mundo, mantendo `nativevulkanrt.enabled=true`,
-  `nativevulkanrt.scene=chunks` e `nativevulkanrt.textureSampling=texel`.
-  Não trocar para a cena de triângulo. F5 permite verificar o jogador emitido
-  pelo vanilla; não se inventa um corpo de primeira pessoa.
-- Opcional: `-Dnativevulkanrt.entityDiagnostics=true` ativa HUD de hit GPU e
-  detalhes de geometria/texturas. Contadores CPU são identificados como CPU;
-  `GPU SAMPLED` e `FALLING HIT` dependem do shader, não do enqueue.
-- Limites: banco de 12 pares texture-view/sampler; glint/foil, armaduras e efeitos
-  especiais, consumers envelopados e formatos customizados não são cobertura
-  completa. Rejeições são explícitas, sem substituir texturas. Veja o documento.
-- Continuam fora: partículas, iluminação RT, sombras, reflexos/GI, refração
-  avançada e View Bobbing. O caminho TRANSLUCENT mantém seus limites da 0.8.0.
+- Vulkan hardware path-traced world rendering
+- DLSS Ray Reconstruction, DLSS Frame Generation, FSR 3, XeSS and NRD/SVGF denoising
+- HDR output, SDR/HDR presentation paths and exposure control
+- Dynamic entity rendering in the ray-traced scene
+- LabPBR-style material support, including toggleable subsurface scattering
+- Deep settings UI: nearly every renderer feature has its own sub-screen with a "Reset to
+  Defaults" button, plus a global one on the hub
+- Weather-driven lighting: rain and thunderstorms dim the sun/moon and darken the sky
+- Volumetric 3D clouds (classic vanilla-style or photoreal cumulus), volumetric fog with
+  per-light god rays, water waves, parallax occlusion mapping
+- Dedicated Nether, End and portal skyboxes
+- OMM (Opacity Micro-Map) + SER (Shader Execution Reordering) optimizations
+- Experimental SHaRC-style world-space radiance cache (toggleable, inspectable via debug view 13)
 
-Verificação: `./gradlew --no-daemon check assemble verifyMinecraftAbi verifyModJar`
-e `./gradlew --no-daemon -p buildSrc test`. O CI também executa `spirv-val`.
-Documentos históricos abaixo descrevem marcos anteriores, não o escopo atual.
+## Requirements
 
-## Build e teste
+- **Vulkan graphics backend enabled**
+- A GPU and driver with Vulkan ray tracing support
+- NVIDIA RTX GPU and a supported driver for DLSS features
+- An HDR-capable display and OS HDR mode for HDR output
+- On Linux, an HDR-capable Wayland compositor and a native Wayland session for HDR output
+- Install a LabPBR resource pack such as [SPBR](https://modrinth.com/resourcepack/spbr)
 
-Requer **JDK 25** e acesso à rede. Gradle **9.7.0**, Fabric Loom **1.18.2** e
-Fabric Loader **0.19.5** estão fixados. O jogo é a release **26.3**, não snapshot.
-Para executar RT, é necessário driver/GPU Vulkan com os recursos exigidos.
+## Installation
+
+1. Install Fabric Loader **0.19.5** for Minecraft **26.3**.
+2. Install **Fabric API 0.161.0+26.3**.
+3. Put the Caustica JAR in your Minecraft `mods` folder.
+4. Launch the game with the Vulkan graphics backend.
+
+## Building
+
+Requires **JDK 25** and the SPIR-V shader toolchain (`glslangValidator`, `slangc`, `spirv-val`) —
+either from the Vulkan SDK (`VULKAN_SDK`) or on `PATH`. Gradle **9.7.0**, Loom **1.18.2**
+(no-remap mode: 26.3 ships official names), Loader **0.19.5** and Fabric API **0.161.0+26.3** are
+pinned in `gradle.properties`.
 
 ```sh
-./gradlew --no-daemon build
-./gradlew --no-daemon -p buildSrc test
-./gradlew --no-daemon check
-
-# Vanilla Vulkan, RT desativado
-./gradlew runClient
-
-# Malhas SOLID + CUTOUT + TRANSLUCENT reais dos chunks
-./gradlew runClient -Prt=true -PrtScene=chunks -PrtValidation=true
+./gradlew --no-daemon build            # JAR + SPIR-V shaders
+./gradlew --no-daemon -p buildSrc test # ABI verifier and hook-contract tests
+./gradlew --no-daemon check verifyMinecraftAbi verifyModJar
+./gradlew runClient --args="--graphicsBackend VULKAN"
 ```
 
-No Windows, use `gradlew.bat`. As validation layers precisam estar disponíveis no
-ambiente de execução. `runClient` solicita `--graphicsBackend VULKAN` ao Minecraft.
-O JAR esperado após build bem-sucedido é
-`build/libs/native-vulkan-rt-0.8.0-experimental.jar`.
+Vendor upscaler runtimes (NGX/DLSS, FidelityFX, NRD, XeSS) are **not committed**. They are built
+from the official SDKs in CI into `build/native/<shim>/release/` and bundled from there; without
+them the build still succeeds and the corresponding option is simply not offered at runtime.
 
-Os oito shaders GLSL em `shaders/` são compilados offline por
-`src/shaderCompiler/java/dev/xys/vulkanrt/build/CompileRtShaders.java` e seus SPIR-V
-são incluídos como recursos do JAR. Não há compilação de shaders RT por frame.
-O workflow de build também prepara validação com `spirv-val --target-env vulkan1.2`.
+## Verification status and limits
 
-`build` e `runClient` verificam o contrato `docs/minecraft-26.3-abi.tsv` contra as
-classes resolvidas pelo Loom. Isso não prova que os Mixins ou o caminho GPU funcionam.
-O verificador e seus testes estão em `buildSrc/`.
+`verifyMinecraftAbi` checks the 155 member signatures in
+[`docs/minecraft-26.3-abi.tsv`](docs/minecraft-26.3-abi.tsv) against resolved classfiles, and
+`verifyModJar` checks the packaged metadata, registered mixins, compiled shaders and bundled
+natives. `buildSrc` additionally asserts the bytecode call sites the terrain and entity hooks
+depend on.
 
-## Fontes e documentação
+CI (`.github/workflows/ci.yml`) runs four jobs: a GPU-less JVM lane (buildSrc contract tests →
+compile against 26.3 → the renderer unit tests → the ABI contract and hook call sites → JAR
+metadata, mixin registration and shaders), the Windows and Linux shim builds, and a packaging job
+that rebuilds the JAR with those shim artifacts and asserts that every requested native platform is
+really inside it. A failing job publishes its trimmed Gradle diagnostics to a `ci-logs-*` ref,
+because Actions logs and artifacts expire long before the code does.
 
-O renderer está em `src/main/java/dev/xys/vulkanrt/render/`, a captura de geometria
-em `geometry/`, os hooks em `mixin/` e a negociação em `integration/`.
-Configurações Fabric/Mixin estão em `src/main/resources/`.
+**CI does not run the game.** A green build proves that the sources compile against 26.3, that the
+shaders validate as SPIR-V, and that the documented injection points still exist in the client
+bytecode. It cannot prove that a Mixin applies, that a hook is reached, or that the rendered image
+is correct. Visual validation still has to happen on a Vulkan ray-tracing GPU.
 
-Os estudos em `docs/` registram a pesquisa de Minecraft/Caustica e a arquitetura
-anterior de bootstrap. Afirmações de status nesses estudos podem estar desatualizadas;
-este README e a descrição do PR distinguem a implementação atual da validação pendente.
-Fontes do Minecraft, SDKs e dados de pesquisa locais não são redistribuídos.
+## Compatibility
 
-## Licenças
+Caustica takes over the world renderer, so mods that heavily modify world rendering, shader
+pipelines, post-processing or the Vulkan backend may conflict. UI-only mods are more likely to work.
+Distant Horizons and Voxy have dedicated compatibility paths (`compat/`).
 
-Código original deste projeto: MIT. Caustica foi estudado como referência,
-**não copiado**; sua licença é LGPL-3.0-or-later. Minecraft e suas fontes não são
-redistribuídos. O wrapper Gradle é software de terceiros Apache-2.0; veja
+## License
+
+Caustica's project-owned source code and documentation are licensed under the
+**GNU Lesser General Public License v3.0 or later**; see [LICENSE.md](LICENSE.md), [COPYING](COPYING)
+and [COPYING.LESSER](COPYING.LESSER).
+
+Release artifacts may bundle NVIDIA DLSS/NGX SDK components under NVIDIA's own license terms; see
 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
