@@ -10,9 +10,11 @@ import dev.comfyfluffy.caustica.client.WorldRenderScaler;
 import dev.comfyfluffy.caustica.rt.RtComposite;
 import dev.comfyfluffy.caustica.rt.RtReflex;
 import dev.comfyfluffy.caustica.rt.RtUiOverlay;
+import dev.comfyfluffy.caustica.rt.entity.RtViewmodelCapture;
 import dev.comfyfluffy.caustica.rt.overlay.RtWorldOverlay;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.renderer.GameRenderer;
+import net.minecraft.client.renderer.SubmitNodeCollector;
 import net.minecraft.client.renderer.state.OptionsRenderState;
 import net.minecraft.client.renderer.state.level.CameraRenderState;
 import net.minecraft.client.renderer.state.level.PlayerRenderState;
@@ -36,6 +38,12 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 public abstract class GameRendererMixin {
 	/** Vanilla's fixed viewmodel FOV, per {@code Camera.calculateHudFov()}. */
 	private static final float CAUSTICA$VANILLA_HAND_FOV = 70.0f;
+
+	// Vanilla's in-hand submission: renderItemInHand builds the camera/hand PoseStack (view rotation,
+	// damage/view bob) and hands it, with a fresh collector, to FirstPersonHandsAndItemsRenderer. Swapping
+	// that collector is the one seam that sees exactly the geometry vanilla would rasterize.
+	private static final String SUBMIT_HANDS_WITH_ITEMS =
+			"Lnet/minecraft/client/renderer/FirstPersonHandsAndItemsRenderer;submitHandsWithItems(FLcom/mojang/blaze3d/vertex/PoseStack;Lnet/minecraft/client/renderer/SubmitNodeCollector;Lnet/minecraft/client/renderer/state/level/PlayerRenderState;Lnet/minecraft/client/renderer/state/level/FirstPersonHandsAndItemsRenderState;)V";
 
 	/** The 5-arg color+depth render-pass overload the hand / screen-effect passes are built with. */
 	private static final String CREATE_COLOR_DEPTH_PASS =
@@ -170,6 +178,32 @@ public abstract class GameRendererMixin {
 		}
 	}
 
+	// ---- Path-traced viewmodel ------------------------------------------------------------------
+	//
+	// The vanilla hand is a screen-space raster pass drawn after the world depth clear, so the path
+	// tracer never sees it. RtViewmodelCapture redirects this one submission into the RT entity sink:
+	// the arm + held item become per-frame world-space geometry in the TLAS (primary-camera-visible
+	// only), shaded through the ordinary entity/material path — block POM, LabPBR items, emissive
+	// sprites — and nearest-hit depth-tested against nearby blocks, so the arm cannot poke through
+	// walls. Until the capture has succeeded once (and again after a failure) the sink mirrors into the
+	// caller's collector, so the vanilla hand keeps drawing instead of disappearing.
+	// require = 0: if a future 26.x build moves the submission out of renderItemInHand, the injection must
+	// degrade to the vanilla hand rather than crash the client at class-load time.
+	@ModifyArg(method = "renderItemInHand", require = 0,
+			at = @At(value = "INVOKE", target = SUBMIT_HANDS_WITH_ITEMS),
+			index = 2)
+	private SubmitNodeCollector caustica$captureViewmodel(SubmitNodeCollector collector) {
+		return RtViewmodelCapture.INSTANCE.begin(collector);
+	}
+
+	// Seal at RETURN rather than right after the submit call: if this Minecraft version defers the
+	// hand's item quads to a feature-dispatcher flush later inside renderItemInHand, that flush still
+	// submits into the collector installed above and the capture must stay open until it is done.
+	@Inject(method = "renderItemInHand", require = 0, at = @At("RETURN"))
+	private void caustica$finishViewmodelCapture(CallbackInfo ci) {
+		RtViewmodelCapture.INSTANCE.end();
+	}
+
 	// ---- Hand FOV (viewmodel FOV) ----------------------------------------------------------------
 	//
 	// Vanilla draws the first-person viewmodel through a dedicated "3d hud" perspective built from
@@ -198,6 +232,15 @@ public abstract class GameRendererMixin {
 					target = "Lnet/minecraft/client/renderer/Projection;setupPerspective(FFFFF)V"),
 			index = 2)
 	private float caustica$applyHandFov(float hudFov) {
+		float applied = caustica$resolveHandFov(hudFov);
+		// The RT viewmodel is captured from this frame's hand submission and traced next frame; recording
+		// the FOV vanilla actually used lets RtEntities reproduce the hand projection exactly (including
+		// the death/fluid modulation) instead of re-deriving it from the config.
+		RtViewmodelCapture.INSTANCE.setHandFov(applied);
+		return applied;
+	}
+
+	private static float caustica$resolveHandFov(float hudFov) {
 		if (!CausticaConfig.Rt.Hand.FOV_FOLLOWS_CAMERA.value()) {
 			return hudFov;
 		}

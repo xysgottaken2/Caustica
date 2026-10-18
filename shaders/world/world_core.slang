@@ -48,6 +48,10 @@ public uint payloadMaterial() { return payload.flags & PAYLOAD_MATERIAL_MASK; }
 public bool payloadDielectricEntering() { return (payload.flags & PAYLOAD_DIELECTRIC_ENTERING) != 0u; }
 public bool payloadEmitterInList() { return (payload.flags & PAYLOAD_EMITTER_IN_LIST) != 0u; }
 public bool payloadDynamicEntity() { return (payload.flags & PAYLOAD_DYNAMIC_ENTITY) != 0u; }
+// True when this hit is the first-person viewmodel (arm + held item). Raygen only: the viewmodel is
+// primary-camera-visible, so no continuation ray can produce it. Used to suppress the analytic
+// held-item light on the hand itself, which would otherwise light the flame from inside.
+public bool payloadViewmodel() { return (payload.flags & PAYLOAD_VIEWMODEL) != 0u; }
 // LINEAR roughness, i.e. GGX alpha directly — NOT perceptual roughness. This is the one convention used
 // end to end: LabPBR defines roughness = (1 - perceptualSmoothness)^2 and RtLabPbr.decode stores exactly
 // that, RtMaterials.Profile carries the same units, and DLSS-RR wants linear roughness in its guide. So

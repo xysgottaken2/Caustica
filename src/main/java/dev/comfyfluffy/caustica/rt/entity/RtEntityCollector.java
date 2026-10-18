@@ -160,6 +160,13 @@ public final class RtEntityCollector implements SubmitNodeCollector {
     // glowing) per submitModel call — see EntityRenderer.extractCommon's outlineColor. Every submitModel
     // call for one entity carries the same value, so the last non-zero one seen this entity is enough.
     private int outlineColor;
+    // Optional pass-through sink. RtViewmodelCapture mirrors the hand submission into vanilla's collector
+    // while the RT capture warms up (or after a capture failure), so the viewmodel can never vanish just
+    // because the RT path is not ready yet.
+    private SubmitNodeCollector delegate;
+    // Viewmodel captures skip the specialised cuboid emitter: the first-person arm / held-item models are
+    // small, and renderToBuffer's authored per-cube UVs and normals are the safer 1:1 source.
+    private boolean viewmodelMode;
 
     /**
      * Point the collector at the capture buffer for the next {@code dispatcher.submit}, resetting the
@@ -175,6 +182,20 @@ public final class RtEntityCollector implements SubmitNodeCollector {
             this.flameSubmittedThisEntity = false;
             this.lastArmorTexSlot = 0;
         }
+    }
+
+    /** Mirror every submission into {@code delegate} as well (null disables the pass-through). */
+    public void delegate(SubmitNodeCollector delegate) {
+        this.delegate = delegate;
+    }
+
+    /**
+     * Capture first-person viewmodel geometry. Forces the renderToBuffer path (the cuboid emitter is tuned
+     * for mob bodies and would need its own UV/normal validation for the arm). Enabled for the duration of
+     * one hand submission and cleared again by {@link RtViewmodelCapture#end()}.
+     */
+    public void viewmodelMode(boolean viewmodelMode) {
+        this.viewmodelMode = viewmodelMode;
     }
 
     /** This entity's Glowing-effect outline colour (opaque ARGB), or 0 if it isn't glowing. */
@@ -217,6 +238,10 @@ public final class RtEntityCollector implements SubmitNodeCollector {
     public <S> void submitModel(Model<? super S> model, S state, PoseStack poseStack, RenderType renderType,
                                 int lightCoords, int overlayCoords, int tintedColor, UvMapping uvMapping,
                                 int outlineColor) {
+        if (delegate != null) {
+            delegate.submitModel(model, state, poseStack, renderType, lightCoords, overlayCoords, tintedColor,
+                    uvMapping, outlineColor);
+        }
         if (capture == null) {
             return;
         }
@@ -320,7 +345,7 @@ public final class RtEntityCollector implements SubmitNodeCollector {
             return;
         }
 
-        RtCuboidEmitter.ModelTemplate directTemplate = cuboidEmitter.prepare(model);
+        RtCuboidEmitter.ModelTemplate directTemplate = viewmodelMode ? null : cuboidEmitter.prepare(model);
         // Boat fix: boat models (BoatModel, ChestBoatModel, RaftModel) have interior faces that the cuboid
         // emitter does not capture with correct UVs / normals (interior bottom becomes black). Force fallback
         // path (renderToBuffer) which uses the actual ModelPart vertex data with proper UVs and normals.
@@ -408,6 +433,9 @@ public final class RtEntityCollector implements SubmitNodeCollector {
 
     @Override
     public OrderedSubmitNodeCollector order(int order) {
+        if (delegate != null) {
+            delegate.order(order);
+        }
         // Single un-ordered capture sink reused synchronously (no queuing): the caller always issues the
         // very next submission immediately after requesting an order, so stashing it for that one
         // submitModel call (see there) is enough to recover banner/shield pattern-layer stacking.
@@ -1190,6 +1218,10 @@ public final class RtEntityCollector implements SubmitNodeCollector {
     @Override
     public void submitBlockModel(PoseStack poseStack, RenderType renderType, List<BlockStateModelPart> parts,
                                  int[] tintLayers, int lightCoords, int overlayCoords, int outlineColor) {
+        if (delegate != null) {
+            delegate.submitBlockModel(poseStack, renderType, parts, tintLayers, lightCoords, overlayCoords,
+                    outlineColor);
+        }
         if (capture == null) {
             return;
         }
@@ -1214,6 +1246,10 @@ public final class RtEntityCollector implements SubmitNodeCollector {
     public void submitBlockModel(PoseStack poseStack, Function<ChunkSectionLayer, RenderType> renderTypeByLayer,
                                  boolean hasTranslucency, List<BlockStateModelPart> parts, Mesh mesh,
                                  int[] tintLayers, int lightCoords, int overlayCoords, int outlineColor) {
+        if (delegate != null) {
+            delegate.submitBlockModel(poseStack, renderTypeByLayer, hasTranslucency, parts, mesh, tintLayers,
+                    lightCoords, overlayCoords, outlineColor);
+        }
         if (capture == null) {
             return;
         }
@@ -1230,6 +1266,10 @@ public final class RtEntityCollector implements SubmitNodeCollector {
     public void submitItem(PoseStack poseStack, ItemDisplayContext displayContext, int lightCoords,
                            int overlayCoords, int outlineColor, int[] tintLayers, ItemQuads quads,
                            MeshView mesh, ItemStackRenderState.FoilType foilType) {
+        if (delegate != null) {
+            delegate.submitItem(poseStack, displayContext, lightCoords, overlayCoords, outlineColor, tintLayers,
+                    quads, mesh, foilType);
+        }
         if (capture == null) {
             return;
         }
@@ -1363,6 +1403,10 @@ public final class RtEntityCollector implements SubmitNodeCollector {
     @Override
     public void submitItem(PoseStack poseStack, ItemDisplayContext displayContext, int lightCoords, int overlayCoords,
                            int outlineColor, int[] tintLayers, ItemQuads quads, ItemStackRenderState.FoilType foilType) {
+        if (delegate != null) {
+            delegate.submitItem(poseStack, displayContext, lightCoords, overlayCoords, outlineColor, tintLayers,
+                    quads, foilType);
+        }
         if (capture == null) {
             return;
         }
@@ -1372,6 +1416,9 @@ public final class RtEntityCollector implements SubmitNodeCollector {
     @Override
     public void submitCustomGeometry(PoseStack poseStack, RenderType renderType,
                                      SubmitNodeCollector.CustomGeometryRenderer customGeometryRenderer) {
+        if (delegate != null) {
+            delegate.submitCustomGeometry(poseStack, renderType, customGeometryRenderer);
+        }
         if (capture == null) {
             return;
         }

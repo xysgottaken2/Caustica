@@ -101,7 +101,7 @@ Os nomes abaixo foram encontrados na árvore 26.3 acima. Pacotes abreviados:
 | Terrain draw | `R.LevelRenderer.extractSectionDrawGroups`, `prepareChunkRenders`, `prepareChunkRendersIndirect`, `isChunkRenderingUsingMultiDrawIndirect` | Draw groups têm baseVertex/firstIndex/sectionInfo; não confundir draw index com section ID |
 | Entidades / block entities | `R.extract.LevelExtractor.extractVisibleEntities/extractVisibleBlockEntities`; `R.LevelRenderer.submitEntities/submitBlockEntities`; `R.feature.FeatureRenderDispatcher.prepareFrame` | Consumir estados extraídos, sem ler mundo mutável da thread de render |
 | Partículas | `R.LevelRenderer.submitFeatures` → `levelRenderState.particlesRenderState.submit`; `R.feature.QuadParticleFeatureRenderer` | Geometria dinâmica e alpha exigem tratamento separado |
-| Primeira pessoa | `R.GameRenderer.renderItemInHand(CameraRenderState,PlayerRenderState,GpuTextureView)` → `R.FirstPersonHandsAndItemsRenderer.submitHandsWithItems(float,PoseStack,SubmitNodeCollector,PlayerRenderState,FirstPersonHandsAndItemsRenderState)` → `ItemStackRenderState.submit` → `FeatureRenderDispatcher.prepareFrame/renderAllFeatures` | Passo separado `Item in hand`; não é `EntityRenderDispatcher` nem geometria mundial |
+| Primeira pessoa | `R.GameRenderer.renderItemInHand(CameraRenderState,PlayerRenderState,GpuTextureView)` → `R.FirstPersonHandsAndItemsRenderer.submitHandsWithItems(float,PoseStack,SubmitNodeCollector,PlayerRenderState,FirstPersonHandsAndItemsRenderState)` → `ItemStackRenderState.submit` → `FeatureRenderDispatcher.prepareFrame/renderAllFeatures` | Passo separado `Item in hand`; a submissão é capturada pelo RT para virar geometria mundial (ver §“Caminho de viewmodel”) |
 
 ### Contrato de captura instalado nesta etapa
 
@@ -136,34 +136,70 @@ o formato, topologia, textura ou draw não coincide. Os contadores
 shader continua sendo a única fonte de hit/interseção RT, inclusive quando o
 row selecionado é uma instância de partícula no TLAS compartilhado.
 
-### Caminho de viewmodel confirmado em 26.3
+### Caminho de viewmodel confirmado em 26.3 (path traced)
 
-A fonte 26.3 fixada em `mc-dataminning/build-changes` confirma que o método
-`GameRenderer.renderItemInHand` cria o `PoseStack` da câmera, aplica
-`CameraRenderState.viewRotationMatrix`, bob de dano/visão e FOV HUD, então chama
-`FirstPersonHandsAndItemsRenderer.submitHandsWithItems`. Este último escolhe
-main hand/offhand conforme `HandRenderSelection`, preserva os
-`ItemStackRenderState` resolvidos pelo `ItemModelResolver` e submete braço,
-modelos de item e modelos especiais ao mesmo `SubmitNodeCollector`. Em seguida
-`FeatureRenderDispatcher.prepareFrame` faz o upload do `StagedVertexBuffer` e
-`renderAllFeatures` executa o render pass vanilla chamado `Item in hand`.
+O viewmodel em primeira pessoa deixou de ser um passo raster isolado: a
+submissão vanilla é redirecionada para o mesmo sink das entidades
+(`RtViewmodelCapture` → `RtEntityCollector`) e o braço/item passam a ser
+geometria do TLAS, traçada junto com o mundo.
 
-`FirstPersonHandsAndItemsRendererMixin` registra exatamente a fronteira de
-emissão, e `ViewmodelCapture` observa builders, cópias e `PreparedRenderType.draw`
-dentro da janela de `renderItemInHand`. O snapshot preserva item principal,
-offhand, seleção de mãos, alturas de troca, rotações/bobbing e estado de
-scoping; nenhum atlas, material ou tesselação paralelo é criado. A textura e
-o material continuam sendo os objetos vanilla e o caminho de textura RT,
-quando aplicável, permanece `textureSampling=texel`.
+**Fronteira de captura.** `GameRenderer.renderItemInHand` monta o `PoseStack` com
+`CameraRenderState.viewRotationMatrix`, bob e FOV HUD, e chama
+`FirstPersonHandsAndItemsRenderer.submitHandsWithItems(float,PoseStack,
+SubmitNodeCollector,PlayerRenderState,FirstPersonHandsAndItemsRenderState)`. Um
+`@ModifyArg` nesse `INVOKE` troca o `SubmitNodeCollector` pelo sink de captura e
+um `@Inject` em `RETURN` de `renderItemInHand` fecha a captura depois de qualquer
+flush de features do método. Nada da seleção
+vanilla é reimplementado: `HandRenderSelection`, main/offhand, modelos especiais,
+`ItemQuads`, tint layers e `renderToBuffer` continuam vindo da submissão
+original; só o destino dos vértices muda.
 
-A captura permanece deliberadamente isolada: o RT do mundo é gravado antes do
-passo vanilla `Item in hand`, o viewmodel não é adicionado ao `EntityGeometryManager`,
-não vira entidade/BLAS/TLAS mundial e não é presumido como bloqueador de
-sombras. O resultado mostrado pelos receipts de `ViewmodelCapture` é CPU/
-enqueue/draw vanilla, não um hit GPU; a composição visual final das mãos e
-itens continua sendo feita pelo pass vanilla. Isso evita gerar sombra mundial
-sem uma confirmação de integração do comportamento vanilla, preservando FOV,
-transformações, animações, escala, UV, Color, alpha e texturas especiais.
+**Consumo.** `RtEntities.beginFrame` re-expressa a captura (espaço de visão) em
+eixos mundiais relativos à câmera, aplica o fator lateral de FOV e sobe um BLAS
+transitório com instância própria (`ENTITY_BIT`, máscara `0x02`) e
+`EntityGeom.flags = ENTITY_GEOM_VIEWMODEL`. A instância entra no mesmo TLAS do
+terreno e das entidades, então o nearest-hit **já é** o teste de profundidade:
+um bloco mais próximo que o braço vence o pixel e o braço aparece clipado, sem
+atravessar geometria — nenhum raio de oclusão extra é necessário (um probe com
+`CULL_SECONDARY` esconderia a mão atrás do próprio corpo do jogador, o único
+oclusor que ela deve ignorar). `world.rchit` marca o hit com
+`PAYLOAD_VIEWMODEL`, e `world.rgen` usa esse bit para não aplicar a luz
+analítica do item na própria mão.
+
+**Garantias preservadas.**
+- *Sem sombra*: a instância é invisível a raios secundários (`0x01`), então o
+  corpo do jogador continua sendo o único bloqueador; GI, reflexões e refrações
+  também não veem o braço.
+- *Luz do item*: `CULL_HAND_LIGHT = 0xFC` continua excluindo a instância, e
+  `PAYLOAD_VIEWMODEL` desliga a NEE da luz analítica na superfície da mão, então
+  o item não ilumina a própria chama por dentro nem projeta sombra fantasma.
+- *Materiais*: o caminho de entidade já resolve POM de bloco (`GeometryIndex()==0`,
+  `MATERIAL_OPAQUE`), normais/AO LabPBR, emissão e glint, então itens PBR e itens
+  luminosos funcionam sem um segundo conjunto de materiais.
+- *FOV*: a captura é reescalada lateralmente por
+  `tan(worldFovY/2) / tan(handFovY/2)`. Escalar o mesh em torno da câmera não muda
+  o tamanho na tela (a profundidade acompanha), então o fator lateral reproduz
+  exatamente a projeção do hand FOV. O valor usado é o que
+  `caustica$applyHandFov` realmente passou para a projeção da mão no quadro da
+  captura (`RtViewmodelCapture.setHandFov`), então a modulação de morte/água/lava
+  também coincide. Com `hand.fov-follows-camera` desligado esse valor é o
+  `hudFov` vanilla (70° modulado) e o slider de FOV não altera o viewmodel;
+  ligado, ele segue o slider.
+- *Movimento*: a captura é consumida no quadro seguinte, porque a submissão da mão
+  acontece em `render3dHud`, depois do composite RT (que roda no seam antes da
+  mão). Como ela é re-expressa nos eixos da câmera atual, rotação/translação não
+  atrasam; só a animação própria (bob/swing/troca de item) fica um quadro atrás,
+  com motion vectors medidos nesse mesmo espaço relativo.
+
+**Limitação conhecida.** Como só o raio primário vê o braço, uma superfície
+dielétrica entre a câmera e a mão (vidro encostado no rosto) faz o braço
+desaparecer: a continuação refratada traça com a máscara secundária. O caso é
+raro e resolvê-lo exigiria um bit dedicado de "visível também na continuação
+dielétrica", o que reintroduziria o braço em reflexões/GI.
+
+**Fallback.** Até a primeira captura bem-sucedida — e depois de qualquer falha —
+o sink espelha a submissão no collector vanilla, então a mão nunca desaparece;
+uma exceção desliga o viewmodel RT (logada uma vez) e mantém o pass vanilla.
 
 ### Sombras por ray tracing
 
@@ -234,10 +270,11 @@ locations do raster e locations dos ray payloads não são a mesma interface.
 
 A infraestrutura de partículas agora está isolada em `ParticleCapture` e
 `ParticleGeometryManager`; não há alteração em `ParticleCapture`, `ParticleGeometryManager`
-ou `FallingBlockEntity` nesta etapa. Sombras compartilham o TLAS existente e o
-viewmodel permanece no pass vanilla separado, sem ser entidade ou geometria
-mundial. O gate é `verifyMinecraftAbi`, compilação Java/ShaderC/SPIR-V e
-execução no cliente 26.3. CI valida apenas build, ABI, testes CPU e SPIR-V;
+ou `FallingBlockEntity` nesta etapa. Sombras compartilham o TLAS existente. O
+viewmodel em primeira pessoa é capturado da submissão vanilla e entra no TLAS
+como geometria própria (máscara primária, sem sombra/GI), com a profundidade
+resolvida pelo próprio nearest-hit do TLAS contra o mundo. O gate é `verifyMinecraftAbi`, compilação
+Java/ShaderC/SPIR-V e execução no cliente 26.3. CI valida apenas build, ABI, testes CPU e SPIR-V;
 **CI não equivale a validação visual** de sombras, alpha/OIT, FOV, troca de
 item, animação, offhand, especial, transparência ou hit RT. A validação final
 deve executar no jogo esses cenários, incluindo SOLID/CUTOUT/entidades

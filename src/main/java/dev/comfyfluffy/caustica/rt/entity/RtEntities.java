@@ -92,6 +92,15 @@ public final class RtEntities {
     private static final int MASK_ALL = 0xFF;
     /** Particles are primary-ray-only: visible/lit by the camera path, invisible to shadows/GI/reflections. */
     private static final int PARTICLE_MASK = MASK_PRIMARY;
+    /**
+     * The first-person viewmodel is captured as world-space geometry but stays primary-ray-only, like
+     * particles: it must never cast a shadow, leak into GI/reflections/refractions, or sit inside the
+     * analytic held-item light's shadow ray (the item carries that light). Because it shares the world
+     * TLAS, a nearer block wins the primary camera ray and hides the arm (no clipping through walls).
+     */
+    private static final int VIEWMODEL_MASK = MASK_PRIMARY;
+    /** EntityGeom.flags bit mirrored by world_common.slang's ENTITY_GEOM_VIEWMODEL. */
+    public static final int ENTITY_FLAG_VIEWMODEL = 1;
     public static boolean particlesEnabled() {
         return CausticaConfig.Rt.Entities.PARTICLES_ENABLED.value();
     }
@@ -281,6 +290,8 @@ public final class RtEntities {
     }
 
     private long retainedGeometryBytes;
+    // Previous frame's camera-relative viewmodel positions, for the per-vertex motion delta.
+    private EntityPrev viewmodelPrev;
 
     // Persistent per-entity acceleration structures, keyed by entity id, for refit.
     private final Int2ObjectOpenHashMap<EntityAccel> entityAccels = new Int2ObjectOpenHashMap<>(entityMapCapacity());
@@ -640,6 +651,12 @@ public final class RtEntities {
             try (RtFrameStats.Scope ignored = RtFrameStats.FRAME.stage("entity.particles")) {
                 captureParticles(ctx, build, mc, partial, rbx, rby, rbz, projection, viewRotation);
             }
+            // First-person viewmodel (arm + held item). Captured from vanilla's own hand submission during
+            // the previous frame's render3dHud, so this stage only poses it into this frame's camera and
+            // uploads a transient BLAS — see RtViewmodelCapture.
+            try (RtFrameStats.Scope ignored = RtFrameStats.FRAME.stage("entity.viewmodel")) {
+                captureViewmodel(ctx, build, rbx, rby, rbz, camX, camY, camZ, projection, viewRotation);
+            }
         } catch (RuntimeException | Error t) {
             // A partially recorded frame may already have installed unbuilt BLAS into persistent slots.
             // Quiesce old frames and drop the entity cache before propagating the original failure.
@@ -663,6 +680,85 @@ public final class RtEntities {
         }
         return new FrameEntities(base, build.instances, build.blas, build.geomTableAddr,
                 new FrameUse(build.lists, build.table));
+    }
+
+    /** Vanilla's fixed viewmodel FOV: Camera.calculateHudFov() pins the hand to 70 degrees so the FOV
+     *  slider never changes its size (see GameRendererMixin's caustica$applyHandFov). */
+    private static final float VANILLA_HAND_FOV = 70.0f;
+
+    /**
+     * Upload the first-person viewmodel captured during the previous frame's {@code render3dHud}
+     * ({@link RtViewmodelCapture}) as its own transient BLAS + TLAS instance.
+     *
+     * <p>The mesh is posed into this frame's camera axes and lives in camera-relative world space; the
+     * instance transform is therefore a pure translation to the camera position, which keeps the hit
+     * shader's normal handling exact (identity rotation) while the per-vertex motion delta — measured in
+     * that same camera-relative space — stays valid as the camera turns. The instance mask makes it
+     * primary-camera-only, and {@link #ENTITY_FLAG_VIEWMODEL} tags the geometry-table entry so
+     * {@code world.rchit} can mark viewmodel hits, which raygen uses to skip the held-item light on the
+     * hand itself. Being an ordinary TLAS instance also means a nearer block wins the nearest hit, so the
+     * arm is clipped per pixel instead of poking through world geometry.
+     */
+    private void captureViewmodel(RtContext ctx, FrameBuild build, int rbx, int rby, int rbz,
+                                  double camX, double camY, double camZ,
+                                  Matrix4f projection, Matrix4f viewRotation) {
+        RtViewmodelCapture viewmodel = RtViewmodelCapture.INSTANCE;
+        if (!viewmodel.hasPending()) {
+            // The hand is not being captured (third person, GUI, capture disabled): drop the previous
+            // positions so the first frame after it returns gets camera-only motion instead of a delta
+            // against a stale pose.
+            viewmodelPrev = null;
+            return;
+        }
+        if (build.full()) {
+            // No table room this frame. The pending capture is replaced by the next hand submission, so the
+            // viewmodel simply skips a frame instead of waiting for a stale mesh.
+            return;
+        }
+        RtEntityCapture vmCapture = viewmodel.takePosed(viewmodelLateralScale(projection), viewRotation);
+        if (vmCapture == null || vmCapture.idx.size() < 3) {
+            viewmodelPrev = null;
+            return;
+        }
+        Motion motion = uploadVertexMotion(ctx, build, vmCapture.verts, viewmodelPrev, 0.0f, 0.0f, 0.0f);
+        viewmodelPrev = storeEntityPrev(viewmodelPrev, vmCapture.verts, 0.0f, 0.0f, 0.0f);
+        appendCapture(ctx, build, vmCapture, motion, -1, ENTITY_BIT, VIEWMODEL_MASK,
+                translationTransform((float) (camX - rbx), (float) (camY - rby), (float) (camZ - rbz)),
+                ENTITY_FLAG_VIEWMODEL);
+        build.logicalCount++;
+        RtFrameStats.FRAME.count("viewmodelVertices", vmCapture.verts.size() / 3);
+    }
+
+    /**
+     * Lateral (x/y) scale that makes the captured viewmodel appear at the hand FOV while the world is
+     * traced with the world's own projection.
+     *
+     * <p>Scaling the mesh about the camera origin does not change its on-screen size, so the exact fix is
+     * the axis-aligned factor {@code tan(worldFovY/2) / tan(handFovY/2)}: the projection of the laterally
+     * scaled mesh equals the projection of the original through the hand's projection. The hand FOV is
+     * the one {@code GameRendererMixin.caustica$applyHandFov} actually fed to the hand projection of the
+     * frame this mesh was captured in — vanilla's fixed 70 degrees (plus the death/fluid modulation) when
+     * {@code Rt.Hand.FOV_FOLLOWS_CAMERA} is off, and the FOV slider when it is on. That keeps the
+     * viewmodel's size identical to the vanilla hand in both modes, underwater/lava included.
+     */
+    private static float viewmodelLateralScale(Matrix4f projection) {
+        if (projection == null) {
+            return 1.0f;
+        }
+        float m11 = Math.abs(projection.m11());
+        if (!(m11 > 1.0e-6f) || !Float.isFinite(m11)) {
+            return 1.0f;
+        }
+        float tanWorld = 1.0f / m11; // tan(worldFovY / 2)
+        float handFov = RtViewmodelCapture.INSTANCE.handFov();
+        if (!(handFov > 1.0f)) {
+            handFov = VANILLA_HAND_FOV; // no hand frame observed yet
+        }
+        float tanHand = (float) Math.tan(Math.toRadians(handFov) * 0.5);
+        if (!(tanHand > 1.0e-4f)) {
+            return 1.0f;
+        }
+        return Math.max(0.05f, Math.min(20.0f, tanWorld / tanHand));
     }
 
     /** Associate every resource returned for a successfully enqueued frame with its graphics completion. */
@@ -1585,6 +1681,16 @@ public final class RtEntities {
 
     private void appendCapture(RtContext ctx, FrameBuild build, Motion motion, int entityId, int instanceBit, int mask,
                                float[] instanceTransform) {
+        appendCapture(ctx, build, capture, motion, entityId, instanceBit, mask, instanceTransform, 0);
+    }
+
+    /**
+     * As above, but capturing {@code source} instead of the shared entity buffer and stamping
+     * {@code tableFlags} into the EntityGeom entry. The transient ({@code entityId < 0}) path — particles
+     * and the first-person viewmodel — owns its buffer so ordinary entity capture never sees it.
+     */
+    private void appendCapture(RtContext ctx, FrameBuild build, RtEntityCapture source, Motion motion, int entityId,
+                               int instanceBit, int mask, float[] instanceTransform, int tableFlags) {
         beginBuildIfNeeded(ctx, build);
         if (entityId >= 0) {
             appendPackedEntity(ctx, build, motion, entityId, instanceBit, mask, instanceTransform);
@@ -1592,20 +1698,20 @@ public final class RtEntities {
         }
         int asInput = org.lwjgl.vulkan.KHRAccelerationStructure.VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR;
         int storage = org.lwjgl.vulkan.VK10.VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
-        int vertCount = capture.verts.size() / 3;
-        RtEntityCapture.PackedGeometry packed = capture.packGeometry();
+        int vertCount = source.verts.size() / 3;
+        RtEntityCapture.PackedGeometry packed = source.packGeometry();
         int idxCount = packed.indices().size();
-        EntityGeometryLayout layout = EntityGeometryLayout.create(capture.verts.size(), idxCount,
-                capture.uvList.size(), packed.primitives().size());
+        EntityGeometryLayout layout = EntityGeometryLayout.create(source.verts.size(), idxCount,
+                source.uvList.size(), packed.primitives().size());
         long required = Math.addExact(layout.totalBytes, EntityGeometryLayout.REGION_ALIGNMENT - 1L);
-        RtBuffer geometry = allocBuffer(ctx, required, asInput | storage, true, "particle geometry");
+        RtBuffer geometry = allocBuffer(ctx, required, asInput | storage, true, "transient entity geometry");
         layout = layout.shifted((-geometry.deviceAddress) & (EntityGeometryLayout.REGION_ALIGNMENT - 1L));
-        MemoryUtil.memFloatBuffer(geometry.mapped + layout.positionOffset, capture.verts.size())
-                .put(capture.verts.elements(), 0, capture.verts.size());
+        MemoryUtil.memFloatBuffer(geometry.mapped + layout.positionOffset, source.verts.size())
+                .put(source.verts.elements(), 0, source.verts.size());
         MemoryUtil.memIntBuffer(geometry.mapped + layout.indexOffset, idxCount)
                 .put(packed.indices().elements(), 0, idxCount);
-        MemoryUtil.memFloatBuffer(geometry.mapped + layout.uvOffset, capture.uvList.size())
-                .put(capture.uvList.elements(), 0, capture.uvList.size());
+        MemoryUtil.memFloatBuffer(geometry.mapped + layout.uvOffset, source.uvList.size())
+                .put(source.uvList.elements(), 0, source.uvList.size());
         MemoryUtil.memFloatBuffer(geometry.mapped + layout.primOffset, packed.primitives().size())
                 .put(packed.primitives().elements(), 0, packed.primitives().size());
         geometry.flush(layout.positionOffset, layout.totalBytes - layout.positionOffset);
@@ -1616,12 +1722,12 @@ public final class RtEntities {
         long primAddr = Math.addExact(geometry.deviceAddress, layout.primOffset);
 
         RtAccel.PreparedBlas blas = RtAccel.prepareEntityBlas(ctx, positionAddr, vertCount, indexAddr, packed.bucketTris(),
-                "particle BLAS");
+                "transient entity BLAS");
         build.blas.add(blas);
         build.pooledBlas.add(blas);
 
         writeTableEntry(build, primAddr, indexAddr, uvAddr, motion.dispAddr,
-                motion.rigidX, motion.rigidY, motion.rigidZ, packed.bucketTris());
+                motion.rigidX, motion.rigidY, motion.rigidZ, packed.bucketTris(), tableFlags);
 
         build.instances.add(new RtAccel.Instance(instanceTransform, blas.accel.deviceAddress,
                 instanceBit | (build.count & 0x3FFFFF), mask, RtAccel.SBT_ENTITY_OFFSET));
@@ -1763,6 +1869,12 @@ public final class RtEntities {
     /** Write one std430 EntityGeom entry, including bases for the two packed BLAS geometries. */
     private void writeTableEntry(FrameBuild build, long primAddr, long idxAddr, long uvAddr, long dispAddr,
                                  float rigidX, float rigidY, float rigidZ, int[] bucketTris) {
+        writeTableEntry(build, primAddr, idxAddr, uvAddr, dispAddr, rigidX, rigidY, rigidZ, bucketTris, 0);
+    }
+
+    /** As above; {@code flags} lands in EntityGeom.flags (+56), which world.rchit reads. */
+    private void writeTableEntry(FrameBuild build, long primAddr, long idxAddr, long uvAddr, long dispAddr,
+                                 float rigidX, float rigidY, float rigidZ, int[] bucketTris, int flags) {
         if (bucketTris == null || bucketTris.length != RtAccel.ENTITY_BUCKETS) {
             throw new IllegalArgumentException("Missing entity BLAS bucket counts");
         }
@@ -1777,7 +1889,7 @@ public final class RtEntities {
         MemoryUtil.memPutFloat(entry + 44, 0f);
         MemoryUtil.memPutInt(entry + 48, 0);
         MemoryUtil.memPutInt(entry + 52, bucketTris[RtAccel.ENTITY_BUCKET_OPAQUE]);
-        MemoryUtil.memPutInt(entry + 56, 0);
+        MemoryUtil.memPutInt(entry + 56, flags);
         MemoryUtil.memPutInt(entry + 60, 0);
     }
 
@@ -2007,6 +2119,7 @@ public final class RtEntities {
     /** Drop CPU templates that retain resource-pack-owned model trees. */
     public void onResourceReload() {
         collector.clearCaches();
+        RtViewmodelCapture.INSTANCE.onResourceReload();
     }
 
     /** Free the geometry-table ring and entity resources (teardown; caller has idled the device). */
@@ -2047,6 +2160,8 @@ public final class RtEntities {
         beCandidates.clear();
         beCandidatePool.clear();
         retainedGeometryBytes = 0L;
+        viewmodelPrev = null;
         collector.clearCaches();
+        RtViewmodelCapture.INSTANCE.clear();
     }
 }

@@ -319,7 +319,7 @@ public struct Payload {
     public float  hitT;        // >= 0 on hit, < 0 on miss.
     public half3  motionPrev;  // per-vertex world displacement since last frame.
     public half3  f0;          // specular F0.
-    public uint  flags;       // bits 0..1 material, bit 2 celestial, bit 3 water-entering, bits 4..6 emission source, bit 7 emitter-in-list, bit 8 dynamic entity, bit 9 weather, bit 10 end-portal unlit.
+    public uint  flags;       // bits 0..1 material, bit 2 celestial, bit 3 water-entering, bits 4..6 emission source, bit 7 emitter-in-list, bit 8 dynamic entity, bit 9 weather, bit 10 end-portal unlit, bit 11 first-person viewmodel.
     public uint   roughMetal;  // packHalf2x16(roughness, metalness)
     public uint   emissionSss; // packHalf2x16(emission, sss)
     public uint   iorTransmission; // packHalf2x16(IOR, transmission factor)
@@ -342,6 +342,14 @@ public static const uint PAYLOAD_EMITTER_IN_LIST = 128u;
 // Set by world.rchit for dynamic entity/block-entity/item geometry, letting raygen apply the dynamic
 // light scale to direct-hit emission while terrain uses the block-emissive scale.
 public static const uint PAYLOAD_DYNAMIC_ENTITY = 256u;
+// Set by world.rchit when the hit is the first-person viewmodel (arm + held item), tagged through the
+// EntityGeom.flags lane (ENTITY_GEOM_VIEWMODEL). The viewmodel is ordinary world-space geometry so it
+// can be path traced, but it must never be treated as world content: it is only visible to the primary
+// camera ray (instance mask 0x02, so shadows/GI/reflections/refractions never see it), and because it
+// shares the world TLAS a nearer block wins the nearest hit and hides the arm instead of letting it
+// poke through walls. Raygen uses this bit only to skip the analytic held-item light on the hand's own
+// surface — the light lives inside the item's flame geometry.
+public static const uint PAYLOAD_VIEWMODEL = 2048u;
 // Set by world.rchit on any dielectric hit (water or glass/ice): true when the incoming ray travels
 // against the prim's outward face normal (entering the volume), false when it exits. Derived from face
 // orientation rather than toggled, so a stray or missing face cannot corrupt the medium for the rest of
@@ -460,8 +468,14 @@ public struct EntityGeom {
     public uint64_t dispAddr;
     public float4 rigidDisp;
     public uint triBase[2];
-    public uint2 reserved;
+    // ENTITY_GEOM_VIEWMODEL when this entry is the first-person viewmodel (see RtViewmodelCapture).
+    public uint flags;
+    public uint reserved;
 };
+
+// EntityGeom.flags bit: this entry's geometry is the first-person viewmodel. world.rchit turns it into
+// PAYLOAD_VIEWMODEL, which raygen uses to keep the arm out of its own carried held-item light.
+public static const uint ENTITY_GEOM_VIEWMODEL = 1u;
 
 // TLAS instance-custom-index encoding + terrain geometry buckets (shared by rahit/rchit).
 public static const uint ENTITY_BIT = 0x800000u;

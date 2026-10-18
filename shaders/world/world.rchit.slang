@@ -21,7 +21,11 @@ import portals;
 
 void payloadSetPacked(inout Payload payload, uint material, float roughness, float metalness,
         float emission, float sss, float ior, float transmission, uint emissionSource) {
-    payload.flags = material | (emissionSource << PAYLOAD_EMISSION_SOURCE_SHIFT);
+    // PAYLOAD_VIEWMODEL is a per-hit classification, not a material lane: every hit branch below calls
+    // this helper after stamping it, so it must survive the rewrite. All other flags keep the original
+    // overwrite semantics.
+    payload.flags = (payload.flags & PAYLOAD_VIEWMODEL)
+            | material | (emissionSource << PAYLOAD_EMISSION_SOURCE_SHIFT);
     payload.roughMetal = packHalf2(float2(roughness, metalness));
     payload.emissionSss = packHalf2(float2(emission, sss));
     payload.iorTransmission = packHalf2(float2(ior, transmission));
@@ -627,6 +631,12 @@ void main(inout Payload payload, in BuiltInTriangleIntersectionAttributes attr) 
     if ((InstanceID() & ENTITY_BIT) != 0u) {
         uint eidx = InstanceID() & ~ENTITY_BIT;
         EntityGeom g = ConstPtr<EntityGeom>(pc.entityTableAddr)[eidx];
+        // First-person viewmodel (captured by RtViewmodelCapture): ordinary entity geometry for every
+        // texture/material path, tagged so raygen can skip the held-item light on the hand itself.
+        // payloadSetPacked preserves this bit across every return path below.
+        if ((g.flags & ENTITY_GEOM_VIEWMODEL) != 0u) {
+            payload.flags |= PAYLOAD_VIEWMODEL;
+        }
         uint pid = PrimitiveIndex() + g.triBase[GeometryIndex()];
         Prim pr = ConstPtr<Prim>(g.primAddr)[pid];
         // Rigid-reuse instances (still / spinning entities re-referencing a cached BLAS) carry a real

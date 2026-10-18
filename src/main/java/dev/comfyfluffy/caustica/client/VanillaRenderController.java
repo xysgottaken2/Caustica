@@ -13,6 +13,7 @@ public final class VanillaRenderController {
 	private boolean baseReady;
 	private boolean projectionCaptured;
 	private boolean worldSkipped;
+	private boolean rtRenderedThisFrame;
 	private boolean failureLatched;
 	private boolean loggedActive;
 	private boolean loggedWaitingForRtPlayerSection;
@@ -29,6 +30,7 @@ public final class VanillaRenderController {
 		this.frameStarted = true;
 		this.projectionCaptured = false;
 		this.worldSkipped = false;
+		this.rtRenderedThisFrame = false;
 		this.baseReady = false;
 		this.inactiveReason = null;
 		this.rtActive = RtComposite.enabled();
@@ -103,12 +105,22 @@ public final class VanillaRenderController {
 		return this.rtActive;
 	}
 
+	/**
+	 * Whether this frame's RT composite produced the world image. The viewmodel is captured from the
+	 * hand submission that runs right after that composite, and is only ray traced when the RT world
+	 * actually replaced the vanilla one — otherwise the vanilla hand must keep drawing.
+	 */
+	public boolean shouldRenderRtViewmodel() {
+		return this.rtActive && this.baseReady && this.rtRenderedThisFrame;
+	}
+
 	/** Runtime work switch for per-frame RT work; mirrors {@link RtComposite#enabled()}. */
 	public static boolean rtRuntimeWorkRequested() {
 		return RtComposite.enabled();
 	}
 
 	public void markRtCompositeResult(boolean success) {
+		this.rtRenderedThisFrame = success;
 		if (this.worldSkipped && !success) {
 			latchFailure("RT composite did not produce a replacement frame");
 		}

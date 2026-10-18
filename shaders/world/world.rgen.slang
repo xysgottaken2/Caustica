@@ -171,6 +171,9 @@ public float3 tracePath(PathSegment seg, uint2 pix, uint sampleIndex,
                       showCelestial, rayConeWidth, rayConeSpread);
 #endif
 
+        // The viewmodel is ordinary TLAS geometry, so nearest-hit already hides the arm behind a block:
+        // no extra depth-test ray is needed (see RtViewmodelCapture).
+
         // First-bounce hit distance capture: the trace we just ran is the continuation hop whose
         // distance REBLUR wants for the lobe that spawned it. A miss leaves the distance at 0 —
         // REBLUR's "no data" value, which it treats as a skipped lobe rather than zero distance.
@@ -505,6 +508,9 @@ public float3 tracePath(PathSegment seg, uint2 pix, uint sampleIndex,
         float3 surfaceLightBaseline = L;
         // Boat interior fix: detect dynamic entity (boat, minecart) early for two-sided lighting
         bool isDynamicEntityEarly = payloadDynamicEntity();
+        // First-person viewmodel: shaded exactly like entity geometry, except that it must not NEE its
+        // own carried light (the analytic held-item light sits inside the item's own flame geometry).
+        bool isViewmodelEarly = payloadViewmodel();
         // LabPBR SSS strength (0 when the material has none, or when the player turned SSS off:
         // payloadActiveSss returns a hard zero in that case, so every SSS term below — the RIS back
         // lobe and the explicit transmission pass — collapses without needing its own check).
@@ -705,7 +711,9 @@ public float3 tracePath(PathSegment seg, uint2 pix, uint sampleIndex,
         // a torch in hand would barely brighten the blocks in front of it. Lambertian only; the
         // flame itself still gathers as ordinary emissive geometry on direct hit. Two-sided for
         // dynamic entities, mirroring the celestial NDL convention above.
-        float3 handIrr = handLightIrradiance(p, hitPos, n, isDynamicEntityEarly);
+        float3 handIrr = isViewmodelEarly
+                ? float3(0.0, 0.0, 0.0)
+                : handLightIrradiance(p, hitPos, n, isDynamicEntityEarly);
         if (max(handIrr.x, max(handIrr.y, handIrr.z)) > 0.0) {
             float3 handNee = throughput * diffAlb * INV_PI * handIrr;
             L += handNee;

@@ -42,6 +42,9 @@ public PathSegment tracePrimary(PathSegment seg,
         PathSegment terminal = makePathSegment(ro, rd, throughput, medium,
                                                rayConeWidth, rayConeSpread, seed, bounce,
                                                showCelestial);
+        // The first-person viewmodel is a TLAS instance like any other entity, so the nearest hit below
+        // is already the world's answer: a wall closer than the arm wins on every pixel, and pass A's
+        // guides describe exactly the surface pass B shades.
         traceRadiance(CULL_PRIMARY, ro, 0.0, rd, 10000.0,
                       showCelestial, rayConeWidth, rayConeSpread);
 
