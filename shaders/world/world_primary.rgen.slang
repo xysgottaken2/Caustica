@@ -141,14 +141,20 @@ public PathSegment tracePrimary(PathSegment seg,
                 } else {
                     mediumPop(guideMedium);
                 }
-                // Seed the guide filter with the transmittance of the camera prefix: the same
-                // exp(-sigma*t) this function applied to the split throughputs above for the
-                // camera->interface hop (non-zero when the eye is submerged). The walk then
-                // accumulates every refracted segment on top of it, so the transmitted guide's
-                // albedo ends up carrying the exact attenuation the colour it explains carries —
-                // see resolveTransmissionGuide. The glass entry tint is NOT seeded here anymore;
-                // the medium stack carries it as extinction and the walk applies it physically.
-                float3 guideFilter = max(exp(-min(medium.current.extinction * payload.hitT,
+                // Seed the guide with every deterministic factor already applied to the transmitted
+                // branch: Fresnel transmission (1-F) and camera-prefix Beer-Lambert attenuation.
+                // Omitting (1-F) made the diffuse guide claim a fully visible refracted background at
+                // grazing water pixels even though radiance there is almost entirely reflection. RR
+                // then reconstructed that false background across a waterfall's silhouette, producing
+                // the characteristic bright, temporally unstable "boiling" halo. F is already present
+                // in the specular-albedo guide, so carrying its complement here gives RR an
+                // energy-consistent lobe decomposition. Clamp after both factors to retain the FP16 /
+                // demodulation safety floor.
+                //
+                // The walk accumulates every later refracted segment on top. Glass entry tint is not
+                // multiplied here: the medium stack carries it as extinction and applies it physically.
+                float3 guideFilter = max((1.0 - F) * exp(-min(
+                        medium.current.extinction * payload.hitT,
                         float3(32.0, 32.0, 32.0))), float3(GUIDE_TRANSMITTANCE_MIN));
                 float3 guideDir = normalize(transmittedDir);
                 float3 guideOrigin = isWater && waterWaves

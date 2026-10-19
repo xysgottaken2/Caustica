@@ -28,6 +28,8 @@ final class RtDenoiserShaderRegressionTest {
     private static final Path REPO_ROOT = repoRoot();
     private static final Path WORLD_CORE = REPO_ROOT.resolve("shaders/world/world_core.slang");
     private static final Path WORLD_RGEN = REPO_ROOT.resolve("shaders/world/world.rgen.slang");
+    private static final Path WORLD_PRIMARY = REPO_ROOT.resolve("shaders/world/world_primary.rgen.slang");
+    private static final Path GUIDES = REPO_ROOT.resolve("shaders/world/guides.slang");
     private static final Path NRD_COMBINE = REPO_ROOT.resolve("shaders/display/nrd_combine.comp");
     private static final Path SVGF_REPROJECT = REPO_ROOT.resolve("shaders/display/svgf_reproject.comp");
     private static final Path SVGF_ATROUS = REPO_ROOT.resolve("shaders/display/svgf_atrous.comp");
@@ -70,6 +72,33 @@ final class RtDenoiserShaderRegressionTest {
                 "the combine pass must multiply the material factors back after denoising");
         assertTrue(combine.contains("void nrdMaterialFactors("),
                 "the combine pass must mirror nrdMaterialFactors rather than approximating it");
+    }
+
+    /**
+     * A primary dielectric is split deterministically into reflection and transmission. The RR
+     * specular guide already carries Fresnel F, so the diffuse/transmission guide must carry 1-F.
+     * Without it, grazing water (especially a vertical waterfall silhouette) advertises a bright
+     * refracted background that contributes almost no radiance; RR reconstructs that contradiction
+     * as a temporally unstable halo.
+     */
+    @Test
+    void rrTransmissionGuideCarriesTheComplementOfFresnelReflection() throws IOException {
+        String primary = Files.readString(WORLD_PRIMARY);
+        String guides = Files.readString(GUIDES);
+
+        assertTrue(primary.contains("max((1.0 - F) * exp(-min("),
+                "the transmitted diffuse guide must carry the same (1-F) as its radiance branch");
+        assertTrue(primary.contains("throughput * (1.0 - F)"),
+                "the regression check requires a deterministically Fresnel-split radiance branch");
+        assertTrue(primary.contains("gv_rough, float3(F, F, F)"),
+                "the reflected lobe must continue to carry F in the specular guide");
+        assertTrue(guides.contains("Fresnel transmission (1-F)"),
+                "the cross-file guide contract must document its incoming Fresnel factor");
+
+        for (double fresnel : new double[] {0.02, 0.25, 0.75, 0.98}) {
+            assertEquals(1.0, fresnel + (1.0 - fresnel), 1.0e-12,
+                    "reflection and transmission guide weights must conserve interface energy");
+        }
     }
 
     /**

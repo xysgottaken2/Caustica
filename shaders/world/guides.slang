@@ -159,11 +159,12 @@ public static const float GUIDE_TRANSMITTANCE_MIN = 1.0e-3;
 // Deterministic ordinary guide behind the first transmitted interface. This is guide-only work:
 // radiance reflection/transmission continuations are queued at the first split and traced by Pass B.
 //
-// `guideFilter` arrives as the transmittance of the camera prefix (Pass A applied the same factor to
-// the split throughputs) and leaves as the transmittance of the ENTIRE refracted walk: every segment
-// multiplies in the Beer–Lambert attenuation of the medium it travelled through, exactly the factor
-// Pass B applies to the real transmitted branch over the same deterministic hops. Folding it into the
-// endpoint albedo is what keeps the denoiser's contract honest for translucent pixels:
+// `guideFilter` arrives with the deterministic factors Pass A applied to the transmitted split:
+// Fresnel transmission (1-F) and camera-prefix Beer–Lambert attenuation. It leaves with the
+// transmittance of the ENTIRE refracted walk: every segment multiplies in the Beer–Lambert attenuation
+// of the medium it travelled through, exactly the factor Pass B applies to the real transmitted branch
+// over the same deterministic hops. Folding it into the endpoint albedo is what keeps the denoiser's
+// contract honest for translucent pixels:
 //
 //     colour_diffuse ≈ gAlbedo · destinationIrradiance
 //
