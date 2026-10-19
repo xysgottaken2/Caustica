@@ -18,8 +18,10 @@ import org.joml.Matrix4f;
  * models, special models and every material resolution (block atlas POM, LabPBR items, emissive sprites)
  * travel through the same capture code as entities. {@link RtEntities} then uploads that mesh as a
  * transient BLAS with its own TLAS instance, and the record is tagged so {@code world.rchit} can mark
- * viewmodel hits. Because it is a normal TLAS instance, a nearer block already wins the nearest hit —
- * the arm is depth-tested against the world per pixel instead of clipping through it.
+ * viewmodel hits. Because it is a normal TLAS instance, a nearer block wins the nearest hit. That alone
+ * would only <em>cut</em> the arm at the wall, though, and a cut arm still reads as the hand being stuck
+ * inside the block, so the consuming frame also pulls the mesh toward the eye until it fits in front of
+ * the nearest block (see {@link #scaleUniform} and {@code RtEntities.viewmodelPullIn}).
  *
  * <p><b>Why one frame of latency.</b> The capture has to run where vanilla submits the hand, which is
  * {@code render3dHud} — <em>after</em> this frame's RT composite (the composite runs at the before-hand
@@ -270,6 +272,42 @@ public final class RtViewmodelCapture {
             prim[base] = wx;
             prim[base + 1] = wy;
             prim[base + 2] = wz;
+        }
+    }
+
+    /**
+     * Fraction of the captured depth that keeps a ray of length {@code rayLength} in front of the block it
+     * hit, leaving {@code margin} blocks of clearance. Returns 1 when nothing is in the way.
+     *
+     * <p>Package-private and pure so the clearance rule can be unit-tested: the value feeds
+     * {@link #scaleUniform}, which is what keeps the arm out of blocks.
+     */
+    static float pullInRatio(float hitDistance, float rayLength, float margin, float minPullIn) {
+        if (!(rayLength > 1.0e-4f) || !Float.isFinite(hitDistance) || !Float.isFinite(rayLength)) {
+            return 1.0f;
+        }
+        float ratio = (hitDistance - margin) / rayLength;
+        if (!(ratio < 1.0f)) {
+            return 1.0f;
+        }
+        return Math.max(minPullIn, ratio);
+    }
+
+    /**
+     * Uniformly scale camera-relative positions toward the eye, in place. Uniform scaling about the
+     * camera is projection-exact — a perspective divide makes {@code (k·x)/(k·z) == x/z} — so the
+     * viewmodel keeps its exact on-screen size and position while every vertex moves closer to the eye.
+     * That is what lets the arm fit in front of a nearby block instead of being cut by it.
+     *
+     * <p>Only the {@code vertexFloats} position floats are touched — normals and tangents are derived
+     * from the geometry, not stored here. Only pulls in; {@code k >= 1} is a no-op.
+     */
+    static void scaleUniform(float[] verts, int vertexFloats, float k) {
+        if (!(k > 0.0f) || !(k < 1.0f) || !Float.isFinite(k)) {
+            return;
+        }
+        for (int i = 0; i < vertexFloats; i++) {
+            verts[i] *= k;
         }
     }
 

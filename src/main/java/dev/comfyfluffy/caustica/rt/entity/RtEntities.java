@@ -2,6 +2,7 @@ package dev.comfyfluffy.caustica.rt.entity;
 
 import com.mojang.blaze3d.vertex.PoseStack;
 import dev.comfyfluffy.caustica.CausticaConfig;
+import dev.comfyfluffy.caustica.CausticaMod;
 import dev.comfyfluffy.caustica.mixin.ParticleEngineAccessor;
 import dev.comfyfluffy.caustica.mixin.ParticleGroupAccessor;
 import net.minecraft.client.Camera;
@@ -655,7 +656,7 @@ public final class RtEntities {
             // the previous frame's render3dHud, so this stage only poses it into this frame's camera and
             // uploads a transient BLAS — see RtViewmodelCapture.
             try (RtFrameStats.Scope ignored = RtFrameStats.FRAME.stage("entity.viewmodel")) {
-                captureViewmodel(ctx, build, rbx, rby, rbz, camX, camY, camZ, projection, viewRotation);
+                captureViewmodel(ctx, build, level, rbx, rby, rbz, camX, camY, camZ, projection, viewRotation);
             }
         } catch (RuntimeException | Error t) {
             // A partially recorded frame may already have installed unbuilt BLAS into persistent slots.
@@ -700,10 +701,12 @@ public final class RtEntities {
      * makes it
      * primary-camera-only, and {@link #ENTITY_FLAG_VIEWMODEL} tags the geometry-table entry so
      * {@code world.rchit} can mark viewmodel hits, which raygen uses to skip the held-item light on the
-     * hand itself. Being an ordinary TLAS instance also means a nearer block wins the nearest hit, so the
-     * arm is clipped per pixel instead of poking through world geometry.
+     * hand itself. Being an ordinary TLAS instance also means a nearer block wins the nearest hit — and
+     * {@link #viewmodelPullIn} then pulls the whole mesh in front of that block, so the arm is neither
+     * occluded by walls nor embedded in them.
      */
-    private void captureViewmodel(RtContext ctx, FrameBuild build, int rbx, int rby, int rbz,
+    private void captureViewmodel(RtContext ctx, FrameBuild build, ClientLevel level,
+                                  int rbx, int rby, int rbz,
                                   double camX, double camY, double camZ,
                                   Matrix4f projection, Matrix4f viewRotation) {
         RtViewmodelCapture viewmodel = RtViewmodelCapture.INSTANCE;
@@ -724,6 +727,16 @@ public final class RtEntities {
             viewmodelPrev = null;
             return;
         }
+        // Keep the whole arm in front of the nearest block. Per-pixel depth testing alone only cuts the
+        // arm where the block surface crosses it, which still reads as the hand being inside the wall;
+        // pulling the mesh toward the eye is projection-exact (uniform scale about the camera leaves the
+        // on-screen image unchanged) and makes the intersection impossible instead of merely hidden.
+        float pullIn = viewmodelPullIn(level, vmCapture, camX, camY, camZ);
+        if (pullIn < 1.0f && !reportedViewmodelPullIn) {
+            reportedViewmodelPullIn = true;
+            CausticaMod.LOGGER.info("Viewmodel pulled in to {} of its distance to stay clear of a block", pullIn);
+        }
+        RtViewmodelCapture.scaleUniform(vmCapture.verts.elements(), vmCapture.verts.size(), pullIn);
         Motion motion = uploadVertexMotion(ctx, build, vmCapture.verts, viewmodelPrev, 0.0f, 0.0f, 0.0f);
         viewmodelPrev = storeEntityPrev(viewmodelPrev, vmCapture.verts, 0.0f, 0.0f, 0.0f);
         appendCapture(ctx, build, vmCapture, motion, -1, ENTITY_BIT, VIEWMODEL_MASK,
@@ -731,6 +744,91 @@ public final class RtEntities {
                 ENTITY_FLAG_VIEWMODEL);
         build.logicalCount++;
         RtFrameStats.FRAME.count("viewmodelVertices", vmCapture.verts.size() / 3);
+    }
+
+    /** Clearance kept between the arm and a block surface it would otherwise touch (blocks). */
+    private static final float VIEWMODEL_CLEARANCE_MARGIN = 0.02f;
+    /** Never shrink the arm past this fraction of its distance: below it the arm sits inside the near field. */
+    private static final float VIEWMODEL_MIN_PULL_IN = 0.1f;
+
+    /** One-shot diagnostic: proves from the log that the clearance pull-in engaged. */
+    private boolean reportedViewmodelPullIn;
+
+    /**
+     * How much to pull the viewmodel toward the eye so it fits in front of nearby blocks, as a uniform
+     * scale about the camera (1 = untouched).
+     *
+     * <p>The posed mesh is a tight cluster of vertices around {@code (0.56, -0.52, -0.72)} camera-relative,
+     * so its axis-aligned box is a good bound for where the arm is. Probes the box corners, the six face
+     * centres and the centre — the directions that outline the arm's angular footprint as seen from the
+     * eye — and keeps the tightest ratio of "block hit distance" to the <em>farthest corner</em> of the
+     * box. Uniform scaling about the eye preserves every probe direction, so after the scale no point of
+     * the box is farther from the eye than the hit distance that produced it, whichever direction it
+     * lies in.
+     *
+     * <p>{@link ClipContext.Block#COLLIDER} is used deliberately: collision shapes cover solid blocks,
+     * fences, panes, slabs and stairs — what a player calls a block — while grass, flowers, torches and
+     * the like have no collision box. Using VISUAL would pull the arm in every time the player walked
+     * through a flower, which is a far more visible artefact than the arm grazing a sprite.
+     */
+    private float viewmodelPullIn(ClientLevel level, RtEntityCapture capture,
+                                  double camX, double camY, double camZ) {
+        float[] v = capture.verts.elements();
+        int count = capture.verts.size();
+        if (level == null || count < 3) {
+            return 1.0f;
+        }
+        float minX = Float.MAX_VALUE, minY = Float.MAX_VALUE, minZ = Float.MAX_VALUE;
+        float maxX = -Float.MAX_VALUE, maxY = -Float.MAX_VALUE, maxZ = -Float.MAX_VALUE;
+        for (int i = 0; i + 2 < count; i += 3) {
+            float x = v[i], y = v[i + 1], z = v[i + 2];
+            if (x < minX) minX = x;
+            if (y < minY) minY = y;
+            if (z < minZ) minZ = z;
+            if (x > maxX) maxX = x;
+            if (y > maxY) maxY = y;
+            if (z > maxZ) maxZ = z;
+        }
+        float[] xs = {(minX + maxX) * 0.5f, minX, maxX};
+        float[] ys = {(minY + maxY) * 0.5f, minY, maxY};
+        float[] zs = {(minZ + maxZ) * 0.5f, minZ, maxZ};
+        // Farthest vertex from the eye: the scale has to keep the WHOLE box in front, so every hit
+        // distance is compared against this, not against the distance of the probe that found the block.
+        float maxLength = 0.0f;
+        for (int corner = 0; corner < 8; corner++) {
+            float cx = (corner & 1) == 0 ? minX : maxX;
+            float cy = (corner & 2) == 0 ? minY : maxY;
+            float cz = (corner & 4) == 0 ? minZ : maxZ;
+            maxLength = Math.max(maxLength, (float) Math.sqrt(cx * cx + cy * cy + cz * cz));
+        }
+        if (!(maxLength > 1.0e-4f)) {
+            return 1.0f;
+        }
+        // Vec3 is immutable in 26.3 (final x/y/z, no set()), so the eye point is built once and reused by
+        // every probe below.
+        Vec3 eye = new Vec3(camX, camY, camZ);
+        float pullIn = 1.0f;
+        // 3x3x3 lattice, minus the twelve edge midpoints and the four "two midpoints" points: that leaves
+        // the 8 corners, the 6 face centres and the centre — 15 probes for 27 lattice points.
+        for (int ix = 0; ix < 3; ix++) {
+            for (int iy = 0; iy < 3; iy++) {
+                for (int iz = 0; iz < 3; iz++) {
+                    if ((ix == 1 ? 1 : 0) + (iy == 1 ? 1 : 0) + (iz == 1 ? 1 : 0) > 1) {
+                        continue;
+                    }
+                    HitResult hit = level.clip(new ClipContext(eye,
+                            new Vec3(camX + xs[ix], camY + ys[iy], camZ + zs[iz]),
+                            ClipContext.Block.COLLIDER, ClipContext.Fluid.NONE, CollisionContext.empty()));
+                    if (hit.getType() == HitResult.Type.MISS) {
+                        continue;
+                    }
+                    float distance = (float) hit.getLocation().distanceTo(eye);
+                    pullIn = Math.min(pullIn, RtViewmodelCapture.pullInRatio(distance, maxLength,
+                            VIEWMODEL_CLEARANCE_MARGIN, VIEWMODEL_MIN_PULL_IN));
+                }
+            }
+        }
+        return pullIn;
     }
 
     /**

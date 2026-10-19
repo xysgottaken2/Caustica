@@ -166,12 +166,26 @@ eixos do mundo. `RtEntities.beginFrame` sobe então um BLAS transitório com
 instância própria (`ENTITY_BIT`, máscara `0x02`) e
 `EntityGeom.flags = ENTITY_GEOM_VIEWMODEL`. A instância entra no mesmo TLAS do
 terreno e das entidades, então o nearest-hit **já é** o teste de profundidade:
-um bloco mais próximo que o braço vence o pixel e o braço aparece clipado, sem
-atravessar geometria — nenhum raio de oclusão extra é necessário (um probe com
-`CULL_SECONDARY` esconderia a mão atrás do próprio corpo do jogador, o único
-oclusor que ela deve ignorar). `world.rchit` marca o hit com
+um bloco mais próximo que o braço vence o pixel, sem raio de oclusão extra (um
+probe com `CULL_SECONDARY` esconderia a mão atrás do próprio corpo do jogador, o
+único oclusor que ela deve ignorar). `world.rchit` marca o hit com
 `PAYLOAD_VIEWMODEL`, e `world.rgen` usa esse bit para não aplicar a luz
 analítica do item na própria mão.
+
+**Folga contra blocos.** O nearest-hit sozinho *corta* o braço no plano da
+parede quando o jogador encosta nela — o braço tem ~0,5–1,0 bloco de
+profundidade, a parede fica a ~0,3, e o resultado lê como "a mão entrou no
+bloco". `RtEntities.viewmodelPullIn` mede, a cada quadro, a distância do olho
+até o bloco mais próximo ao longo dos 15 pontos que delimitam a caixa do braço
+já posado (8 cantos, 6 centros de face e o centro) com
+`ClipContext.Block.COLLIDER` — formas de colisão, ou seja, blocos macios
+(grama, flor, tocha) não encolhem a mão —, e aplica
+`RtViewmodelCapture.scaleUniform`: uma escala **uniforme em torno da câmera**
+que deixa o vértice mais distante a `hit − 0,02` do bloco. Escala uniforme é
+projeção-exata — o divide perspectiva preserva `(kx)/(kz) = x/z` — então a mão
+não muda de tamanho nem de posição na tela: só deixa de existir dentro do
+bloco. O mínimo é 10% (não colapsa no olho) e o resultado entra no cálculo de
+motion vectors porque é aplicado antes de `uploadVertexMotion`/`storeEntityPrev`.
 
 **Garantias preservadas.**
 - *Sem sombra*: a instância é invisível a raios secundários (`0x01`), então o
@@ -281,7 +295,8 @@ A infraestrutura de partículas agora está isolada em `ParticleCapture` e
 ou `FallingBlockEntity` nesta etapa. Sombras compartilham o TLAS existente. O
 viewmodel em primeira pessoa é capturado da submissão vanilla e entra no TLAS
 como geometria própria (máscara primária, sem sombra/GI), com a profundidade
-resolvida pelo próprio nearest-hit do TLAS contra o mundo. O gate é `verifyMinecraftAbi`, compilação
+resolvida pelo próprio nearest-hit do TLAS contra o mundo e com folga
+geométrica contra o bloco mais próximo (ver *Folga contra blocos* acima). O gate é `verifyMinecraftAbi`, compilação
 Java/ShaderC/SPIR-V e execução no cliente 26.3. CI valida apenas build, ABI, testes CPU e SPIR-V;
 **CI não equivale a validação visual** de sombras, alpha/OIT, FOV, troca de
 item, animação, offhand, especial, transparência ou hit RT. A validação final
