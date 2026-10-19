@@ -24,8 +24,11 @@ import net.minecraft.core.BlockPos;
 import net.minecraft.network.chat.Component;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.level.ClipContext;
+import net.minecraft.util.Mth;
 import net.minecraft.world.level.block.entity.BlockEntity;
+import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.chunk.LevelChunk;
+import net.minecraft.world.phys.AABB;
 import net.minecraft.world.phys.HitResult;
 import net.minecraft.world.phys.Vec3;
 import net.minecraft.world.phys.shapes.CollisionContext;
@@ -755,21 +758,19 @@ public final class RtEntities {
     private boolean reportedViewmodelPullIn;
 
     /**
-     * How much to pull the viewmodel toward the eye so it fits in front of nearby blocks, as a uniform
-     * scale about the camera (1 = untouched).
+     * Uniform scale about the camera that keeps the whole captured viewmodel in front of every block.
      *
-     * <p>The posed mesh is a tight cluster of vertices around {@code (0.56, -0.52, -0.72)} camera-relative,
-     * so its axis-aligned box is a good bound for where the arm is. Probes the box corners, the six face
-     * centres and the centre — the directions that outline the arm's angular footprint as seen from the
-     * eye — and keeps the tightest ratio of "block hit distance" to the <em>farthest corner</em> of the
-     * box. Uniform scaling about the eye preserves every probe direction, so after the scale no point of
-     * the box is farther from the eye than the hit distance that produced it, whichever direction it
-     * lies in.
+     * <p>Walked block by block rather than sampled with rays. Scaling the posed mesh's axis-aligned box
+     * by {@code k} about the eye makes "the box touches this block" an <em>interval</em> of k — every
+     * constraint is linear in k, so the boundaries are just quotients — and the largest k that stays
+     * outside it can be computed exactly. Ray probes cannot promise that: a block corner can sit between
+     * two probe directions and poke through the arm at some camera angles, which is exactly what happens
+     * when the arm is merely "mostly" in front of the wall.
      *
-     * <p>{@link ClipContext.Block#COLLIDER} is used deliberately: collision shapes cover solid blocks,
-     * fences, panes, slabs and stairs — what a player calls a block — while grass, flowers, torches and
-     * the like have no collision box. Using VISUAL would pull the arm in every time the player walked
-     * through a flower, which is a far more visible artefact than the arm grazing a sprite.
+     * <p>The block boxes come from the collision shape bounds and are inflated by
+     * {@link #VIEWMODEL_CLEARANCE_MARGIN}, so the arm ends up a couple of centimetres clear instead of
+     * exactly touching. Only the voxels the arm can possibly reach are visited: the world box spanning
+     * the eye and the unscaled mesh box — a few dozen blocks for a hand-sized mesh.
      */
     private float viewmodelPullIn(ClientLevel level, RtEntityCapture capture,
                                   double camX, double camY, double camZ) {
@@ -789,43 +790,51 @@ public final class RtEntities {
             if (y > maxY) maxY = y;
             if (z > maxZ) maxZ = z;
         }
-        float[] xs = {(minX + maxX) * 0.5f, minX, maxX};
-        float[] ys = {(minY + maxY) * 0.5f, minY, maxY};
-        float[] zs = {(minZ + maxZ) * 0.5f, minZ, maxZ};
-        // Farthest vertex from the eye: the scale has to keep the WHOLE box in front, so every hit
-        // distance is compared against this, not against the distance of the probe that found the block.
-        float maxLength = 0.0f;
-        for (int corner = 0; corner < 8; corner++) {
-            float cx = (corner & 1) == 0 ? minX : maxX;
-            float cy = (corner & 2) == 0 ? minY : maxY;
-            float cz = (corner & 4) == 0 ? minZ : maxZ;
-            maxLength = Math.max(maxLength, (float) Math.sqrt(cx * cx + cy * cy + cz * cz));
+        float[] boxMin = {minX, minY, minZ};
+        float[] boxMax = {maxX, maxY, maxZ};
+        // Every scaled box lies inside the hull of the eye and the unscaled box, so only these voxels
+        // can ever matter.
+        int x0 = Mth.floor(Math.min(camX, camX + minX));
+        int x1 = Mth.floor(Math.max(camX, camX + maxX));
+        int y0 = Mth.floor(Math.min(camY, camY + minY));
+        int y1 = Mth.floor(Math.max(camY, camY + maxY));
+        int z0 = Mth.floor(Math.min(camZ, camZ + minZ));
+        int z1 = Mth.floor(Math.max(camZ, camZ + maxZ));
+        if (x1 - x0 > 3 || y1 - y0 > 3 || z1 - z0 > 3) {
+            return 1.0f; // not a hand-sized mesh (a modded model, say): don't walk the world for it
         }
-        if (!(maxLength > 1.0e-4f)) {
-            return 1.0f;
-        }
-        // Vec3 is immutable in 26.3 (final x/y/z, no set()), so the eye point is built once and reused by
-        // every probe below.
-        Vec3 eye = new Vec3(camX, camY, camZ);
+        BlockPos.MutableBlockPos pos = new BlockPos.MutableBlockPos();
         float pullIn = 1.0f;
-        // 3x3x3 lattice, minus the twelve edge midpoints and the four "two midpoints" points: that leaves
-        // the 8 corners, the 6 face centres and the centre — 15 probes for 27 lattice points.
-        for (int ix = 0; ix < 3; ix++) {
-            for (int iy = 0; iy < 3; iy++) {
-                for (int iz = 0; iz < 3; iz++) {
-                    if ((ix == 1 ? 1 : 0) + (iy == 1 ? 1 : 0) + (iz == 1 ? 1 : 0) > 1) {
-                        continue;
+        // Shrinking past one block can bring a nearer one into reach, so sweep until stable. k only
+        // decreases and is floored by VIEWMODEL_MIN_PULL_IN, so this terminates; two passes cover every
+        // hand-sized mesh and the cap keeps a pathological one bounded.
+        for (int pass = 0; pass < 4; pass++) {
+            float before = pullIn;
+            for (int bx = x0; bx <= x1; bx++) {
+                for (int by = y0; by <= y1; by++) {
+                    for (int bz = z0; bz <= z1; bz++) {
+                        pos.set(bx, by, bz);
+                        BlockState state = level.getBlockState(pos);
+                        if (state.isAir()) {
+                            continue;
+                        }
+                        var shape = state.getCollisionShape(level, pos);
+                        if (shape.isEmpty()) {
+                            continue;
+                        }
+                        AABB box = shape.bounds();
+                        pullIn = RtViewmodelCapture.clearOfBlock(pullIn, boxMin, boxMax,
+                                camX, camY, camZ,
+                                box.minX - VIEWMODEL_CLEARANCE_MARGIN, box.minY - VIEWMODEL_CLEARANCE_MARGIN,
+                                box.minZ - VIEWMODEL_CLEARANCE_MARGIN,
+                                box.maxX + VIEWMODEL_CLEARANCE_MARGIN, box.maxY + VIEWMODEL_CLEARANCE_MARGIN,
+                                box.maxZ + VIEWMODEL_CLEARANCE_MARGIN,
+                                VIEWMODEL_MIN_PULL_IN);
                     }
-                    HitResult hit = level.clip(new ClipContext(eye,
-                            new Vec3(camX + xs[ix], camY + ys[iy], camZ + zs[iz]),
-                            ClipContext.Block.COLLIDER, ClipContext.Fluid.NONE, CollisionContext.empty()));
-                    if (hit.getType() == HitResult.Type.MISS) {
-                        continue;
-                    }
-                    float distance = (float) hit.getLocation().distanceTo(eye);
-                    pullIn = Math.min(pullIn, RtViewmodelCapture.pullInRatio(distance, maxLength,
-                            VIEWMODEL_CLEARANCE_MARGIN, VIEWMODEL_MIN_PULL_IN));
                 }
+            }
+            if (pullIn >= before) {
+                break;
             }
         }
         return pullIn;

@@ -175,22 +175,41 @@ analítica do item na própria mão.
 **Folga contra blocos.** O nearest-hit sozinho *corta* o braço no plano da
 parede quando o jogador encosta nela — o braço tem ~0,5–1,0 bloco de
 profundidade, a parede fica a ~0,3, e o resultado lê como "a mão entrou no
-bloco". `RtEntities.viewmodelPullIn` mede, a cada quadro, a distância do olho
-até o bloco mais próximo ao longo dos 15 pontos que delimitam a caixa do braço
-já posado (8 cantos, 6 centros de face e o centro) com
-`ClipContext.Block.COLLIDER` — formas de colisão, ou seja, blocos macios
-(grama, flor, tocha) não encolhem a mão —, e aplica
-`RtViewmodelCapture.scaleUniform`: uma escala **uniforme em torno da câmera**
-que deixa o vértice mais distante a `hit − 0,02` do bloco. Escala uniforme é
-projeção-exata — o divide perspectiva preserva `(kx)/(kz) = x/z` — então a mão
-não muda de tamanho nem de posição na tela: só deixa de existir dentro do
-bloco. O mínimo é 10% (não colapsa no olho) e o resultado entra no cálculo de
-motion vectors porque é aplicado antes de `uploadVertexMotion`/`storeEntityPrev`.
+bloco". `RtEntities.viewmodelPullIn` resolve isso **por bloco, não por
+amostragem**: escalar a caixa do braço por `k` em torno do olho faz "a caixa
+toca este bloco" ser um *intervalo* de `k` (cada eixo é uma inequação linear),
+então `RtViewmodelCapture.clearOfBlock` acha o maior `k` exato que fica à
+frente — sem raio que possa escapar entre duas direções de teste, que é
+justamente como um canto de bloco entrava no braço em certos ângulos de câmera.
+Só os voxels alcançáveis são visitados (a caixa do mundo que cobre o olho e a
+caixa da malha, ≤ 27 blocos), com os *bounds* da forma de colisão inflados em
+2 cm — daí a mão ficar com folga, e não encostada. Blocos macios (grama, flor,
+tocha) não têm forma de colisão e não encolhem a mão.
+
+O fator é aplicado por `RtViewmodelCapture.scaleUniform`: uma escala **uniforme
+em torno da câmera**. Escala uniforme é projeção-exata — o divide perspectiva
+preserva `(kx)/(kz) = x/z` — então a mão não muda de tamanho nem de posição na
+tela: só deixa de existir dentro do bloco. O mínimo é 10% (não colapsa no
+olho), o resultado entra no cálculo de motion vectors porque é aplicado antes de
+`uploadVertexMotion`/`storeEntityPrev`, e o laço repete até estabilizar porque
+encolher até um bloco pode trazer um bloco mais próximo ao alcance.
+
+**Sombra do próprio jogador.** Em primeira pessoa o corpo do jogador continua
+no TLAS com a máscara `0x01` (invisível à câmera, presente em reflexões e GI) —
+e é justamente ele que aparecia projetado sobre o braço, junto com o modelo do
+item seguro pela mão do avatar. Por isso os raios de sombra disparados **da
+superfície do viewmodel** usam `CULL_VIEWMODEL_SHADOW = 0xFC`: mantém terreno,
+entidades e block entities, e remove o jogador (`0x01`) e a própria mão
+(`0x02`, que também barra o auto-sombreamento entre braço e item). O valor é o
+mesmo de `CULL_HAND_LIGHT`, escolhido em `world.rgen` por
+`isViewmodelEarly` e passado a `shadeReservoir`/`shadeReservoirSplit`
+(RIS/ReSTIR), à NEE do sol e ao backlight de SSS.
 
 **Garantias preservadas.**
 - *Sem sombra*: a instância é invisível a raios secundários (`0x01`), então o
-  corpo do jogador continua sendo o único bloqueador; GI, reflexões e refrações
-  também não veem o braço.
+  braço não projeta sombra em nada; GI, reflexões e refrações também não veem o
+  braço. Na direção inversa, a mão ignora o corpo do jogador e a si mesma nos
+  próprios raios de sombra (`CULL_VIEWMODEL_SHADOW`), como descrito acima.
 - *Luz do item*: `CULL_HAND_LIGHT = 0xFC` continua excluindo a instância, e
   `PAYLOAD_VIEWMODEL` desliga a NEE da luz analítica na superfície da mão, então
   o item não ilumina a própria chama por dentro nem projeta sombra fantasma.

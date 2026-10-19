@@ -25,6 +25,7 @@ final class RtViewmodelShaderRegressionTest {
     private static final Path WORLD_RCHIT = REPO_ROOT.resolve("shaders/world/world.rchit.slang");
     private static final Path WORLD_CORE = REPO_ROOT.resolve("shaders/world/world_core.slang");
     private static final Path TRACE = REPO_ROOT.resolve("shaders/world/trace.slang");
+    private static final Path LIGHTING = REPO_ROOT.resolve("shaders/world/lighting.slang");
     private static final Path PRIMARY_RGEN = REPO_ROOT.resolve("shaders/world/world_primary.rgen.slang");
     private static final Path INDIRECT_RGEN = REPO_ROOT.resolve("shaders/world/world.rgen.slang");
     private static final Path RT_ENTITIES =
@@ -83,9 +84,11 @@ final class RtViewmodelShaderRegressionTest {
     }
 
     @Test
-    void viewmodelIsRealWorldGeometrySoNearerBlocksHideIt() {
+    void viewmodelStaysInFrontOfBlocksAndIgnoresThePlayersOwnBody() {
         String entities = read(RT_ENTITIES);
         String direct = read(INDIRECT_RGEN);
+        String trace = read(TRACE);
+        String lighting = read(LIGHTING);
 
         // The viewmodel is uploaded through the transient BLAS path into this frame's instance list: a
         // normal TLAS instance, so nearest-hit already depth-tests it against the world. No extra
@@ -98,11 +101,40 @@ final class RtViewmodelShaderRegressionTest {
                     "no depth-test ray may remain: the TLAS nearest hit is the depth test (" + shader + ")");
         }
 
+        // Nearest-hit alone only CUTS the arm at the wall, so the upload also pulls the mesh in front of
+        // every block. The clearance has to stay the exact per-block solve: a sampled version let block
+        // corners slip between probe directions and the hand poked through walls at some camera angles.
+        assertTrue(entities.contains("RtViewmodelCapture.clearOfBlock(pullIn, boxMin, boxMax"),
+                "the upload must scale the captured mesh clear of nearby blocks");
+        assertTrue(entities.contains("RtViewmodelCapture.scaleUniform(vmCapture.verts.elements()"),
+                "the clearance must be applied as a projection-exact uniform scale");
+        assertTrue(!entities.contains("ClipContext.Block.COLLIDER"),
+                "block clearance must not go back to sampled ray probes");
+
         // The hand must not receive its own carried light: the analytic lamp sits inside the item's flame
         // geometry, so NEE from the hand's own surface would light it from the inside.
         assertTrue(direct.contains("bool isViewmodelEarly = payloadViewmodel();"));
         assertTrue(direct.contains("float3 handIrr = isViewmodelEarly"));
         assertTrue(direct.contains("? float3(0.0, 0.0, 0.0)"));
+
+        // ...and it must not receive the player's body either. In first person that entity keeps the
+        // secondary bit, so an ordinary shadow ray from the arm lands the avatar's silhouette on it.
+        assertTrue(trace.contains("public static const uint CULL_VIEWMODEL_SHADOW = 0xFCu;"),
+                "the viewmodel needs its own shadow cull mask with the player's bit removed");
+        assertTrue((0xFC & 0x01) == 0, "CULL_VIEWMODEL_SHADOW must exclude the first-person player");
+        assertTrue((0xFC & 0x02) == 0, "CULL_VIEWMODEL_SHADOW must exclude the viewmodel itself");
+        assertTrue(direct.contains("uint shadowCull = isViewmodelEarly ? CULL_VIEWMODEL_SHADOW : CULL_SECONDARY;"),
+                "the receiver must pick its shadow mask from the viewmodel classification");
+        assertTrue(direct.contains("visibilityCulled(p, lightDir, 10000.0, shadowCull)"),
+                "the sun NEE must honour the per-receiver shadow mask");
+        assertTrue(direct.contains("twoSidedEmitter, activeSss, shadowCull) * estimatorScale;"),
+                "RIS/ReSTIR shading must honour the per-receiver shadow mask");
+        assertTrue(direct.contains("twoSidedEmitter, activeSss, shadowCull, risDiff, risSpec);"),
+                "the split RIS shading must honour the per-receiver shadow mask too");
+        assertTrue(lighting.contains("float sss, uint shadowCull) {"),
+                "shadeReservoir must take the receiver's shadow mask");
+        assertTrue(lighting.contains("dist * 0.999, shadowCull)"),
+                "the reservoir shadow ray must be culled with the receiver's mask");
     }
 
     @Test

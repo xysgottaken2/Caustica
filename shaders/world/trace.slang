@@ -11,11 +11,18 @@ public static const uint CULL_PRIMARY = 0x02u;
 // Shadow-ray mask for the analytic held-item light: ordinary occluders MINUS the first-person
 // viewmodel. Instance masks in play: terrain/entities/block entities 0xFF, DH LOD 0x03, particles
 // 0x02, the first-person player 0x01. Bits 2..7 keep every 0xFF occluder while matching neither
-// the viewmodel (0x01) nor particles (0x02); DH LOD drops out too, but that geometry sits beyond
+// the viewmodel nor particles (both 0x02); DH LOD drops out too, but that geometry sits beyond
 // the vanilla render distance, where the short-range held light neither reaches nor gets blocked
 // by it. Without the exclusion the captured arm/item floats a phantom shadow inside the very beam
-// it casts (the visible hand is vanilla's screen-space overlay, not the captured pose).
+// it casts.
 public static const uint CULL_HAND_LIGHT = 0xFCu;
+// Shadow rays traced FROM the first-person viewmodel's own surface. Same set as CULL_HAND_LIGHT and
+// for the same reason: the player's body (0x01) is in the TLAS with the secondary bit in first person
+// — invisible to the camera, still useful in reflections/GI — so a plain visibility() ray from the arm
+// is blocked by the avatar's own torso and held-item model, stamping a body-shaped shadow on a hand
+// whose body the player cannot see. Bits 2..7 keep every world occluder and drop both the player and
+// the viewmodel itself (self-shadowing between arm and held item would look just as wrong).
+public static const uint CULL_VIEWMODEL_SHADOW = 0xFCu;
 public static const uint TERRAIN_BUCKETS = 4u;
 public static const uint SBT_RADIANCE = 0u;
 public static const uint SBT_SHADOW = TERRAIN_BUCKETS;

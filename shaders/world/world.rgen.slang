@@ -479,7 +479,7 @@ public float3 tracePath(PathSegment seg, uint2 pix, uint sampleIndex,
                     }
                     float estimatorScale = shadeWithRestir ? restirSampleScale : 1.0;
                     float3 particleRis = throughput * shadeReservoir(r, hitPos, n, v, rd, albedo,
-                            float3(0.0, 0.0, 0.0), 1.0, true, 0.0) * estimatorScale;
+                            float3(0.0, 0.0, 0.0), 1.0, true, 0.0, CULL_SECONDARY) * estimatorScale;
                     L += particleRis;
                     // twoSided shading has no specular term — the whole estimate is diffuse.
                     if (channel == 2) {
@@ -511,6 +511,12 @@ public float3 tracePath(PathSegment seg, uint2 pix, uint sampleIndex,
         // First-person viewmodel: shaded exactly like entity geometry, except that it must not NEE its
         // own carried light (the analytic held-item light sits inside the item's own flame geometry).
         bool isViewmodelEarly = payloadViewmodel();
+        // Shadow rays fired from this vertex. The viewmodel is the one receiver that must not be shaded
+        // by the player's own body: in first person that entity is invisible to the camera yet still in
+        // the TLAS (for reflections/GI), so an ordinary shadow ray lands the avatar's torso + held-item
+        // model across the arm. CULL_VIEWMODEL_SHADOW keeps the whole world and drops the player and the
+        // hand itself; every other receiver keeps the plain secondary mask.
+        uint shadowCull = isViewmodelEarly ? CULL_VIEWMODEL_SHADOW : CULL_SECONDARY;
         // LabPBR SSS strength (0 when the material has none, or when the player turned SSS off:
         // payloadActiveSss returns a hard zero in that case, so every SSS term below — the RIS back
         // lobe and the explicit transmission pass — collapses without needing its own check).
@@ -664,7 +670,7 @@ public float3 tracePath(PathSegment seg, uint2 pix, uint sampleIndex,
         float cloudShadow = 1.0;
         bool cloudShadowReady = false;
         if (ndl > 0.0) {
-            VisibilityResult shadow = visibility(p, lightDir, 10000.0);
+            VisibilityResult shadow = visibilityCulled(p, lightDir, 10000.0, shadowCull);
             float3 vis = shadow.transmittance;
             if (max(vis.r, max(vis.g, vis.b)) > 0.0) {
                 cloudShadow = cloudSunShadow(worldPush, hitPos - worldPush.camOffset, lightDir);
@@ -750,7 +756,7 @@ public float3 tracePath(PathSegment seg, uint2 pix, uint sampleIndex,
                 }
                 float estimatorScale = shadeWithRestir ? restirSampleScale : 1.0;
                 float3 ris = throughput * shadeReservoir(r, hitPos, n, v, rd, diffAlb, F0, rough,
-                        twoSidedEmitter, activeSss) * estimatorScale;
+                        twoSidedEmitter, activeSss, shadowCull) * estimatorScale;
                 L += ris;
                 // Fog in-scatter from the very light the reservoir just shaded the surface with —
                 // same sample, same estimator scale, no second light selection anywhere, which is
@@ -779,7 +785,7 @@ public float3 tracePath(PathSegment seg, uint2 pix, uint sampleIndex,
                         float3 risDiff;
                         float3 risSpec;
                         shadeReservoirSplit(r, hitPos, n, v, rd, diffAlb, F0, rough,
-                                twoSidedEmitter, activeSss, risDiff, risSpec);
+                                twoSidedEmitter, activeSss, shadowCull, risDiff, risSpec);
                         Ldiff += throughput * risDiff * estimatorScale;
                         Lspec += throughput * risSpec * estimatorScale;
                     } else if (channel == 1) {
@@ -799,7 +805,8 @@ public float3 tracePath(PathSegment seg, uint2 pix, uint sampleIndex,
         if (sss > 0.0 && celestialLit && hitDepth <= MAX_SSS_INDIRECT_DEPTH) {
             float backNdl = max(0.0, dot(-n, lightDir));
             if (backNdl > 0.0) {
-                VisibilityResult shadowBack = visibility(hitPos - n * SURF_BIAS, lightDir, 10000.0);
+                VisibilityResult shadowBack = visibilityCulled(hitPos - n * SURF_BIAS, lightDir, 10000.0,
+                        shadowCull);
                 float3 visB = shadowBack.transmittance;
                 if (max(visB.r, max(visB.g, visB.b)) > 0.0) {
                     // Same cloud attenuation as the front-face NEE above — see cloudShadow. Compute it

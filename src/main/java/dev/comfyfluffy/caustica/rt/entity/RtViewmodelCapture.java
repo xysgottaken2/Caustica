@@ -276,21 +276,59 @@ public final class RtViewmodelCapture {
     }
 
     /**
-     * Fraction of the captured depth that keeps a ray of length {@code rayLength} in front of the block it
-     * hit, leaving {@code margin} blocks of clearance. Returns 1 when nothing is in the way.
+     * Largest scale {@code k' <= k} (never below {@code minK}) for which the camera-relative box
+     * {@code [boxMin, boxMax]} scaled by {@code k'} about the eye misses the world-space block box
+     * {@code [lo, hi]}. Returns {@code k} untouched when the block cannot constrain it.
      *
-     * <p>Package-private and pure so the clearance rule can be unit-tested: the value feeds
-     * {@link #scaleUniform}, which is what keeps the arm out of blocks.
+     * <p>The scaled box on one axis is {@code [eye + k*a, eye + k*b]}, and "overlaps the block on this
+     * axis" is two linear inequalities in k, so the whole overlap is an interval
+     * {@code [enter, leave]}. Below {@code enter} the box is in front of the block (the case we want);
+     * above {@code leave} the block sits between the eye and the box, which is just as wrong for a
+     * viewmodel that must stay visible — so anything at or past {@code enter} is pulled back to it.
+     *
+     * <p>Pure and package-private so the clearance rule is unit-tested without a world.
      */
-    static float pullInRatio(float hitDistance, float rayLength, float margin, float minPullIn) {
-        if (!(rayLength > 1.0e-4f) || !Float.isFinite(hitDistance) || !Float.isFinite(rayLength)) {
-            return 1.0f;
+    static float clearOfBlock(float k, float[] boxMin, float[] boxMax,
+                              double eyeX, double eyeY, double eyeZ,
+                              double loX, double loY, double loZ,
+                              double hiX, double hiY, double hiZ, float minK) {
+        double enter = Double.NEGATIVE_INFINITY;   // first scale at which the box reaches the block
+        double leave = Double.POSITIVE_INFINITY;   // first scale at which the box is past it
+        for (int axis = 0; axis < 3; axis++) {
+            double eye = axis == 0 ? eyeX : axis == 1 ? eyeY : eyeZ;
+            double lo = axis == 0 ? loX : axis == 1 ? loY : loZ;
+            double hi = axis == 0 ? hiX : axis == 1 ? hiY : hiZ;
+            double a = boxMin[axis];
+            double b = boxMax[axis];
+            // eye + k * a <= hi
+            double d = hi - eye;
+            if (a > 0.0) {
+                leave = Math.min(leave, d / a);
+            } else if (a < 0.0) {
+                enter = Math.max(enter, d / a);
+            } else if (d < 0.0) {
+                return k; // the box never reaches this block on this axis
+            }
+            // eye + k * b >= lo
+            d = lo - eye;
+            if (b > 0.0) {
+                enter = Math.max(enter, d / b);
+            } else if (b < 0.0) {
+                leave = Math.min(leave, d / b);
+            } else if (d > 0.0) {
+                return k; // the box never reaches this block on this axis
+            }
         }
-        float ratio = (hitDistance - margin) / rayLength;
-        if (!(ratio < 1.0f)) {
-            return 1.0f;
+        if (!(enter <= leave)) {
+            return k; // no scale makes the box touch this block
         }
-        return Math.max(minPullIn, ratio);
+        if (leave < 0.0) {
+            return k; // only a mirrored (negative) scale would reach it
+        }
+        if (k <= enter) {
+            return k; // already in front of it
+        }
+        return Math.max(minK, (float) Math.max(enter, 0.0));
     }
 
     /**
