@@ -668,7 +668,8 @@ public Reservoir restirSpatiotemporal(Reservoir initial, uint2 pixel, uint2 dime
 // the survivor (front BRDF, twoSided billboard, or SSS backscatter) — the origin is biased toward the
 // sample's side of the surface.
 public float3 shadeReservoir(Reservoir s, float3 hitPos, float3 n, float3 v, float3 rd, float3 diffAlb,
-                      float3 F0, float rough, bool twoSided, float sss) {
+                      float3 F0, float rough, bool twoSided, float sss,
+                      uint occluderMask) {
     if (s.W <= 0.0 || s.phat <= 0.0) {
         return float3(0.0, 0.0, 0.0);
     }
@@ -687,7 +688,9 @@ public float3 shadeReservoir(Reservoir s, float3 hitPos, float3 n, float3 v, flo
     float3 toL = s.pos - origin;
     float dist = length(toL);
     // Stop just short of the sample point so the ray doesn't self-occlude on the emitter's own face.
-    VisibilityResult shadow = visibility(origin, toL / dist, dist * 0.999);
+    // occluderMask is CULL_SECONDARY everywhere except the first-person viewmodel, whose own surface
+    // must not be shadowed by the player's body or by the item it is holding.
+    VisibilityResult shadow = visibilityCulled(origin, toL / dist, dist * 0.999, occluderMask);
     float3 vis = shadow.transmittance;
     float appliedW = s.restir != 0u ? min(s.W, RESTIR_MAX_W) : s.W;
     float3 shaded = contrib * vis * appliedW;
@@ -709,7 +712,8 @@ public float3 shadeReservoir(Reservoir s, float3 hitPos, float3 n, float3 v, flo
 // separate entry point so the ordinary path keeps calling shadeReservoir untouched.
 public void shadeReservoirSplit(Reservoir s, float3 hitPos, float3 n, float3 v, float3 rd, float3 diffAlb,
                       float3 F0, float rough, bool twoSided, float sss,
-                      out float3 outDiff, out float3 outSpec) {
+                      out float3 outDiff, out float3 outSpec,
+                      uint occluderMask) {
     outDiff = float3(0.0, 0.0, 0.0);
     outSpec = float3(0.0, 0.0, 0.0);
     if (s.W <= 0.0 || s.phat <= 0.0) {
@@ -729,7 +733,7 @@ public void shadeReservoirSplit(Reservoir s, float3 hitPos, float3 n, float3 v, 
     float3 origin = hitPos + side * n * SURF_BIAS;
     float3 toL = s.pos - origin;
     float dist = length(toL);
-    VisibilityResult shadow = visibility(origin, toL / dist, dist * 0.999);
+    VisibilityResult shadow = visibilityCulled(origin, toL / dist, dist * 0.999, occluderMask);
     float3 vis = shadow.transmittance;
     float appliedW = s.restir != 0u ? min(s.W, RESTIR_MAX_W) : s.W;
     outDiff = diffPart * vis * appliedW;

@@ -95,6 +95,18 @@ public abstract class GameRendererMixin {
 		return RtUiOverlay.redirectDepth(depthTextureView);
 	}
 
+	// The path tracer renders the first-person hand + held item as world geometry (RtEntities captures
+	// vanilla's own submission into the TLAS at composite time), so the screen-space copy must not draw
+	// on top of it. `rtViewmodelDrawn` is only true on frames whose RT world was actually accepted, so
+	// an RT failure, a disabled world pipeline, or a HUD-hidden frame still gets vanilla's hand.
+	@Inject(method = "renderItemInHand", at = @At("HEAD"), cancellable = true)
+	private void caustica$skipRasterHandWhenTracedInWorld(CameraRenderState cameraState,
+			PlayerRenderState playerState, GpuTextureView depthTextureView, CallbackInfo ci) {
+		if (RtComposite.INSTANCE.rtViewmodelDrawn()) {
+			ci.cancel();
+		}
+	}
+
 	// Redirect the screen-effect flush (fire, underwater, view-blocking-block overlays submitted by
 	// ScreenEffectRenderer.submit) into the same combined UI overlay as the hand. This is the createRenderPass
 	// call in the "screenEffects" section of render3dHud — distinct from the one inside renderItemInHand,

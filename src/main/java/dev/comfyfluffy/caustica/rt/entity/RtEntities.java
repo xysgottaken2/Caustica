@@ -16,13 +16,19 @@ import net.minecraft.client.renderer.blockentity.state.BlockEntityRenderState;
 import net.minecraft.client.renderer.culling.Frustum;
 import net.minecraft.client.renderer.entity.EntityRenderDispatcher;
 import net.minecraft.client.renderer.entity.state.EntityRenderState;
+import net.minecraft.client.renderer.state.GameRenderState;
+import net.minecraft.client.renderer.state.OptionsRenderState;
 import net.minecraft.client.renderer.state.level.CameraRenderState;
+import net.minecraft.client.renderer.state.level.FirstPersonHandsAndItemsRenderState;
+import net.minecraft.client.renderer.state.level.LevelRenderState;
+import net.minecraft.client.renderer.state.level.PlayerRenderState;
 import net.minecraft.client.renderer.state.level.QuadParticleRenderState;
 
 import net.minecraft.core.BlockPos;
 import net.minecraft.network.chat.Component;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.level.ClipContext;
+import net.minecraft.world.level.GameType;
 import net.minecraft.world.level.block.entity.BlockEntity;
 import net.minecraft.world.level.chunk.LevelChunk;
 import net.minecraft.world.phys.HitResult;
@@ -92,6 +98,14 @@ public final class RtEntities {
     private static final int MASK_ALL = 0xFF;
     /** Particles are primary-ray-only: visible/lit by the camera path, invisible to shadows/GI/reflections. */
     private static final int PARTICLE_MASK = MASK_PRIMARY;
+    /**
+     * First-person viewmodel (arm + held item). Same camera-only visibility set as particles, which is
+     * exactly the contract it needs: primary rays see it, and no shadow, reflection, GI or held-item
+     * light ray can, so it neither casts shadows nor appears in mirrors/water.
+     */
+    private static final int VIEWMODEL_MASK = MASK_PRIMARY;
+    /** Vanilla's fixed first-person hand FOV — {@code Camera.calculateHudFov()} pins the viewmodel to 70°. */
+    private static final float VANILLA_HAND_FOV = 70.0f;
     public static boolean particlesEnabled() {
         return CausticaConfig.Rt.Entities.PARTICLES_ENABLED.value();
     }
@@ -187,7 +201,10 @@ public final class RtEntities {
     private final RtEntityCapture capture = new RtEntityCapture();
     private final PoseStack entityPoseStack = new PoseStack();
     private final PoseStack blockEntityPoseStack = new PoseStack();
+    private final PoseStack viewmodelPoseStack = new PoseStack();
     private CameraRenderState cameraState;
+    /** True when this frame captured first-person viewmodel geometry (vanilla's raster hand must skip). */
+    private boolean viewmodelCaptured;
     // Particle capture: a VertexConsumer adapter that funnels MC's billboard quads into `capture` (the
     // shared entity mesh). We extract each live particle into `particleScratch`, accumulate per-vertex
     // motion-vector displacements in `particleDisp`, and key the previous-frame center off particle
@@ -614,10 +631,15 @@ public final class RtEntities {
      * with the terrain static instances. The caller (RtComposite) records the returned BLAS builds
      * before the TLAS build and pushes the geometry-table address. Returns terrain-only (no BLAS, addr 0)
      * when disabled or nothing captured. Dynamic entity coordinates are local and placed by TLAS instances;
-     * particles remain captured rebase-relative with an identity instance.
+     * particles remain captured rebase-relative with an identity instance. The first-person viewmodel is
+     * captured last, in camera space, and placed by a camera-to-world instance; {@code camDelta} is the
+     * camera's current-minus-previous translation, which is also the arm's world displacement for motion
+     * vectors (the arm does not move in view space).
      */
     public FrameEntities beginFrame(RtContext ctx, List<RtAccel.Instance> base, int rbx, int rby, int rbz,
-                                    double camX, double camY, double camZ, Matrix4f projection, Matrix4f viewRotation) {
+                                    double camX, double camY, double camZ, Matrix4f projection, Matrix4f viewRotation,
+                                    float camDeltaX, float camDeltaY, float camDeltaZ) {
+        viewmodelCaptured = false;
         if (!enabled()) {
             return new FrameEntities(base, List.of(), List.of(), 0L, null);
         }
@@ -639,6 +661,10 @@ public final class RtEntities {
             }
             try (RtFrameStats.Scope ignored = RtFrameStats.FRAME.stage("entity.particles")) {
                 captureParticles(ctx, build, mc, partial, rbx, rby, rbz, projection, viewRotation);
+            }
+            try (RtFrameStats.Scope ignored = RtFrameStats.FRAME.stage("entity.viewmodel")) {
+                viewmodelCaptured = captureViewmodel(ctx, build, mc, rbx, rby, rbz,
+                        camDeltaX, camDeltaY, camDeltaZ);
             }
         } catch (RuntimeException | Error t) {
             // A partially recorded frame may already have installed unbuilt BLAS into persistent slots.
@@ -679,6 +705,126 @@ public final class RtEntities {
         for (BeEntry entry : lists.usedBlockEntities) {
             entry.graphicsUse.mark(graphicsUse);
         }
+    }
+
+    /** True when the last {@link #beginFrame} captured first-person viewmodel geometry. */
+    public boolean viewmodelCapturedThisFrame() {
+        return viewmodelCaptured;
+    }
+
+    /**
+     * Capture the vanilla first-person viewmodel (arm + held item) as world-space RT geometry.
+     *
+     * <p>Vanilla submits the hand through {@code FirstPersonHandsAndItemsRenderer.submitHandsWithItems}
+     * into the screen-space "Item in hand" pass, which runs after the RT composite and therefore could
+     * never be ray traced. This replays that exact submission into our own collector at composite time —
+     * the render state that feeds it is already populated by {@code LevelExtractor.extractPlayerState} —
+     * and places the result in the TLAS at the camera. The arm is then genuinely part of the world: blocks
+     * occlude it through the shared BVH (no separate depth guard can disagree with the traced geometry),
+     * it receives real sun/sky/GI light, and it can never be drawn on top of a wall it is pressed against.
+     *
+     * <p>The pose reproduces {@code GameRenderer.renderItemInHand} minus two things. Its view-rotation
+     * matrix is skipped because the TLAS instance carries that rotation instead ({@code cameraToWorld});
+     * the arm therefore lives in camera space like vanilla's, while the instance transform puts it in the
+     * world. Its {@code bobHurt}/{@code bobView} calls are skipped because the RT level projection already
+     * contains them ({@code renderLevel} folds the same pose into {@code cameraState.projectionMatrix}),
+     * so replaying them here would bob the arm twice. The lateral scale restores vanilla's fixed 70-degree
+     * hand projection (see {@link #viewmodelFovScale}) without touching depth, and the per-vertex motion
+     * vectors displace the camera-locked arm by exactly the camera delta, so temporal filters see a
+     * static-in-view-space surface instead of smearing it.
+     */
+    private boolean captureViewmodel(RtContext ctx, FrameBuild build, Minecraft mc,
+                                     int rbx, int rby, int rbz,
+                                     float camDeltaX, float camDeltaY, float camDeltaZ) {
+        GameRenderState gameState = mc.gameRenderer.gameRenderState();
+        LevelRenderState levelState = gameState.levelRenderState;
+        PlayerRenderState playerState = levelState.playerRenderState;
+        CameraRenderState cam = levelState.cameraRenderState;
+        FirstPersonHandsAndItemsRenderState hands = playerState.firstPersonHandsAndItems;
+        // The exact gate GameRenderer.renderItemInHand uses, read from the same extracted state, so the
+        // traced viewmodel appears exactly when the raster one would have.
+        if (playerState.avatarRenderState == null
+                || !playerState.hasPlayer
+                || !gameState.optionsRenderState.cameraType.isFirstPerson()
+                || cam.isPanoramicMode
+                || cam.entityRenderState.isSleeping
+                || gameState.guiRenderState.isHudHidden
+                || mc.gameMode == null
+                || mc.gameMode.getPlayerMode() == GameType.SPECTATOR
+                || hands.handRenderSelection == null) {
+            return false;
+        }
+        if (build.count + 1 >= maxEntities()) {
+            return false;
+        }
+
+        capture.reset();
+        capture.viewmodel = true;
+        collector.begin(capture, false);
+        PoseStack pose = viewmodelPoseStack;
+        resetPoseStack(pose);
+        float fovScale = viewmodelFovScale(cam, gameState.optionsRenderState);
+        if (fovScale != 1.0f) {
+            pose.scale(fovScale, fovScale, 1.0f);
+        }
+        // No bobHurt/bobView here: the projection captured for the RT camera already multiplies both in
+        // (GameRenderer.renderLevel), so the arm inherits the frame's bob from the shared projection.
+        try {
+            mc.gameRenderer.firstPersonHandsAndItemsRenderer.submitHandsWithItems(
+                    cam.cameraEntityPartialTicks, pose, collector, playerState, hands);
+        } catch (RuntimeException | Error t) {
+            collector.begin(null, false);
+            resetPoseStack(pose);
+            throw t;
+        }
+        collector.begin(null, false);
+        resetPoseStack(pose);
+        if (capture.isEmpty()) {
+            return false;
+        }
+
+        // Camera-locked placement: the captured mesh is camera space, the instance carries the
+        // view->world rotation and the camera's rebased position.
+        Matrix4f cameraToWorld = new Matrix4f(cam.viewRotationMatrix).invert();
+        float[] transform = {
+                cameraToWorld.m00(), cameraToWorld.m01(), cameraToWorld.m02(), (float) (cam.pos.x - rbx),
+                cameraToWorld.m10(), cameraToWorld.m11(), cameraToWorld.m12(), (float) (cam.pos.y - rby),
+                cameraToWorld.m20(), cameraToWorld.m21(), cameraToWorld.m22(), (float) (cam.pos.z - rbz)
+        };
+        // The arm does not move in view space, so its world displacement is exactly the camera delta
+        // (restirPreviousPixel compares against currentCameraRelative + camDelta - motionPrev).
+        appendCapture(ctx, build, new Motion(0L, camDeltaX, camDeltaY, camDeltaZ),
+                -1, ENTITY_BIT, VIEWMODEL_MASK, transform);
+        RtFrameStats.FRAME.count("viewmodelCaptured", 1);
+        RtFrameStats.FRAME.count("viewmodelTriangles", capture.idx.size() / 3);
+        return true;
+    }
+
+    /**
+     * Lateral scale that keeps the traced viewmodel at vanilla's apparent size.
+     *
+     * <p>Vanilla builds a dedicated 70-degree "3d hud" projection for the hand ({@code Camera.hudFov}),
+     * which is why the arm never changes size with the FOV slider. The path tracer only has the world
+     * projection, so an unscaled camera-space arm would follow the slider like the rest of the world.
+     * Scaling x/y by {@code tan(worldFov/2) / tan(handFov/2)} reproduces the hand projection exactly in
+     * NDC while leaving depth untouched, so the block clip and near plane stay physical. With
+     * {@code Rt.Hand.FOV_FOLLOWS_CAMERA} on, the hand target becomes the same slider-scaled hud FOV the
+     * raster path uses, so the arm follows the configured FOV again.
+     */
+    private static float viewmodelFovScale(CameraRenderState cam, OptionsRenderState options) {
+        float m11 = cam.projectionMatrix.m11();
+        if (!(m11 > 0.0f) || !Float.isFinite(m11)) {
+            return 1.0f;
+        }
+        float worldFov = 2.0f * (float) Math.atan(1.0f / m11);
+        float handFov = cam.hudFov > 1.0f ? cam.hudFov : VANILLA_HAND_FOV;
+        if (CausticaConfig.Rt.Hand.FOV_FOLLOWS_CAMERA.value() && options.fov > 0) {
+            handFov = Math.clamp(handFov * (options.fov / VANILLA_HAND_FOV), 1.0f, 179.0f);
+        }
+        double worldHalf = Math.toRadians(Math.min(worldFov, 179.0f)) * 0.5;
+        double handHalf = Math.toRadians(handFov) * 0.5;
+        float scale = (float) (Math.tan(worldHalf) / Math.tan(handHalf));
+        return Float.isFinite(scale) && scale > 0.01f ? scale : 1.0f;
     }
 
     /** Capture animated entities (mobs, items, falling blocks) with per-object motion-vector displacement. */

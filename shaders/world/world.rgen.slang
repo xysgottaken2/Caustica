@@ -155,19 +155,25 @@ public float3 tracePath(PathSegment seg, uint2 pix, uint sampleIndex,
     // remains active with its full configured candidate count at every hit. Pass A's primary/interface
     // prefix is outside this SSS quality budget.
     int indirectDepth = 0;
+    // Occluder set for the NEXT trace. Armed after every hit from the surface we are leaving, so a
+    // segment queued by pass A (seg.bounce > 0, no payload yet) starts from the ordinary secondary set
+    // instead of a stale payload left over by an earlier leaf.
+    uint continuationMask = CULL_SECONDARY;
     for (int bounce = seg.bounce; bounce <= maxBounces; bounce++) {
         // Radiance SBT records run any-hit only for true alpha cutout. Translucent/water go straight to
         // closest-hit for dielectric handling. Geometry is double-sided; the chit flips the normal.
         // Primary (bounce 0) is the camera ray (CULL_PRIMARY): sees particles but not the first-person
         // player. Bounce rays are secondary (CULL_SECONDARY): exclude particles, include the player.
+        // A ray leaving the viewmodel keeps CULL_HAND_LIGHT instead, so the arm's own continuation
+        // cannot be swallowed by the torso behind it or by the item in its other hand.
 #ifdef CAUSTICA_ENABLE_EXT_SER
         // SER lifetime phase: keep paths that are not roulette-eligible, paths that may terminate via
         // roulette, and paths guaranteed to end at the bounce cap in separate coherence groups.
         uint pathPhaseHint = bounce >= maxBounces ? 2u : (bounce >= rrStart ? 1u : 0u);
-        traceRadianceReordered(bounce == 0 ? CULL_PRIMARY : CULL_SECONDARY, ro, 0.0, rd, 10000.0,
+        traceRadianceReordered(bounce == 0 ? CULL_PRIMARY : continuationMask, ro, 0.0, rd, 10000.0,
                                showCelestial, rayConeWidth, rayConeSpread, pathPhaseHint);
 #else
-        traceRadiance(bounce == 0 ? CULL_PRIMARY : CULL_SECONDARY, ro, 0.0, rd, 10000.0,
+        traceRadiance(bounce == 0 ? CULL_PRIMARY : continuationMask, ro, 0.0, rd, 10000.0,
                       showCelestial, rayConeWidth, rayConeSpread);
 #endif
 
@@ -277,6 +283,14 @@ public float3 tracePath(PathSegment seg, uint2 pix, uint sampleIndex,
         rayConeWidth = max(rayConeWidth + rayConeSpread * max(payload.hitT, 0.0), RAY_CONE_MIN_WIDTH);
         uint material = payloadMaterial();
         int hitDepth = indirectDepth++;
+        // First-person viewmodel (world.rchit stamped PAYLOAD_VIEWMODEL): the local player's own arm or
+        // held item. Its shadow rays must ignore the player's body and the viewmodel geometry itself, or
+        // the arm sits permanently in the torso's shadow and the held item darkens its own hand. That is
+        // exactly the occluder set CULL_HAND_LIGHT already selects for the analytic held-item light.
+        // Also arms the mask for this surface's own continuation (glass/water item in hand included).
+        bool viewmodelSurface = (payload.flags & PAYLOAD_VIEWMODEL) != 0u;
+        uint selfShadowMask = viewmodelSurface ? CULL_HAND_LIGHT : CULL_SECONDARY;
+        continuationMask = selfShadowMask;
 
         // ---- Dielectric interface: water, stained glass, ice. ONE handler and one behaviour — every
         // dielectric is a volume. Fresnel from the relative index across the face, then reflect or
@@ -476,7 +490,7 @@ public float3 tracePath(PathSegment seg, uint2 pix, uint sampleIndex,
                     }
                     float estimatorScale = shadeWithRestir ? restirSampleScale : 1.0;
                     float3 particleRis = throughput * shadeReservoir(r, hitPos, n, v, rd, albedo,
-                            float3(0.0, 0.0, 0.0), 1.0, true, 0.0) * estimatorScale;
+                            float3(0.0, 0.0, 0.0), 1.0, true, 0.0, CULL_SECONDARY) * estimatorScale;
                     L += particleRis;
                     // twoSided shading has no specular term — the whole estimate is diffuse.
                     if (channel == 2) {
@@ -658,7 +672,7 @@ public float3 tracePath(PathSegment seg, uint2 pix, uint sampleIndex,
         float cloudShadow = 1.0;
         bool cloudShadowReady = false;
         if (ndl > 0.0) {
-            VisibilityResult shadow = visibility(p, lightDir, 10000.0);
+            VisibilityResult shadow = visibilityCulled(p, lightDir, 10000.0, selfShadowMask);
             float3 vis = shadow.transmittance;
             if (max(vis.r, max(vis.g, vis.b)) > 0.0) {
                 cloudShadow = cloudSunShadow(worldPush, hitPos - worldPush.camOffset, lightDir);
@@ -705,7 +719,11 @@ public float3 tracePath(PathSegment seg, uint2 pix, uint sampleIndex,
         // a torch in hand would barely brighten the blocks in front of it. Lambertian only; the
         // flame itself still gathers as ordinary emissive geometry on direct hit. Two-sided for
         // dynamic entities, mirroring the celestial NDL convention above.
-        float3 handIrr = handLightIrradiance(p, hitPos, n, isDynamicEntityEarly);
+        // The analytic held-item light is a proxy for "the torch I carry lights the room"; on the arm
+        // holding that very torch it would sit inside the geometry and blow the hand out. The viewmodel
+        // is lit by the real sun/sky/emitter NEE above instead.
+        float3 handIrr = viewmodelSurface ? float3(0.0, 0.0, 0.0)
+                : handLightIrradiance(p, hitPos, n, isDynamicEntityEarly);
         if (max(handIrr.x, max(handIrr.y, handIrr.z)) > 0.0) {
             float3 handNee = throughput * diffAlb * INV_PI * handIrr;
             L += handNee;
@@ -742,7 +760,7 @@ public float3 tracePath(PathSegment seg, uint2 pix, uint sampleIndex,
                 }
                 float estimatorScale = shadeWithRestir ? restirSampleScale : 1.0;
                 float3 ris = throughput * shadeReservoir(r, hitPos, n, v, rd, diffAlb, F0, rough,
-                        twoSidedEmitter, activeSss) * estimatorScale;
+                        twoSidedEmitter, activeSss, selfShadowMask) * estimatorScale;
                 L += ris;
                 // Fog in-scatter from the very light the reservoir just shaded the surface with —
                 // same sample, same estimator scale, no second light selection anywhere, which is
@@ -771,7 +789,7 @@ public float3 tracePath(PathSegment seg, uint2 pix, uint sampleIndex,
                         float3 risDiff;
                         float3 risSpec;
                         shadeReservoirSplit(r, hitPos, n, v, rd, diffAlb, F0, rough,
-                                twoSidedEmitter, activeSss, risDiff, risSpec);
+                                twoSidedEmitter, activeSss, risDiff, risSpec, selfShadowMask);
                         Ldiff += throughput * risDiff * estimatorScale;
                         Lspec += throughput * risSpec * estimatorScale;
                     } else if (channel == 1) {
@@ -791,7 +809,8 @@ public float3 tracePath(PathSegment seg, uint2 pix, uint sampleIndex,
         if (sss > 0.0 && celestialLit && hitDepth <= MAX_SSS_INDIRECT_DEPTH) {
             float backNdl = max(0.0, dot(-n, lightDir));
             if (backNdl > 0.0) {
-                VisibilityResult shadowBack = visibility(hitPos - n * SURF_BIAS, lightDir, 10000.0);
+                VisibilityResult shadowBack = visibilityCulled(hitPos - n * SURF_BIAS, lightDir, 10000.0,
+                        selfShadowMask);
                 float3 visB = shadowBack.transmittance;
                 if (max(visB.r, max(visB.g, visB.b)) > 0.0) {
                     // Same cloud attenuation as the front-face NEE above — see cloudShadow. Compute it
@@ -839,7 +858,9 @@ public float3 tracePath(PathSegment seg, uint2 pix, uint sampleIndex,
         // light + SSS), demodulated by the path throughput. That light is also back-propagated into
         // the previous vertices' entries, so each entry converges toward the full outgoing radiance
         // of its surface — the direct-plus-indirect quantity the query above replaces a vertex with.
-        if (sharcUpdatePath && !exactSpecular) {
+        // The viewmodel is camera-locked, so a cache entry written for it would land in the cell the
+        // player's head occupies and leak the arm's radiance into the room. Never warm the cache from it.
+        if (sharcUpdatePath && !exactSpecular && !viewmodelSurface) {
             float3 localAdded = L - surfaceLightBaseline;
             if (max(throughput.r, max(throughput.g, throughput.b)) > 1.0e-3
                     && !any(isnan(localAdded)) && !any(isinf(localAdded))) {

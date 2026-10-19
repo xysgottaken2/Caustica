@@ -296,6 +296,14 @@ public static const uint PRIM_WEATHER = 16u;
 // alpha cutout (discard texels below 0.1), so the armour/body shows where the texture has no streak.
 // Entity-only bit: terrain never sets it, and the weather bit (16) is unambiguous there.
 public static const uint PRIM_GLINT = 8u;
+// Prim.flags (entity prims): first-person viewmodel geometry (the local player's arm + held item),
+// captured by RtEntities from vanilla's own FirstPersonHandsAndItemsRenderer submission and placed in
+// the TLAS at the camera. Tagging lets world.rchit mark the hit PAYLOAD_VIEWMODEL so raygen lights it
+// with the hand's own occluder set: CULL_HAND_LIGHT drops the player's body and the arm/item itself, so
+// the viewmodel is never shadowed by the character it belongs to. Its TLAS instance mask is the same
+// camera-only bit particles use (visible to CULL_PRIMARY, invisible to every shadow/reflection/GI ray),
+// which is what keeps it out of shadows and mirrors.
+public static const uint PRIM_VIEWMODEL = 32u;
 // Vanilla's glint shader scrolls its sample UV diagonally over time via a per-frame TextureMat; the
 // hit shaders apply the same drift so the whole streak pattern moves (a static any-hit mask over a
 // scrolling colour would freeze the streak shapes). Texture widths per second, matched to the old
@@ -329,7 +337,7 @@ public struct Payload {
     public float  hitT;        // >= 0 on hit, < 0 on miss.
     public half3  motionPrev;  // per-vertex world displacement since last frame.
     public half3  f0;          // specular F0.
-    public uint  flags;       // bits 0..1 material, bit 2 celestial, bit 3 water-entering, bits 4..6 emission source, bit 7 emitter-in-list, bit 8 dynamic entity, bit 9 weather, bit 10 end-portal unlit.
+    public uint  flags;       // bits 0..1 material, bit 2 celestial, bit 3 water-entering, bits 4..6 emission source, bit 7 emitter-in-list, bit 8 dynamic entity, bit 9 weather, bit 10 end-portal unlit, bit 11 viewmodel.
     public uint   roughMetal;  // packHalf2x16(roughness, metalness)
     public uint   emissionSss; // packHalf2x16(emission, sss)
     public uint   iorTransmission; // packHalf2x16(IOR, transmission factor)
@@ -346,6 +354,10 @@ public static const uint PAYLOAD_WEATHER = 512u;
 // ends. No NEE, no hand light, no RIS, no SHaRC and no indirect bounce, so no scene light (a
 // nearby torch, the sun, GI) can ever illuminate or reflect off the portal's starfield.
 public static const uint PAYLOAD_END_PORTAL_UNLIT = 1024u;
+// Set by world.rchit on the first-person viewmodel (see PRIM_VIEWMODEL): the hit is the local player's
+// own arm or held item. Raygen uses it to trace that surface's shadow rays with CULL_HAND_LIGHT instead
+// of CULL_SECONDARY, so the player's body and the viewmodel itself cannot darken it.
+public static const uint PAYLOAD_VIEWMODEL = 2048u;
 // Set by world.rchit on a terrain hit whose prim carries TERRAIN_PRIM_IN_LIGHT_BUFFER: this emitter is
 // RIS-sampled, so raygen gates its direct-hit emission on diffuse continuation rays (no double count).
 public static const uint PAYLOAD_EMITTER_IN_LIST = 128u;

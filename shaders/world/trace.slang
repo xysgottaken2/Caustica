@@ -7,14 +7,18 @@ import world_common;
 import world_core;
 
 public static const uint CULL_SECONDARY = 0x01u;
+// Camera ray. Bit 1 (0x02) is the "camera-only" instance class: particles and the first-person
+// viewmodel. They are visible to this ray and to nothing else, which is what keeps particles and the
+// hand out of shadows/reflections/GI.
 public static const uint CULL_PRIMARY = 0x02u;
-// Shadow-ray mask for the analytic held-item light: ordinary occluders MINUS the first-person
-// viewmodel. Instance masks in play: terrain/entities/block entities 0xFF, DH LOD 0x03, particles
-// 0x02, the first-person player 0x01. Bits 2..7 keep every 0xFF occluder while matching neither
-// the viewmodel (0x01) nor particles (0x02); DH LOD drops out too, but that geometry sits beyond
-// the vanilla render distance, where the short-range held light neither reaches nor gets blocked
-// by it. Without the exclusion the captured arm/item floats a phantom shadow inside the very beam
-// it casts (the visible hand is vanilla's screen-space overlay, not the captured pose).
+// Occluder set for the analytic held-item light AND for every ray that leaves the first-person
+// viewmodel surface (its NEE, RIS and continuation rays). Instance masks in play: terrain/entities/
+// block entities 0xFF, DH LOD 0x03, particles 0x02, the first-person player body 0x01, the viewmodel
+// 0x02 (camera-only, same as particles). Bits 2..7 keep every 0xFF occluder while matching none of
+// the player body, the particles and the viewmodel. Without it a torch in hand casts a phantom shadow
+// on its own arm (the captured arm/item sits inside the beam), and the arm is permanently darkened by
+// the torso it is attached to. DH LOD drops out too, but that geometry sits beyond the vanilla render
+// distance, where the short-range held light neither reaches nor gets blocked by it.
 public static const uint CULL_HAND_LIGHT = 0xFCu;
 public static const uint TERRAIN_BUCKETS = 4u;
 public static const uint SBT_RADIANCE = 0u;

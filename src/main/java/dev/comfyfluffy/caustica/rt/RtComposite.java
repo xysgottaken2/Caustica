@@ -746,6 +746,10 @@ public final class RtComposite {
     private float mvCamDeltaY;
     private float mvCamDeltaZ;
     private boolean mvHasPrev;
+    // Set by recordFrame when this frame's TLAS carried the first-person viewmodel; the vanilla
+    // screen-space "Item in hand" pass is skipped for exactly that frame (and only when the composite
+    // actually succeeded, so a fallback frame still draws vanilla's hand).
+    private boolean rtViewmodelDrawn;
     private float previousWaterWaveTime;
     private boolean waterWaveTimeValid;
     private long atlasSampler;
@@ -892,6 +896,18 @@ public final class RtComposite {
         }
         RtFrameStats.FRAME.beginIfInactive();
         hdrWrittenThisFrame = false;
+        // Cleared every frame: composite() only sets it again once this frame's RT world was actually
+        // accepted, so the raster hand draws whenever RT is off or fell back to vanilla.
+        rtViewmodelDrawn = false;
+    }
+
+    /**
+     * True when the world composited this frame and its TLAS carried the path-traced first-person
+     * viewmodel. {@code GameRenderer.renderItemInHand} is skipped for exactly those frames: the arm is
+     * already part of the ray-traced world, and drawing the screen-space copy on top would double it.
+     */
+    public boolean rtViewmodelDrawn() {
+        return rtViewmodelDrawn;
     }
 
     /** This frame's completion token, valid until {@link #finishGraphicsUse()} signals it. */
@@ -985,6 +1001,7 @@ public final class RtComposite {
             refreshMaterialBindingsIfNeeded(ctx);
             updateMotion();
             recordFrame(ctx, active, nativeColor);
+            rtViewmodelDrawn = RtEntities.INSTANCE.viewmodelCapturedThisFrame();
             if (!loggedActive) {
                 loggedActive = true;
                 CausticaMod.LOGGER.info("RT composite active (terrain): {}x{}, RT output replaces the world target", width, height);
@@ -1705,7 +1722,8 @@ public final class RtComposite {
             var staticInstances = RtDistantHorizonsTerrain.INSTANCE.appendInstances(
                     terrain.staticInstances(), terrain.blockX, terrain.blockY, terrain.blockZ);
             RtEntities.FrameEntities fe = RtEntities.INSTANCE.beginFrame(ctx, staticInstances,
-                    terrain.blockX, terrain.blockY, terrain.blockZ, camX, camY, camZ, frameProjection, frameViewRotation);
+                    terrain.blockX, terrain.blockY, terrain.blockZ, camX, camY, camZ, frameProjection,
+                    frameViewRotation, mvCamDeltaX, mvCamDeltaY, mvCamDeltaZ);
             frameEntities = fe;
             // Block-breaking overlay: resolves each destroy-stage RenderType's texture into the
             // SAME bindless entity-texture array (destroy_stage_N.png is a standalone Sampler0 texture,

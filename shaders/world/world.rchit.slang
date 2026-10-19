@@ -629,6 +629,11 @@ void main(inout Payload payload, in BuiltInTriangleIntersectionAttributes attr) 
         EntityGeom g = ConstPtr<EntityGeom>(pc.entityTableAddr)[eidx];
         uint pid = PrimitiveIndex() + g.triBase[GeometryIndex()];
         Prim pr = ConstPtr<Prim>(g.primAddr)[pid];
+        // First-person viewmodel (arm / held item) captured in camera space and placed by the TLAS
+        // instance at the camera. Only the flags differ: the shading below is ordinary entity shading,
+        // but raygen must know this surface belongs to the local player so it traces its shadow rays
+        // without the player's own body (see PAYLOAD_VIEWMODEL / CULL_HAND_LIGHT).
+        bool viewmodel = (pr.flags & PRIM_VIEWMODEL) != 0u;
         // Rigid-reuse instances (still / spinning entities re-referencing a cached BLAS) carry a real
         // rotation in the instance transform; per-frame-built entities are identity. The cached prim
         // normal (and the TBN source positions below) are object-space — rotate them into world space.
@@ -687,10 +692,13 @@ void main(inout Payload payload, in BuiltInTriangleIntersectionAttributes attr) 
             payload.albedo = half3(portalColor);
             payload.normal = half3(n);
             payload.hitT = RayTCurrent();
-            payload.motionPrev = half3(0.0h, 0.0h, 0.0h);
+            // Portal geometry is animated in the shader, not in the world; only a camera-locked
+            // viewmodel copy actually translates with the camera and needs the camera delta.
+            payload.motionPrev = viewmodel ? half3(g.rigidDisp.xyz) : half3(0.0h, 0.0h, 0.0h);
             payload.f0 = half3(0.04h, 0.04h, 0.04h);
             payloadSetPacked(payload, MATERIAL_OPAQUE, 0.6, 0.0, portalEmission, 0.0,
                     1.0, 0.0, EMISSION_SOURCE_UNIFORM);
+            if (viewmodel) payload.flags |= PAYLOAD_VIEWMODEL;
             payloadSetDielectric(payload, MATERIAL_OPAQUE, entering);
             // The End portal is fully unlit (like the terrain portal): raygen adds only its own
             // emission and ends the path, and the zero F0 guarantees no specular response — a
@@ -728,7 +736,9 @@ void main(inout Payload payload, in BuiltInTriangleIntersectionAttributes attr) 
             payload.albedo = half3(glintColor);
             payload.normal = half3(n);
             payload.hitT = RayTCurrent();
-            payload.motionPrev = half3(0.0h, 0.0h, 0.0h);
+            // The glint is a coplanar overlay: it inherits the surface's motion. Only the camera-locked
+            // viewmodel copy actually translates with the camera (see the portal branch above).
+            payload.motionPrev = viewmodel ? half3(g.rigidDisp.xyz) : half3(0.0h, 0.0h, 0.0h);
             payload.f0 = half3(0.04h, 0.04h, 0.04h);
             payloadSetPacked(payload, MATERIAL_OPAQUE, 0.6, 0.0,
                     luminance(glintColor) * GLINT_EMISSION, 0.0, 1.0, 0.0, EMISSION_SOURCE_UNIFORM);
@@ -736,6 +746,7 @@ void main(inout Payload payload, in BuiltInTriangleIntersectionAttributes attr) 
             // Entity emissive geometry (armour overlays, the flame, held lights): raygen applies the
             // dynamic/entity emission scale and two-sided lighting to it, like every other entity hit.
             payload.flags |= PAYLOAD_DYNAMIC_ENTITY;
+            if (viewmodel) payload.flags |= PAYLOAD_VIEWMODEL;
             return;
         }
         // POM on the opaque entity BLAS geometry only; cutout/translucent entities keep the exact UV
@@ -777,6 +788,7 @@ void main(inout Payload payload, in BuiltInTriangleIntersectionAttributes attr) 
                 emission, sss, header.params.z, header.params.w,
                 materialEmissionSource(header, emission));
         payload.flags |= PAYLOAD_DYNAMIC_ENTITY;
+        if (viewmodel) payload.flags |= PAYLOAD_VIEWMODEL;
         payloadSetDielectric(payload, material, entering);
         return;
     }

@@ -71,6 +71,15 @@ public final class RtEntityCapture implements VertexConsumer {
     static final int PRIM_FLAG_WEATHER = 16;
     /** Mirrors world_common.slang's PRIM_GLINT (entity-only bit; terrain never sets it). */
     static final int PRIM_FLAG_GLINT = 8;
+    /** Mirrors world_common.slang's PRIM_VIEWMODEL: first-person hand / held item geometry. */
+    static final int PRIM_FLAG_VIEWMODEL = 32;
+    /**
+     * When set, every primitive this capture emits is stamped with {@link #PRIM_FLAG_VIEWMODEL}, which
+     * tells {@code world.rchit} to mark the hit {@code PAYLOAD_VIEWMODEL}. Raygen then lights that
+     * surface with the viewmodel's own occluder mask, so the arm is neither shadowed by the player's
+     * body nor by the item it is holding. Set by {@code RtEntities.beginFrame}'s viewmodel pass.
+     */
+    boolean viewmodel;
     // Bindless texture slot of the armour layer this glint submission sits on (0 = none/unknown).
     // Vanilla gates the glint to the armour surface with an EQUAL depth test: the armour pass wrote
     // depth only where the armour texture is opaque, so the glint never draws over the bare body.
@@ -118,6 +127,7 @@ public final class RtEntityCapture implements VertexConsumer {
         currentPrimFlags = 0;
         currentGlintArmorSlot = 0;
         uvRemap = false;
+        viewmodel = false;
     }
 
     private void ensureVertexCapacity(int vertexCount) {
@@ -179,6 +189,7 @@ public final class RtEntityCapture implements VertexConsumer {
         target.uvV0 = uvV0;
         target.uvDU = uvDU;
         target.uvDV = uvDV;
+        target.viewmodel = viewmodel;
     }
 
     /**
@@ -447,8 +458,10 @@ public final class RtEntityCapture implements VertexConsumer {
             prim.add(tb);
             prim.add((float) currentTexSlot); // tint.w = bindless texture slot
             prim.add(Float.intBitsToFloat(currentMaterialId));
-            // flags lane: portal tags (terrain shading) OR the weather bit (unlit rain/snow in raygen).
-            prim.add(Float.intBitsToFloat(currentPortalFlags | currentPrimFlags));
+            // flags lane: portal tags (terrain shading) OR the weather bit (unlit rain/snow in raygen)
+            // OR the viewmodel bit (first-person arm/held item: raygen uses its own occluder mask).
+            prim.add(Float.intBitsToFloat(currentPortalFlags | currentPrimFlags
+                    | (viewmodel ? PRIM_FLAG_VIEWMODEL : 0)));
             prim.add(opacity); // aux0 = primitive coverage multiplier (read asfloat(aux0) in shaders)
             // aux1 = armour texture slot for the glint gate (int bits; 0 = none/unknown). Only glint
             // submissions carry a non-zero value; every other path leaves it 0 and shaders ignore it.
