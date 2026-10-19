@@ -8,21 +8,32 @@ import world_core;
 
 public static const uint CULL_SECONDARY = 0x01u;
 public static const uint CULL_PRIMARY = 0x02u;
-// Shadow-ray mask for the analytic held-item light: ordinary occluders MINUS the first-person
-// viewmodel. Instance masks in play: terrain/entities/block entities 0xFF, DH LOD 0x03, particles
-// 0x02, the first-person player 0x01. Bits 2..7 keep every 0xFF occluder while matching neither
-// the viewmodel nor particles (both 0x02); DH LOD drops out too, but that geometry sits beyond
-// the vanilla render distance, where the short-range held light neither reaches nor gets blocked
-// by it. Without the exclusion the captured arm/item floats a phantom shadow inside the very beam
-// it casts.
-public static const uint CULL_HAND_LIGHT = 0xFCu;
+// The first-person viewmodel is NOT ordinary world geometry: it is a visual layer on top of the world,
+// exactly like vanilla's screen-space hand, and no camera angle may make a block cut through it. The
+// layer is achieved purely with masks — the viewmodel instance carries ONLY this bit, every world
+// instance has it cleared — so a ray traced with CULL_VIEWMODEL can hit the arm and nothing else, and
+// the raygen can decide "layer wins" independently of distance. See traceViewmodelLayer below.
+public static const uint CULL_VIEWMODEL = 0x08u;
+
+// True when the last traceViewmodelLayer() hit the arm/item. On a miss this stays false and the caller
+// falls through to the ordinary world ray.
+public bool viewmodelLayerHit() { return payload.hitT >= 0.0; }
+
+// Shadow-ray mask for the analytic held-item light: every world occluder MINUS the first-person
+// viewmodel. Instance masks in play: terrain/entities/block entities 0xF7, DH LOD 0x03, particles
+// 0x02, the first-person player 0x01, the viewmodel layer 0x08. Bits 2..7 keep every 0xF7 occluder
+// while matching neither particles nor the viewmodel; DH LOD drops out too, but that geometry sits
+// beyond the vanilla render distance, where the short-range held light neither reaches nor gets
+// blocked by it. Without the exclusion the captured arm/item floats a phantom shadow inside the very
+// beam it casts.
+public static const uint CULL_HAND_LIGHT = 0xF4u;
 // Shadow rays traced FROM the first-person viewmodel's own surface. Same set as CULL_HAND_LIGHT and
 // for the same reason: the player's body (0x01) is in the TLAS with the secondary bit in first person
 // — invisible to the camera, still useful in reflections/GI — so a plain visibility() ray from the arm
 // is blocked by the avatar's own torso and held-item model, stamping a body-shaped shadow on a hand
-// whose body the player cannot see. Bits 2..7 keep every world occluder and drop both the player and
-// the viewmodel itself (self-shadowing between arm and held item would look just as wrong).
-public static const uint CULL_VIEWMODEL_SHADOW = 0xFCu;
+// whose body the player cannot see. Bits 2..7 keep every world occluder and drop the player, particles
+// and the viewmodel layer itself (self-shadowing between arm and held item would look just as wrong).
+public static const uint CULL_VIEWMODEL_SHADOW = 0xF4u;
 public static const uint TERRAIN_BUCKETS = 4u;
 public static const uint SBT_RADIANCE = 0u;
 public static const uint SBT_SHADOW = TERRAIN_BUCKETS;
@@ -85,6 +96,15 @@ public void traceGuide(uint cullMask, float3 ro, float tmin, float3 rd, float tm
     payload = makeRadiancePayload(0u, packHalf2(float2(rayConeWidth, rayConeSpread)));
     TraceRay(topLevelAS, RAY_FLAG_NONE, cullMask, SBT_RADIANCE, SBT_STRIDE_BUCKET,
             MISS_GUIDE, makeRay(ro, tmin, rd, tmax), payload);
+}
+
+// Trace the camera ray against the viewmodel layer only. Uses the cheap guide miss record: for the ~90%
+// of pixels the arm does not cover this must not run the atmosphere march just to be discarded, and a
+// miss leaves the payload's hitT at the negative sentinel. A hit runs the ordinary closest-hit shader,
+// so the arm is still shaded as entity geometry (POM, LabPBR, emissive) — the difference is only that
+// it is resolved before, and independently of, the world.
+public void traceViewmodelLayer(float3 ro, float3 rd, float tmax, float rayConeWidth, float rayConeSpread) {
+    traceGuide(CULL_VIEWMODEL, ro, RAY_TMIN, rd, tmax, rayConeWidth, rayConeSpread);
 }
 
 public Payload makeShadowPayload() {

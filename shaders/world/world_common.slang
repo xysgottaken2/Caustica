@@ -343,12 +343,12 @@ public static const uint PAYLOAD_EMITTER_IN_LIST = 128u;
 // light scale to direct-hit emission while terrain uses the block-emissive scale.
 public static const uint PAYLOAD_DYNAMIC_ENTITY = 256u;
 // Set by world.rchit when the hit is the first-person viewmodel (arm + held item), tagged through the
-// EntityGeom.flags lane (ENTITY_GEOM_VIEWMODEL). The viewmodel is ordinary world-space geometry so it
-// can be path traced, but it must never be treated as world content: it is only visible to the primary
-// camera ray (instance mask 0x02, so shadows/GI/reflections/refractions never see it), and because it
-// shares the world TLAS a nearer block wins the nearest hit and hides the arm instead of letting it
-// poke through walls. Raygen uses this bit only to skip the analytic held-item light on the hand's own
-// surface — the light lives inside the item's flame geometry.
+// EntityGeom.flags lane (ENTITY_GEOM_VIEWMODEL). The viewmodel is path traced like entity geometry, but
+// it is a visual LAYER, not world content: its instance carries the dedicated bit 0x08 (see
+// CULL_VIEWMODEL in trace.slang), which no shadow/GI/reflection mask includes, and the raygen resolves
+// it before the world ray so a block can never cut through the arm. Raygen uses this bit only to skip
+// the analytic held-item light on the hand's own surface — the light lives inside the item's flame
+// geometry.
 public static const uint PAYLOAD_VIEWMODEL = 2048u;
 // Set by world.rchit on any dielectric hit (water or glass/ice): true when the incoming ray travels
 // against the prim's outward face normal (entering the volume), false when it exits. Derived from face

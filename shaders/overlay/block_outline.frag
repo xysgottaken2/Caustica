@@ -19,13 +19,14 @@ layout(location = 0) in vec3 vCamRel; // this fragment's position relative to th
 
 layout(location = 0) out vec4 outColor;
 
-// Same primary-camera-ray cull mask world.rgen's tracePath uses for bounce 0 (see CULL_PRIMARY there /
-// RtEntities.MASK_PRIMARY): the local first-person player's own body is deliberately masked out of primary
-// rays (RtEntities.captureEntities gives it MASK_SECONDARY = 0x01 instead of MASK_ALL), since vanilla never
-// draws your own body in first person either. This ray originates at the camera like a primary ray, so it
-// must use the SAME mask — 0xFF (every instance) would immediately self-intersect the first-person player's
-// body sitting right at the origin and discard every fragment.
-const uint CULL_PRIMARY = 0x02u;
+// Primary-camera-ray cull mask plus the viewmodel layer, mirroring world.rgen's bounce 0. The local
+// first-person player's own body is deliberately masked out of primary rays (RtEntities.captureEntities
+// gives it MASK_SECONDARY = 0x01 instead of MASK_ALL), since vanilla never draws your own body in first
+// person either. The viewmodel bit (0x08) is included here — unlike in the tracer — because the outline
+// must stay behind the arm the way vanilla's does: this query only asks "is a surface in front of this
+// edge?", and the hand is one. 0xFF (every instance) would immediately self-intersect the first-person
+// player's body sitting right at the origin and discard every fragment.
+const uint CULL_PRIMARY = 0x02u | 0x08u;
 
 void main() {
     float dist = length(vCamRel);

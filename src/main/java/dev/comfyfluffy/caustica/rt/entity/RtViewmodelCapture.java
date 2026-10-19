@@ -18,10 +18,11 @@ import org.joml.Matrix4f;
  * models, special models and every material resolution (block atlas POM, LabPBR items, emissive sprites)
  * travel through the same capture code as entities. {@link RtEntities} then uploads that mesh as a
  * transient BLAS with its own TLAS instance, and the record is tagged so {@code world.rchit} can mark
- * viewmodel hits. Because it is a normal TLAS instance, a nearer block wins the nearest hit. That alone
- * would only <em>cut</em> the arm at the wall, though, and a cut arm still reads as the hand being stuck
- * inside the block, so the consuming frame also pulls the mesh toward the eye until it fits in front of
- * the nearest block (see {@link #scaleUniform} and {@code RtEntities.viewmodelPullIn}).
+ * viewmodel hits. The instance carries a visibility bit of its own ({@code RtAccel.MASK_VIEWMODEL_LAYER})
+ * and no world ray's mask includes it, so the camera ray resolves the arm <em>before</em> the world and
+ * keeps it on a hit no matter how close a block is. The viewmodel is therefore a visual layer above the
+ * world — vanilla's screen-space hand behaviour — instead of world geometry that a wall can cut through
+ * or hide, and that rule cannot break at any camera angle because it never compares distances.
  *
  * <p><b>Why one frame of latency.</b> The capture has to run where vanilla submits the hand, which is
  * {@code render3dHud} — <em>after</em> this frame's RT composite (the composite runs at the before-hand
@@ -272,80 +273,6 @@ public final class RtViewmodelCapture {
             prim[base] = wx;
             prim[base + 1] = wy;
             prim[base + 2] = wz;
-        }
-    }
-
-    /**
-     * Largest scale {@code k' <= k} (never below {@code minK}) for which the camera-relative box
-     * {@code [boxMin, boxMax]} scaled by {@code k'} about the eye misses the world-space block box
-     * {@code [lo, hi]}. Returns {@code k} untouched when the block cannot constrain it.
-     *
-     * <p>The scaled box on one axis is {@code [eye + k*a, eye + k*b]}, and "overlaps the block on this
-     * axis" is two linear inequalities in k, so the whole overlap is an interval
-     * {@code [enter, leave]}. Below {@code enter} the box is in front of the block (the case we want);
-     * above {@code leave} the block sits between the eye and the box, which is just as wrong for a
-     * viewmodel that must stay visible — so anything at or past {@code enter} is pulled back to it.
-     *
-     * <p>Pure and package-private so the clearance rule is unit-tested without a world.
-     */
-    static float clearOfBlock(float k, float[] boxMin, float[] boxMax,
-                              double eyeX, double eyeY, double eyeZ,
-                              double loX, double loY, double loZ,
-                              double hiX, double hiY, double hiZ, float minK) {
-        double enter = Double.NEGATIVE_INFINITY;   // first scale at which the box reaches the block
-        double leave = Double.POSITIVE_INFINITY;   // first scale at which the box is past it
-        for (int axis = 0; axis < 3; axis++) {
-            double eye = axis == 0 ? eyeX : axis == 1 ? eyeY : eyeZ;
-            double lo = axis == 0 ? loX : axis == 1 ? loY : loZ;
-            double hi = axis == 0 ? hiX : axis == 1 ? hiY : hiZ;
-            double a = boxMin[axis];
-            double b = boxMax[axis];
-            // eye + k * a <= hi
-            double d = hi - eye;
-            if (a > 0.0) {
-                leave = Math.min(leave, d / a);
-            } else if (a < 0.0) {
-                enter = Math.max(enter, d / a);
-            } else if (d < 0.0) {
-                return k; // the box never reaches this block on this axis
-            }
-            // eye + k * b >= lo
-            d = lo - eye;
-            if (b > 0.0) {
-                enter = Math.max(enter, d / b);
-            } else if (b < 0.0) {
-                leave = Math.min(leave, d / b);
-            } else if (d > 0.0) {
-                return k; // the box never reaches this block on this axis
-            }
-        }
-        if (!(enter <= leave)) {
-            return k; // no scale makes the box touch this block
-        }
-        if (leave < 0.0) {
-            return k; // only a mirrored (negative) scale would reach it
-        }
-        if (k <= enter) {
-            return k; // already in front of it
-        }
-        return Math.max(minK, (float) Math.max(enter, 0.0));
-    }
-
-    /**
-     * Uniformly scale camera-relative positions toward the eye, in place. Uniform scaling about the
-     * camera is projection-exact — a perspective divide makes {@code (k·x)/(k·z) == x/z} — so the
-     * viewmodel keeps its exact on-screen size and position while every vertex moves closer to the eye.
-     * That is what lets the arm fit in front of a nearby block instead of being cut by it.
-     *
-     * <p>Only the {@code vertexFloats} position floats are touched — normals and tangents are derived
-     * from the geometry, not stored here. Only pulls in; {@code k >= 1} is a no-op.
-     */
-    static void scaleUniform(float[] verts, int vertexFloats, float k) {
-        if (!(k > 0.0f) || !(k < 1.0f) || !Float.isFinite(k)) {
-            return;
-        }
-        for (int i = 0; i < vertexFloats; i++) {
-            verts[i] *= k;
         }
     }
 

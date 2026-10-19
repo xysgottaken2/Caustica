@@ -42,11 +42,15 @@ public PathSegment tracePrimary(PathSegment seg,
         PathSegment terminal = makePathSegment(ro, rd, throughput, medium,
                                                rayConeWidth, rayConeSpread, seed, bounce,
                                                showCelestial);
-        // The first-person viewmodel is a TLAS instance like any other entity, so the nearest hit below
-        // is already the world's answer: a wall closer than the arm wins on every pixel, and pass A's
-        // guides describe exactly the surface pass B shades.
-        traceRadiance(CULL_PRIMARY, ro, 0.0, rd, 10000.0,
-                      showCelestial, rayConeWidth, rayConeSpread);
+        // The first-person viewmodel is a visual layer, not part of the world: resolve it first with its
+        // own mask and keep it whenever it is hit, whatever the distance to a block. Only when the arm
+        // does not cover this pixel does the ordinary world ray run — so pass A's guides describe exactly
+        // the surface pass B shades, in both cases.
+        traceViewmodelLayer(ro, rd, 10000.0, rayConeWidth, rayConeSpread);
+        if (!viewmodelLayerHit()) {
+            traceRadiance(CULL_PRIMARY, ro, 0.0, rd, 10000.0,
+                          showCelestial, rayConeWidth, rayConeSpread);
+        }
 
         if (payload.hitT < 0.0) {
             if (bounce == 0) {

@@ -160,19 +160,29 @@ public float3 tracePath(PathSegment seg, uint2 pix, uint sampleIndex,
         // closest-hit for dielectric handling. Geometry is double-sided; the chit flips the normal.
         // Primary (bounce 0) is the camera ray (CULL_PRIMARY): sees particles but not the first-person
         // player. Bounce rays are secondary (CULL_SECONDARY): exclude particles, include the player.
+        // The camera ray (bounce 0) resolves the first-person viewmodel LAYER first, exactly like pass A:
+        // the arm is a visual layer above the world, so a hit there wins regardless of how close a block
+        // is, and the world ray only runs for the pixels the arm does not cover. That is vanilla's
+        // behaviour (the screen-space hand never intersects geometry) and it cannot fail at any camera
+        // angle, because there is no distance comparison to get wrong. Continuation rays keep the plain
+        // secondary mask; the viewmodel carries only CULL_VIEWMODEL, so no bounce can see it.
+        bool viewmodelLayer = false;
+        if (bounce == 0) {
+            traceViewmodelLayer(ro, rd, 10000.0, rayConeWidth, rayConeSpread);
+            viewmodelLayer = viewmodelLayerHit();
+        }
+        if (!viewmodelLayer) {
 #ifdef CAUSTICA_ENABLE_EXT_SER
-        // SER lifetime phase: keep paths that are not roulette-eligible, paths that may terminate via
-        // roulette, and paths guaranteed to end at the bounce cap in separate coherence groups.
-        uint pathPhaseHint = bounce >= maxBounces ? 2u : (bounce >= rrStart ? 1u : 0u);
-        traceRadianceReordered(bounce == 0 ? CULL_PRIMARY : CULL_SECONDARY, ro, 0.0, rd, 10000.0,
-                               showCelestial, rayConeWidth, rayConeSpread, pathPhaseHint);
+            // SER lifetime phase: keep paths that are not roulette-eligible, paths that may terminate via
+            // roulette, and paths guaranteed to end at the bounce cap in separate coherence groups.
+            uint pathPhaseHint = bounce >= maxBounces ? 2u : (bounce >= rrStart ? 1u : 0u);
+            traceRadianceReordered(bounce == 0 ? CULL_PRIMARY : CULL_SECONDARY, ro, 0.0, rd, 10000.0,
+                                   showCelestial, rayConeWidth, rayConeSpread, pathPhaseHint);
 #else
-        traceRadiance(bounce == 0 ? CULL_PRIMARY : CULL_SECONDARY, ro, 0.0, rd, 10000.0,
-                      showCelestial, rayConeWidth, rayConeSpread);
+            traceRadiance(bounce == 0 ? CULL_PRIMARY : CULL_SECONDARY, ro, 0.0, rd, 10000.0,
+                          showCelestial, rayConeWidth, rayConeSpread);
 #endif
-
-        // The viewmodel is ordinary TLAS geometry, so nearest-hit already hides the arm behind a block:
-        // no extra depth-test ray is needed (see RtViewmodelCapture).
+        }
 
         // First-bounce hit distance capture: the trace we just ran is the continuation hop whose
         // distance REBLUR wants for the lobe that spawned it. A miss leaves the distance at 0 —

@@ -37,17 +37,20 @@ final class RtViewmodelShaderRegressionTest {
     private static final Path GAME_RENDERER_MIXIN =
             REPO_ROOT.resolve("src/main/java/dev/comfyfluffy/caustica/mixin/GameRendererMixin.java");
     private static final Path ABI_TSV = REPO_ROOT.resolve("docs/minecraft-26.3-abi.tsv");
+    private static final Path ACCEL = REPO_ROOT.resolve("src/main/java/dev/comfyfluffy/caustica/rt/accel/RtAccel.java");
 
     @Test
     void viewmodelIsPrimaryOnlyAndCannotCastShadowsOrLightTheWorld() {
         String entities = read(RT_ENTITIES);
 
-        // Primary-camera mask only. Secondary culling (shadows/GI/reflections/refraction) is bit 0, and
-        // the analytic held-item light traces with bits 2..7, so a 0x02 instance can do neither.
-        assertTrue(entities.contains("private static final int VIEWMODEL_MASK = MASK_PRIMARY;"),
-                "the viewmodel must share the particles' primary-only visibility");
-        assertTrue((0xFC & 0x02) == 0,
-                "CULL_HAND_LIGHT (0xFC) must keep excluding the viewmodel so a held torch does not shadow itself");
+        // The layer bit (0x08) is carried by the viewmodel alone. No shadow/GI/reflection/held-light mask
+        // includes it, so the instance can neither cast shadows nor leak into indirect lighting.
+        assertTrue(entities.contains("private static final int VIEWMODEL_MASK = RtAccel.MASK_VIEWMODEL_LAYER;"),
+                "the viewmodel must carry the dedicated layer bit");
+        assertTrue((0xF4 & 0x08) == 0,
+                "CULL_HAND_LIGHT (0xF4) must keep excluding the viewmodel so a held torch does not shadow itself");
+        assertTrue((0x01 & 0x08) == 0 && (0x02 & 0x08) == 0,
+                "secondary and ordinary primary masks must not see the layer");
         assertTrue(entities.contains("ENTITY_BIT, VIEWMODEL_MASK"),
                 "the viewmodel instance must be an entity-kind instance with the primary-only mask");
     }
@@ -84,32 +87,40 @@ final class RtViewmodelShaderRegressionTest {
     }
 
     @Test
-    void viewmodelStaysInFrontOfBlocksAndIgnoresThePlayersOwnBody() {
+    void viewmodelIsAVisualLayerAboveTheWorld() {
         String entities = read(RT_ENTITIES);
         String direct = read(INDIRECT_RGEN);
         String trace = read(TRACE);
         String lighting = read(LIGHTING);
 
-        // The viewmodel is uploaded through the transient BLAS path into this frame's instance list: a
-        // normal TLAS instance, so nearest-hit already depth-tests it against the world. No extra
-        // occlusion ray is needed (and an earlier probe culled with CULL_SECONDARY would have hidden the
-        // arm behind the player's own first-person body, which is exactly the one occluder it must ignore).
+        // The viewmodel is uploaded through the transient BLAS path into this frame's instance list, but
+        // on a visibility bit of its own: the camera ray resolves that layer before the world and keeps it
+        // on a hit regardless of distance, which is the only rule that cannot break at some camera angle
+        // (two geometric remedies were tried and both could still be defeated by the wall's distance).
         assertTrue(entities.contains("appendCapture(ctx, build, vmCapture, motion, -1, ENTITY_BIT, VIEWMODEL_MASK,"),
                 "the viewmodel must go through the same transient instance upload as particles");
-        for (Path shader : new Path[] {TRACE, PRIMARY_RGEN, INDIRECT_RGEN}) {
-            assertTrue(!read(shader).contains("resolveViewmodelOcclusion"),
-                    "no depth-test ray may remain: the TLAS nearest hit is the depth test (" + shader + ")");
-        }
+        assertTrue(entities.contains("private static final int VIEWMODEL_MASK = RtAccel.MASK_VIEWMODEL_LAYER;"),
+                "the viewmodel must carry its own layer bit, not the ordinary primary mask");
+        assertTrue(read(ACCEL).contains("public static final int MASK_VIEWMODEL_LAYER = 0x08;"));
+        assertTrue(read(ACCEL).contains("public static final int MASK_WORLD = 0xF7;"),
+                "every world instance must leave the layer bit clear, or a layer trace could hit the world");
 
-        // Nearest-hit alone only CUTS the arm at the wall, so the upload also pulls the mesh in front of
-        // every block. The clearance has to stay the exact per-block solve: a sampled version let block
-        // corners slip between probe directions and the hand poked through walls at some camera angles.
-        assertTrue(entities.contains("RtViewmodelCapture.clearOfBlock(pullIn, boxMin, boxMax"),
-                "the upload must scale the captured mesh clear of nearby blocks");
-        assertTrue(entities.contains("RtViewmodelCapture.scaleUniform(vmCapture.verts.elements()"),
-                "the clearance must be applied as a projection-exact uniform scale");
-        assertTrue(!entities.contains("ClipContext.Block.COLLIDER"),
-                "block clearance must not go back to sampled ray probes");
+        String traceText = read(TRACE);
+        assertTrue(traceText.contains("public static const uint CULL_VIEWMODEL = 0x08u;"));
+        assertTrue(traceText.contains("public void traceViewmodelLayer("),
+                "the ray generation needs a viewmodel-only trace");
+        // Layer first, world only on a miss — in BOTH passes, or guides (pass A) and shading (pass B)
+        // would disagree about which surface the camera ray hit.
+        assertTrue(read(PRIMARY_RGEN).contains("traceViewmodelLayer(ro, rd, 10000.0, rayConeWidth, rayConeSpread);\n"
+                        + "        if (!viewmodelLayerHit()) {"),
+                "pass A must resolve the viewmodel layer before the world ray");
+        assertTrue(read(INDIRECT_RGEN).contains("if (bounce == 0) {\n"
+                        + "            traceViewmodelLayer(ro, rd, 10000.0, rayConeWidth, rayConeSpread);"),
+                "pass B's camera ray must resolve the same layer");
+        // The geometric clearance experiments must not come back: the layer has no distance to get wrong.
+        assertTrue(!entities.contains("viewmodelPullIn"));
+        assertTrue(!read(VIEWMODEL_CAPTURE).contains("clearOfBlock"));
+        assertTrue(!entities.contains("ClipContext.Block.COLLIDER"));
 
         // The hand must not receive its own carried light: the analytic lamp sits inside the item's flame
         // geometry, so NEE from the hand's own surface would light it from the inside.
@@ -119,10 +130,11 @@ final class RtViewmodelShaderRegressionTest {
 
         // ...and it must not receive the player's body either. In first person that entity keeps the
         // secondary bit, so an ordinary shadow ray from the arm lands the avatar's silhouette on it.
-        assertTrue(trace.contains("public static const uint CULL_VIEWMODEL_SHADOW = 0xFCu;"),
+        assertTrue(trace.contains("public static const uint CULL_VIEWMODEL_SHADOW = 0xF4u;"),
                 "the viewmodel needs its own shadow cull mask with the player's bit removed");
-        assertTrue((0xFC & 0x01) == 0, "CULL_VIEWMODEL_SHADOW must exclude the first-person player");
-        assertTrue((0xFC & 0x02) == 0, "CULL_VIEWMODEL_SHADOW must exclude the viewmodel itself");
+        assertTrue((0xF4 & 0x01) == 0, "CULL_VIEWMODEL_SHADOW must exclude the first-person player");
+        assertTrue((0xF4 & 0x02) == 0, "CULL_VIEWMODEL_SHADOW must exclude particles");
+        assertTrue((0xF4 & 0x08) == 0, "CULL_VIEWMODEL_SHADOW must exclude the viewmodel layer itself");
         assertTrue(direct.contains("uint shadowCull = isViewmodelEarly ? CULL_VIEWMODEL_SHADOW : CULL_SECONDARY;"),
                 "the receiver must pick its shadow mask from the viewmodel classification");
         assertTrue(direct.contains("visibilityCulled(p, lightDir, 10000.0, shadowCull)"),

@@ -2,7 +2,6 @@ package dev.comfyfluffy.caustica.rt.entity;
 
 import com.mojang.blaze3d.vertex.PoseStack;
 import dev.comfyfluffy.caustica.CausticaConfig;
-import dev.comfyfluffy.caustica.CausticaMod;
 import dev.comfyfluffy.caustica.mixin.ParticleEngineAccessor;
 import dev.comfyfluffy.caustica.mixin.ParticleGroupAccessor;
 import net.minecraft.client.Camera;
@@ -24,11 +23,8 @@ import net.minecraft.core.BlockPos;
 import net.minecraft.network.chat.Component;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.level.ClipContext;
-import net.minecraft.util.Mth;
 import net.minecraft.world.level.block.entity.BlockEntity;
-import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.chunk.LevelChunk;
-import net.minecraft.world.phys.AABB;
 import net.minecraft.world.phys.HitResult;
 import net.minecraft.world.phys.Vec3;
 import net.minecraft.world.phys.shapes.CollisionContext;
@@ -89,20 +85,26 @@ public final class RtEntities {
     /** Custom-index flag (bit 22) marking a particle billboard instance (shares the entity geom table). */
     public static final int PARTICLE_BIT = 0x400000;
     // TLAS visibility-mask bits, ANDed against the per-ray cull mask in world.rgen. Bit 0 = secondary rays
-    // (shadows / GI / reflections, CULL_SECONDARY); bit 1 = the primary camera ray (CULL_PRIMARY).
+    // (shadows / GI / reflections, CULL_SECONDARY); bit 1 = the primary camera ray (CULL_PRIMARY); bit 3 =
+    // the viewmodel layer (CULL_VIEWMODEL), which every other instance must leave clear so a layer trace
+    // can hit the arm and nothing else.
     private static final int MASK_SECONDARY = 0x01;
     private static final int MASK_PRIMARY = 0x02;
-    /** Default mask: visible to every ray (terrain and ordinary entities use this). */
-    private static final int MASK_ALL = 0xFF;
+    /** Default mask: visible to every world ray (terrain and ordinary entities use this). */
+    private static final int MASK_ALL = 0xF7;
     /** Particles are primary-ray-only: visible/lit by the camera path, invisible to shadows/GI/reflections. */
     private static final int PARTICLE_MASK = MASK_PRIMARY;
     /**
-     * The first-person viewmodel is captured as world-space geometry but stays primary-ray-only, like
-     * particles: it must never cast a shadow, leak into GI/reflections/refractions, or sit inside the
-     * analytic held-item light's shadow ray (the item carries that light). Because it shares the world
-     * TLAS, a nearer block wins the primary camera ray and hides the arm (no clipping through walls).
+     * The first-person viewmodel carries its own visibility bit and nothing else.
+     *
+     * <p>It is a <b>visual layer</b>, not world geometry: the camera ray resolves it before the world and
+     * keeps it on a hit regardless of distance, exactly like vanilla's screen-space hand, so no camera
+     * angle can make a block cut through the arm. The dedicated bit is what makes that possible — a
+     * {@code CULL_VIEWMODEL} trace can hit only the arm, because every world instance has this bit clear.
+     * It also means the instance is invisible to shadow rays, GI, reflections and the analytic held-item
+     * light without any further culling, since none of those masks carry this bit.
      */
-    private static final int VIEWMODEL_MASK = MASK_PRIMARY;
+    private static final int VIEWMODEL_MASK = RtAccel.MASK_VIEWMODEL_LAYER;
     /** EntityGeom.flags bit mirrored by world_common.slang's ENTITY_GEOM_VIEWMODEL. */
     public static final int ENTITY_FLAG_VIEWMODEL = 1;
     public static boolean particlesEnabled() {
@@ -659,7 +661,7 @@ public final class RtEntities {
             // the previous frame's render3dHud, so this stage only poses it into this frame's camera and
             // uploads a transient BLAS — see RtViewmodelCapture.
             try (RtFrameStats.Scope ignored = RtFrameStats.FRAME.stage("entity.viewmodel")) {
-                captureViewmodel(ctx, build, level, rbx, rby, rbz, camX, camY, camZ, projection, viewRotation);
+                captureViewmodel(ctx, build, rbx, rby, rbz, camX, camY, camZ, projection, viewRotation);
             }
         } catch (RuntimeException | Error t) {
             // A partially recorded frame may already have installed unbuilt BLAS into persistent slots.
@@ -700,15 +702,17 @@ public final class RtEntities {
      * the Hand-FOV lateral scale along the camera's own view axes, so the arm always sits in front of the
      * current eye. The instance transform is then a pure translation to the camera position, which keeps
      * the hit shader's normal handling exact (identity rotation) while the per-vertex motion delta —
-     * measured in that same camera-relative space — stays valid as the camera turns. The instance mask
-     * makes it
-     * primary-camera-only, and {@link #ENTITY_FLAG_VIEWMODEL} tags the geometry-table entry so
-     * {@code world.rchit} can mark viewmodel hits, which raygen uses to skip the held-item light on the
-     * hand itself. Being an ordinary TLAS instance also means a nearer block wins the nearest hit — and
-     * {@link #viewmodelPullIn} then pulls the whole mesh in front of that block, so the arm is neither
-     * occluded by walls nor embedded in them.
+     * measured in that same camera-relative space — stays valid as the camera turns.
+     * {@link #ENTITY_FLAG_VIEWMODEL} tags the geometry-table entry so {@code world.rchit} can mark
+     * viewmodel hits, which raygen uses to skip the held-item light on the hand itself.
+     *
+     * <p>It is NOT world geometry: the instance carries only {@link #VIEWMODEL_MASK}, and the camera ray
+     * resolves that layer before the world ({@code traceViewmodelLayer}), keeping it on a hit whatever
+     * the distance — vanilla's screen-space hand behaviour, so no block can cut through the arm at any
+     * angle. That is also why nothing here computes clearance any more: there is no depth comparison
+     * left to get wrong.
      */
-    private void captureViewmodel(RtContext ctx, FrameBuild build, ClientLevel level,
+    private void captureViewmodel(RtContext ctx, FrameBuild build,
                                   int rbx, int rby, int rbz,
                                   double camX, double camY, double camZ,
                                   Matrix4f projection, Matrix4f viewRotation) {
@@ -730,16 +734,6 @@ public final class RtEntities {
             viewmodelPrev = null;
             return;
         }
-        // Keep the whole arm in front of the nearest block. Per-pixel depth testing alone only cuts the
-        // arm where the block surface crosses it, which still reads as the hand being inside the wall;
-        // pulling the mesh toward the eye is projection-exact (uniform scale about the camera leaves the
-        // on-screen image unchanged) and makes the intersection impossible instead of merely hidden.
-        float pullIn = viewmodelPullIn(level, vmCapture, camX, camY, camZ);
-        if (pullIn < 1.0f && !reportedViewmodelPullIn) {
-            reportedViewmodelPullIn = true;
-            CausticaMod.LOGGER.info("Viewmodel pulled in to {} of its distance to stay clear of a block", pullIn);
-        }
-        RtViewmodelCapture.scaleUniform(vmCapture.verts.elements(), vmCapture.verts.size(), pullIn);
         Motion motion = uploadVertexMotion(ctx, build, vmCapture.verts, viewmodelPrev, 0.0f, 0.0f, 0.0f);
         viewmodelPrev = storeEntityPrev(viewmodelPrev, vmCapture.verts, 0.0f, 0.0f, 0.0f);
         appendCapture(ctx, build, vmCapture, motion, -1, ENTITY_BIT, VIEWMODEL_MASK,
@@ -747,97 +741,6 @@ public final class RtEntities {
                 ENTITY_FLAG_VIEWMODEL);
         build.logicalCount++;
         RtFrameStats.FRAME.count("viewmodelVertices", vmCapture.verts.size() / 3);
-    }
-
-    /** Clearance kept between the arm and a block surface it would otherwise touch (blocks). */
-    private static final float VIEWMODEL_CLEARANCE_MARGIN = 0.02f;
-    /** Never shrink the arm past this fraction of its distance: below it the arm sits inside the near field. */
-    private static final float VIEWMODEL_MIN_PULL_IN = 0.1f;
-
-    /** One-shot diagnostic: proves from the log that the clearance pull-in engaged. */
-    private boolean reportedViewmodelPullIn;
-
-    /**
-     * Uniform scale about the camera that keeps the whole captured viewmodel in front of every block.
-     *
-     * <p>Walked block by block rather than sampled with rays. Scaling the posed mesh's axis-aligned box
-     * by {@code k} about the eye makes "the box touches this block" an <em>interval</em> of k — every
-     * constraint is linear in k, so the boundaries are just quotients — and the largest k that stays
-     * outside it can be computed exactly. Ray probes cannot promise that: a block corner can sit between
-     * two probe directions and poke through the arm at some camera angles, which is exactly what happens
-     * when the arm is merely "mostly" in front of the wall.
-     *
-     * <p>The block boxes come from the collision shape bounds and are inflated by
-     * {@link #VIEWMODEL_CLEARANCE_MARGIN}, so the arm ends up a couple of centimetres clear instead of
-     * exactly touching. Only the voxels the arm can possibly reach are visited: the world box spanning
-     * the eye and the unscaled mesh box — a few dozen blocks for a hand-sized mesh.
-     */
-    private float viewmodelPullIn(ClientLevel level, RtEntityCapture capture,
-                                  double camX, double camY, double camZ) {
-        float[] v = capture.verts.elements();
-        int count = capture.verts.size();
-        if (level == null || count < 3) {
-            return 1.0f;
-        }
-        float minX = Float.MAX_VALUE, minY = Float.MAX_VALUE, minZ = Float.MAX_VALUE;
-        float maxX = -Float.MAX_VALUE, maxY = -Float.MAX_VALUE, maxZ = -Float.MAX_VALUE;
-        for (int i = 0; i + 2 < count; i += 3) {
-            float x = v[i], y = v[i + 1], z = v[i + 2];
-            if (x < minX) minX = x;
-            if (y < minY) minY = y;
-            if (z < minZ) minZ = z;
-            if (x > maxX) maxX = x;
-            if (y > maxY) maxY = y;
-            if (z > maxZ) maxZ = z;
-        }
-        float[] boxMin = {minX, minY, minZ};
-        float[] boxMax = {maxX, maxY, maxZ};
-        // Every scaled box lies inside the hull of the eye and the unscaled box, so only these voxels
-        // can ever matter.
-        int x0 = Mth.floor(Math.min(camX, camX + minX));
-        int x1 = Mth.floor(Math.max(camX, camX + maxX));
-        int y0 = Mth.floor(Math.min(camY, camY + minY));
-        int y1 = Mth.floor(Math.max(camY, camY + maxY));
-        int z0 = Mth.floor(Math.min(camZ, camZ + minZ));
-        int z1 = Mth.floor(Math.max(camZ, camZ + maxZ));
-        if (x1 - x0 > 3 || y1 - y0 > 3 || z1 - z0 > 3) {
-            return 1.0f; // not a hand-sized mesh (a modded model, say): don't walk the world for it
-        }
-        BlockPos.MutableBlockPos pos = new BlockPos.MutableBlockPos();
-        float pullIn = 1.0f;
-        // Shrinking past one block can bring a nearer one into reach, so sweep until stable. k only
-        // decreases and is floored by VIEWMODEL_MIN_PULL_IN, so this terminates; two passes cover every
-        // hand-sized mesh and the cap keeps a pathological one bounded.
-        for (int pass = 0; pass < 4; pass++) {
-            float before = pullIn;
-            for (int bx = x0; bx <= x1; bx++) {
-                for (int by = y0; by <= y1; by++) {
-                    for (int bz = z0; bz <= z1; bz++) {
-                        pos.set(bx, by, bz);
-                        BlockState state = level.getBlockState(pos);
-                        if (state.isAir()) {
-                            continue;
-                        }
-                        var shape = state.getCollisionShape(level, pos);
-                        if (shape.isEmpty()) {
-                            continue;
-                        }
-                        AABB box = shape.bounds();
-                        pullIn = RtViewmodelCapture.clearOfBlock(pullIn, boxMin, boxMax,
-                                camX, camY, camZ,
-                                box.minX - VIEWMODEL_CLEARANCE_MARGIN, box.minY - VIEWMODEL_CLEARANCE_MARGIN,
-                                box.minZ - VIEWMODEL_CLEARANCE_MARGIN,
-                                box.maxX + VIEWMODEL_CLEARANCE_MARGIN, box.maxY + VIEWMODEL_CLEARANCE_MARGIN,
-                                box.maxZ + VIEWMODEL_CLEARANCE_MARGIN,
-                                VIEWMODEL_MIN_PULL_IN);
-                    }
-                }
-            }
-            if (pullIn >= before) {
-                break;
-            }
-        }
-        return pullIn;
     }
 
     /**
@@ -1529,7 +1432,7 @@ public final class RtEntities {
         // Block-local mesh placed by a translate-only instance transform (blockPos − rebase), like terrain.
         float[] xform = {1, 0, 0, e.bx - rbx, 0, 1, 0, e.by - rby, 0, 0, 1, e.bz - rbz};
         build.instances.add(new RtAccel.Instance(xform, e.accel.deviceAddress,
-                ENTITY_BIT | (build.count & 0x7FFFFF), 0xFF, RtAccel.SBT_ENTITY_OFFSET));
+                ENTITY_BIT | (build.count & 0x7FFFFF), MASK_ALL, RtAccel.SBT_ENTITY_OFFSET));
         build.count++;
         build.lists.usedBlockEntities.add(e);
         build.logicalCount++;

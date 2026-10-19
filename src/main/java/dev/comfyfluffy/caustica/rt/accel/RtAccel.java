@@ -80,6 +80,17 @@ import static org.lwjgl.vulkan.KHRSynchronization2.vkCmdPipelineBarrier2KHR;
  * factories; free with {@link #destroy()}. One BLAS per section; one TLAS rebuilt per frame.
  */
 public final class RtAccel {
+    /**
+     * Visibility mask of every ordinary world instance: terrain, DH LOD, entities, block entities.
+     *
+     * <p>Bit 3 (0x08) is deliberately clear. It belongs to the first-person viewmodel layer, and a
+     * {@code CULL_VIEWMODEL} trace may only find the arm — so no world instance, in any category, may
+     * carry it.
+     */
+    public static final int MASK_WORLD = 0xF7;
+    /** Visibility mask carried by the first-person viewmodel instance, and only by it. */
+    public static final int MASK_VIEWMODEL_LAYER = 0x08;
+
     private static final long TLAS_INSTANCE_ADDRESS_ALIGNMENT = 16L;
     // vkCmdBuildMicromapsEXT requires both data.deviceAddress and triangleArray.deviceAddress to be
     // multiples of 256 (VUID-vkCmdBuildMicromapsEXT-pInfos-07515).
@@ -944,7 +955,7 @@ public final class RtAccel {
      */
     public record Instance(float[] transform3x4, long blasDeviceAddress, int customIndex, int mask, int sbtRecordOffset) {
         public Instance(float[] transform3x4, long blasDeviceAddress, int customIndex) {
-            this(transform3x4, blasDeviceAddress, customIndex, 0xFF, 0);
+            this(transform3x4, blasDeviceAddress, customIndex, MASK_WORLD, 0);
         }
 
         public Instance(float[] transform3x4, long blasDeviceAddress, int customIndex, int mask) {

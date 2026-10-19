@@ -795,7 +795,8 @@ public float3 handLightIrradiance(float3 origin, float3 hitPos, float3 n, bool t
 // TLAS instance-mask bits (set on the Java side, ANDed against these per-ray cull masks):
 //   bit 0 (0x01) — secondary rays: shadows, GI bounces, reflections.
 //   bit 1 (0x02) — the primary camera ray.
-// Terrain / entities / block entities keep 0xFF (both bits). Particles and the first-person
-// viewmodel use 0x02: primary-visible only, so neither can cast shadows or leak into GI.
-// The held-item light traces with CULL_HAND_LIGHT (bits 2..7): every 0xFF occluder, neither the
-// viewmodel (0x02, it carries the flame) nor particles (0x02).
+//   bit 3 (0x08) — the first-person viewmodel layer, and nothing else.
+// Terrain / entities / block entities keep 0xF7 (bits 0 and 1, layer bit clear). Particles use 0x02,
+// the first-person player 0x01, and the viewmodel only 0x08 — resolved by its own trace, so it can
+// neither cast shadows nor leak into GI. The held-item light traces with CULL_HAND_LIGHT (bits 2..7):
+// every 0xF7 world occluder, neither the viewmodel (it carries the flame) nor particles.

@@ -156,63 +156,62 @@ original; só o destino dos vértices muda.
 
 **Consumo.** `GameRenderer.renderItemInHand` semeia o `PoseStack` da mão com
 `viewRotationMatrix.invert()` (visão→mundo) e o pass da mão liga
-`viewRotationMatrix` como model-view; a submissão chega, portanto, em **espaço
-mundial relativo à câmera do quadro da captura** (eixos do mundo, câmera na
-origem, mas ainda com a orientação daquela câmera). No quadro seguinte,
-`RtViewmodelCapture.takePosed` desfaz essa rotação (`V_captura`), aplica o fator
-lateral de FOV nas coordenadas de visão e reaplica a rotação da câmera atual
-(`V_atual⁻¹`), de modo que o braço acompanhe a câmera em vez de ficar preso aos
-eixos do mundo. `RtEntities.beginFrame` sobe então um BLAS transitório com
-instância própria (`ENTITY_BIT`, máscara `0x02`) e
-`EntityGeom.flags = ENTITY_GEOM_VIEWMODEL`. A instância entra no mesmo TLAS do
-terreno e das entidades, então o nearest-hit **já é** o teste de profundidade:
-um bloco mais próximo que o braço vence o pixel, sem raio de oclusão extra (um
-probe com `CULL_SECONDARY` esconderia a mão atrás do próprio corpo do jogador, o
-único oclusor que ela deve ignorar). `world.rchit` marca o hit com
-`PAYLOAD_VIEWMODEL`, e `world.rgen` usa esse bit para não aplicar a luz
-analítica do item na própria mão.
+`viewRotationMatrix` como model-view. Com as duas juntas, um vértice `p` do
+modelo chega como `V⁻¹·T·p`, isto é, **espaço mundial relativo à câmera**
+(eixos do mundo, câmera na origem) — exatamente o espaço que o upload espera,
+porque a instância é uma translação pura até a posição da câmera. Nenhuma
+rotação é desfeita nem reaplicada: `RtViewmodelCapture.takePosed` só aplica o
+fator lateral de FOV nas coordenadas de visão e devolve o vértice ao mesmo
+espaço, então o braço acompanha a câmera em vez de ficar preso aos eixos do
+mundo. `RtEntities.beginFrame` sobe então um BLAS transitório com instância
+própria e `EntityGeom.flags = ENTITY_GEOM_VIEWMODEL`.
 
-**Folga contra blocos.** O nearest-hit sozinho *corta* o braço no plano da
-parede quando o jogador encosta nela — o braço tem ~0,5–1,0 bloco de
-profundidade, a parede fica a ~0,3, e o resultado lê como "a mão entrou no
-bloco". `RtEntities.viewmodelPullIn` resolve isso **por bloco, não por
-amostragem**: escalar a caixa do braço por `k` em torno do olho faz "a caixa
-toca este bloco" ser um *intervalo* de `k` (cada eixo é uma inequação linear),
-então `RtViewmodelCapture.clearOfBlock` acha o maior `k` exato que fica à
-frente — sem raio que possa escapar entre duas direções de teste, que é
-justamente como um canto de bloco entrava no braço em certos ângulos de câmera.
-Só os voxels alcançáveis são visitados (a caixa do mundo que cobre o olho e a
-caixa da malha, ≤ 27 blocos), com os *bounds* da forma de colisão inflados em
-2 cm — daí a mão ficar com folga, e não encostada. Blocos macios (grama, flor,
-tocha) não têm forma de colisão e não encolhem a mão.
+**Camada acima do mundo.** O viewmodel **não** é geometria do mundo: é uma
+camada visual, como a mão screen-space do vanilla. A instância carrega um bit de
+visibilidade só dela (`RtAccel.MASK_VIEWMODEL_LAYER = 0x08`) e **todo** instance
+do mundo tem esse bit zerado (`MASK_WORLD = 0xF7`, DH LOD `0x03`, partículas
+`0x02`, jogador em primeira pessoa `0x01`). Com isso um raio traçado com
+`CULL_VIEWMODEL = 0x08` pode acertar **o braço e nada mais** — e o raygen
+resolve a camada **antes** do mundo:
 
-O fator é aplicado por `RtViewmodelCapture.scaleUniform`: uma escala **uniforme
-em torno da câmera**. Escala uniforme é projeção-exata — o divide perspectiva
-preserva `(kx)/(kz) = x/z` — então a mão não muda de tamanho nem de posição na
-tela: só deixa de existir dentro do bloco. O mínimo é 10% (não colapsa no
-olho), o resultado entra no cálculo de motion vectors porque é aplicado antes de
-`uploadVertexMotion`/`storeEntityPrev`, e o laço repete até estabilizar porque
-encolher até um bloco pode trazer um bloco mais próximo ao alcance.
+```text
+traceViewmodelLayer(ro, rd, ...);      // mascara 0x08: so o braco
+if (!viewmodelLayerHit()) {
+    traceRadiance(CULL_PRIMARY, ...);  // so quando a mao nao cobre o pixel
+}
+```
+
+Um acerto na camada vence independentemente da distância: nenhum bloco corta o
+braço, em nenhum ângulo, porque **não existe comparação de profundidade para
+errar**. É exatamente o comportamento vanilla (a mão nunca atravessa geometria),
+só que o braço continua sendo sombreado pelo caminho de entidade — POM de bloco,
+LabPBR, emissão — e continua recebendo luz/sombra do mundo pelos raios
+secundários. O mesmo par é usado nos dois passes (A: guias; B: shading), então
+guia e cor descrevem a mesma superfície.
+
+O miss usa o registro `MISS_GUIDE` (barato): para os ~90% de pixels que a mão
+não cobre, a camada não pode disparar a marcha de atmosfera só para ser
+descartada. Um miss deixa `hitT` negativo e o raio do mundo segue normalmente.
 
 **Sombra do próprio jogador.** Em primeira pessoa o corpo do jogador continua
 no TLAS com a máscara `0x01` (invisível à câmera, presente em reflexões e GI) —
 e é justamente ele que aparecia projetado sobre o braço, junto com o modelo do
 item seguro pela mão do avatar. Por isso os raios de sombra disparados **da
-superfície do viewmodel** usam `CULL_VIEWMODEL_SHADOW = 0xFC`: mantém terreno,
-entidades e block entities, e remove o jogador (`0x01`) e a própria mão
-(`0x02`, que também barra o auto-sombreamento entre braço e item). O valor é o
-mesmo de `CULL_HAND_LIGHT`, escolhido em `world.rgen` por
+superfície do viewmodel** usam `CULL_VIEWMODEL_SHADOW = 0xF4`: mantém terreno,
+entidades e block entities, e remove o jogador (`0x01`), as partículas (`0x02`)
+e a própria camada (`0x08`, que também barra o auto-sombreamento entre braço e
+item). O valor é o mesmo de `CULL_HAND_LIGHT`, escolhido em `world.rgen` por
 `isViewmodelEarly` e passado a `shadeReservoir`/`shadeReservoirSplit`
 (RIS/ReSTIR), à NEE do sol e ao backlight de SSS.
 
 **Garantias preservadas.**
-- *Sem sombra*: a instância é invisível a raios secundários (`0x01`), então o
-  braço não projeta sombra em nada; GI, reflexões e refrações também não veem o
-  braço. Na direção inversa, a mão ignora o corpo do jogador e a si mesma nos
-  próprios raios de sombra (`CULL_VIEWMODEL_SHADOW`), como descrito acima.
-- *Luz do item*: `CULL_HAND_LIGHT = 0xFC` continua excluindo a instância, e
-  `PAYLOAD_VIEWMODEL` desliga a NEE da luz analítica na superfície da mão, então
-  o item não ilumina a própria chama por dentro nem projeta sombra fantasma.
+- *Sem sombra*: nenhuma máscara de raio secundário inclui `0x08`, então a
+  instância é invisível para sombras, GI, reflexões e refrações; o braço não
+  projeta sombra em nada. Na direção inversa, a mão ignora o corpo do jogador e
+  a si mesma nos próprios raios de sombra (`CULL_VIEWMODEL_SHADOW`).
+- *Luz do item*: `CULL_HAND_LIGHT = 0xF4` exclui a camada, e `PAYLOAD_VIEWMODEL`
+  desliga a NEE da luz analítica na superfície da mão, então o item não ilumina
+  a própria chama por dentro nem projeta sombra fantasma.
 - *Materiais*: o caminho de entidade já resolve POM de bloco (`GeometryIndex()==0`,
   `MATERIAL_OPAQUE`), normais/AO LabPBR, emissão e glint, então itens PBR e itens
   luminosos funcionam sem um segundo conjunto de materiais.
@@ -227,16 +226,15 @@ mesmo de `CULL_HAND_LIGHT`, escolhido em `world.rgen` por
   ligado, ele segue o slider.
 - *Movimento*: a captura é consumida no quadro seguinte, porque a submissão da mão
   acontece em `render3dHud`, depois do composite RT (que roda no seam antes da
-  mão). A rotação relativa entre os dois quadros é desfeita na captura, então
-  girar a câmera não descola nem atrasa o braço; só a animação própria
-  (bob/swing/troca de item) fica um quadro atrás, com motion vectors medidos
-  nesse mesmo espaço relativo à câmera.
+  mão). O vértice já é relativo à câmera, então girar a câmera não descola nem
+  atrasa o braço; só a animação própria (bob/swing/troca de item) fica um quadro
+  atrás, com motion vectors medidos nesse mesmo espaço relativo à câmera.
 
-**Limitação conhecida.** Como só o raio primário vê o braço, uma superfície
-dielétrica entre a câmera e a mão (vidro encostado no rosto) faz o braço
-desaparecer: a continuação refratada traça com a máscara secundária. O caso é
-raro e resolvê-lo exigiria um bit dedicado de "visível também na continuação
-dielétrica", o que reintroduziria o braço em reflexões/GI.
+**Limitação conhecida.** Como o braço é uma camada, ele cobre o que estiver
+atrás dele — inclusive uma parede encostada no rosto. É o mesmo compromisso da
+mão screen-space do vanilla: o braço nunca é cortado nem escondido, e em troca
+não existe "a mão atrás do vidro". Também não há sombra própria do item sobre a
+mão (`CULL_VIEWMODEL_SHADOW` remove a camada dos próprios raios de sombra).
 
 **Fallback.** Até a primeira captura bem-sucedida — e depois de qualquer falha —
 o sink espelha a submissão no collector vanilla, então a mão nunca desaparece;
@@ -313,9 +311,9 @@ A infraestrutura de partículas agora está isolada em `ParticleCapture` e
 `ParticleGeometryManager`; não há alteração em `ParticleCapture`, `ParticleGeometryManager`
 ou `FallingBlockEntity` nesta etapa. Sombras compartilham o TLAS existente. O
 viewmodel em primeira pessoa é capturado da submissão vanilla e entra no TLAS
-como geometria própria (máscara primária, sem sombra/GI), com a profundidade
-resolvida pelo próprio nearest-hit do TLAS contra o mundo e com folga
-geométrica contra o bloco mais próximo (ver *Folga contra blocos* acima). O gate é `verifyMinecraftAbi`, compilação
+com um bit de visibilidade exclusivo, resolvido **antes** do mundo como camada
+visual (sem sombra/GI, e sem nenhuma comparação de profundidade — ver *Camada
+acima do mundo* acima). O gate é `verifyMinecraftAbi`, compilação
 Java/ShaderC/SPIR-V e execução no cliente 26.3. CI valida apenas build, ABI, testes CPU e SPIR-V;
 **CI não equivale a validação visual** de sombras, alpha/OIT, FOV, troca de
 item, animação, offhand, especial, transparência ou hit RT. A validação final
