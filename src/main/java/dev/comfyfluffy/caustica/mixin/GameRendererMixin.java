@@ -5,6 +5,7 @@ import com.mojang.blaze3d.systems.RenderSystem;
 import com.mojang.renderpearl.api.textures.GpuTextureView;
 import com.mojang.renderpearl.backend.vulkan.VulkanDevice;
 import dev.comfyfluffy.caustica.CausticaConfig;
+import dev.comfyfluffy.caustica.client.HandFov;
 import dev.comfyfluffy.caustica.client.VanillaRenderController;
 import dev.comfyfluffy.caustica.client.WorldRenderScaler;
 import dev.comfyfluffy.caustica.rt.RtComposite;
@@ -34,9 +35,6 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
  */
 @Mixin(GameRenderer.class)
 public abstract class GameRendererMixin {
-	/** Vanilla's fixed viewmodel FOV, per {@code Camera.calculateHudFov()}. */
-	private static final float CAUSTICA$VANILLA_HAND_FOV = 70.0f;
-
 	/** The 5-arg color+depth render-pass overload the hand / screen-effect passes are built with. */
 	private static final String CREATE_COLOR_DEPTH_PASS =
 			"Lcom/mojang/renderpearl/api/commands/CommandEncoder;createRenderPass(Ljava/util/function/Supplier;Lcom/mojang/renderpearl/api/textures/GpuTextureView;Ljava/util/Optional;Lcom/mojang/renderpearl/api/textures/GpuTextureView;Ljava/util/OptionalDouble;)Lcom/mojang/renderpearl/api/commands/RenderPass;";
@@ -202,15 +200,8 @@ public abstract class GameRendererMixin {
 			return hudFov;
 		}
 		Minecraft minecraft = Minecraft.getInstance();
-		if (minecraft == null || minecraft.options == null) {
-			return hudFov;
-		}
-		Integer sliderFov = minecraft.options.fov().get();
-		if (sliderFov == null || sliderFov <= 0) {
-			return hudFov;
-		}
-		// Clamped so a hostile config value can never produce a degenerate projection matrix.
-		return Math.clamp(hudFov * (sliderFov / CAUSTICA$VANILLA_HAND_FOV), 1.0f, 179.0f);
+		Integer sliderFov = (minecraft == null || minecraft.options == null) ? null : minecraft.options.fov().get();
+		return HandFov.effective(hudFov, sliderFov, true);
 	}
 
 	// Composite the redirected UI overlay back over the world once the GUI has fully rendered into it.
