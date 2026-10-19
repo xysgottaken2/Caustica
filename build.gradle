@@ -215,6 +215,8 @@ def generateShaderRecords = tasks.register("generateShaderRecords", GenerateShad
 
 tasks.named("test", Test) {
 	useJUnitPlatform()
+	// Include assertion messages/child-JVM diagnostics in CI's persistent trimmed log as well as XML.
+	testLogging.exceptionFormat = "full"
 }
 
 sourceSets.main.java.srcDir(files(layout.buildDirectory.dir("generated/sources/shaderRecords")).builtBy(generateShaderRecords))

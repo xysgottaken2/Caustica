@@ -113,6 +113,9 @@ final class RtCloudConfigTest {
     }
 
     private String runProbe(String action, String... args) throws Exception {
+        // Fabric normally creates this directory before configuration is loaded. Reproduce that
+        // startup precondition in the standalone JVM; CREATE_EMPTY creates a file, not its parents.
+        Files.createDirectories(directory.resolve("config"));
         // Gradle's test worker may use an isolated loader rather than java.class.path. Resolve the
         // actual production dependencies' code locations; no fake settings or mocked TOML parser.
         var paths = new LinkedHashSet<String>();
