@@ -9,7 +9,7 @@ RWStructuredBuffer<uint> classicCells;
 [shader("compute")]
 [numthreads(1, 1, 1)]
 void probe(uint3 id : SV_DispatchThreadID) {
-    uint at = id.x * 7u;
+    uint at = id.x * 8u;
     float4 pos = inputs[at];
     float4 cfg = inputs[at + 1u];
     float4 anchor = inputs[at + 2u];
@@ -17,11 +17,12 @@ void probe(uint3 id : SV_DispatchThreadID) {
     float4 light = inputs[at + 4u];
     float4 ambient = inputs[at + 5u];
     float4 flags = inputs[at + 6u];
+    float4 tuning = inputs[at + 7u];
     WorldPush push = {};
     push.clouds = float4(cfg.z, anchor.w, flags.y, anchor.z);
     push.cloudAnchor = float4(anchor.xy, cfg.y, 3072.0);
     push.cloudColor = float4(0.8, 0.85, 0.9, cfg.w);
-    push.cloudThickness = float4(cfg.xy, 0.0, 0.0);
+    push.cloudThickness = float4(cfg.xy, tuning.x, 0.0);
     push.lightDir = float4(light.xyz, 0.0);
     push.lightRadiance = float4(light.www, 0.0);
     push.dimension = uint(flags.z);
@@ -43,6 +44,23 @@ void probe(uint3 id : SV_DispatchThreadID) {
     } else if (pos.w == 3.0) {
         outputs[id.x] = float4(cloudPerlin3(pos.xyz), cloudWorley3(pos.xyz),
                               cloudNoise(pos.xz), cloudCoverage(push, samplePos));
+    } else if (pos.w == 5.0) {
+        CloudQualitySettings quality = cloudQualitySettings(push);
+        outputs[id.x] = float4(quality.viewSteps, quality.viewCap, quality.lightSteps, quality.shadowSteps);
+    } else if (pos.w == 6.0) {
+        CloudQualitySettings quality = cloudQualitySettings(push);
+        float optical = cloudOpticalDensity(push, pos.xyz);
+        float sunTau = cloudLightOpticalDepth(push, pos.xyz, light.xyz, quality.lightSteps);
+        float skyTau = cloudSkyOpticalDepth(push, pos.xyz, optical, quality.skySteps);
+        outputs[id.x] = float4(sunTau, skyTau, optical, cloudFormationThickness(push, samplePos));
+    } else if (pos.w == 7.0) {
+        CloudQualitySettings quality = cloudQualitySettings(push);
+        CloudScatteringPhases phases = cloudScatteringPhases(dot(ray.xyz, light.xyz), quality.multipleOrders);
+        // Test-only direct transport query: supplied optical depths, no synthetic colour gradient.
+        outputs[id.x] = float4(cloudInScatter(light.www, ambient.xyz, tuning.y, tuning.z,
+                                              phases, quality.multipleOrders), 1.0);
+    } else if (pos.w == 8.0) {
+        outputs[id.x] = float4(cloudSunShadow(push, pos.xyz, light.xyz), 0.0, 0.0, 1.0);
     } else {
         float t0, t1;
         bool hit = cloudSlabInterval(push, pos.xyz, ray.xyz, ray.w, t0, t1);

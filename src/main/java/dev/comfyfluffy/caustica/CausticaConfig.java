@@ -111,7 +111,9 @@ public final class CausticaConfig {
                         + " texel-crossing budget (sampling level), independent of parallax-strength (relief depth).\n"
                         + " cloud-min-thickness / cloud-max-thickness: volumetric envelope in blocks (16..22).\n"
                         + " Editing an endpoint past its peer moves the peer; equal endpoints disable variation.\n"
-                        + " cloud-thickness: legacy classic-box depth fraction; unaffected by the volumetric range.");
+                        + " cloud-thickness: legacy classic-box depth fraction; unaffected by the volumetric range.\n"
+                        + " cloud-quality: low / medium / high / very_high / ultra (default). Volumetric only;\n"
+                        + " controls view, lighting, sky and shadow sample budgets plus erosion/scattering detail.");
         FILE.setComment("materials",
                 " Material appearance controls. metallic-shininess reduces roughness only on authored metallic\n"
                         + " surfaces; 0 preserves resource-pack material data and 1 gives metals their strongest shine.");
@@ -796,6 +798,10 @@ public final class CausticaConfig {
             public static final StringSetting CLOUD_STYLE =
                     string("caustica.rt.cloudStyle", "composite.cloud-style", "classic",
                             Composite::sanitizeCloudStyle);
+            /** Sampling/detail budget for volumetric clouds only. Ultra preserves existing defaults. */
+            public static final StringSetting CLOUD_QUALITY =
+                    string("caustica.rt.cloudQuality", "composite.cloud-quality", "ultra",
+                            Composite::sanitizeCloudQuality);
             /** Legacy classic-box depth, kept in its original TOML key and 4..110-block range. */
             public static final FloatSetting CLOUD_THICKNESS =
                     clampedFloat("caustica.rt.cloudThickness", "composite.cloud-thickness", 0.5f, 0.0f, 1.0f);
@@ -918,6 +924,28 @@ public final class CausticaConfig {
             /** Shader-side style id; mirrors {@code clouds.slang}'s CLOUD_STYLE_* constants. */
             public static int cloudStyleIndex() {
                 return "volumetric".equals(CLOUD_STYLE.get()) ? 1 : 0;
+            }
+
+            /** Stable shader id, carried in WorldPush.cloudThickness.z (classic ignores it). */
+            public static int cloudQualityIndex() {
+                return switch (CLOUD_QUALITY.get()) {
+                    case "low" -> 0;
+                    case "medium" -> 1;
+                    case "high" -> 2;
+                    case "very_high" -> 3;
+                    default -> 4; // ultra, including unknown/legacy config inputs
+                };
+            }
+
+            private static String sanitizeCloudQuality(String value) {
+                if (value == null) return "ultra";
+                return switch (value.trim().toLowerCase(java.util.Locale.ROOT).replace('-', '_').replace(' ', '_')) {
+                    case "low" -> "low";
+                    case "medium" -> "medium";
+                    case "high" -> "high";
+                    case "very_high" -> "very_high";
+                    default -> "ultra";
+                };
             }
 
             private static String sanitizeCloudStyle(String value) {

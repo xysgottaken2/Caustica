@@ -2,6 +2,9 @@
 
 ## Investigation and scope
 
+The quality/shading follow-up continues **PR #13** from `c74ec2a`; it does not replace the density
+system or change the classic renderer. Details of the five presets and their measured work are below.
+
 The starting implementation (`9e00b4e`) already had procedural volumetric clouds; it did **not**
 read PNGs. `cloudHash` is a deterministic 512-cell integer hash, `cloudNoise` is 2D smoothstep value
 noise, and `cloudCoverageField` uses frequencies **1/2/4**, with **weights** 0.6/0.3/0.1 on a 12-block
@@ -80,7 +83,8 @@ other locales fall back to the English keys.
   No vertical domain warp is applied to the envelope itself.
 - The acceleration slab uses the maximum. Java adds half its depth to the configured base altitude,
   so changing the maximum does not move the base. The new float4 is appended to the generated BDA
-  record; the already-full 128-byte hardware push-constant block is untouched.
+  record; the already-full 128-byte hardware push-constant block is untouched. Its previously reserved
+  Z lane now carries the quality id 0..4; this follow-up does not grow the GPU/Java record.
 - Old `cloud-thickness` is preserved and still controls classic's 4–110-block boxes. It no longer
   scales the volumetric envelope. The old default was 55 nominal blocks, outside the requested range;
   16/22 uses the largest permitted upper bound and immediately enables natural regional variation.
@@ -93,24 +97,98 @@ ground shadows, normalised by **local**, not maximum, thickness. The previous li
 different coefficient and the ground shadow sampled an unscaled footprint. Opacity remains a final
 ceiling, so a 25% slider can never become more than 25% opaque at grazing angles.
 
-The light march uses actual slab entry/exit and quadratically spaced integration intervals, retaining
-nearby blockers. The dual HG lobe remains; two weaker, more isotropic orders reuse optical depth to
-approximate multiple scattering. A directional optical-depth powder term and a depth-attenuated sky
-fill replace the uniform bright interior. This is an approximation, **not a full multiple-scattering
-solver**. Celestial radiance/sky still come from the existing day/night, atmosphere and weather paths.
+Sun and sky optical depths now drive the grey shading separately:
 
-Slab bounds now remain camera-relative throughout sampling. Previously they had the secondary ray's
-origin Y subtracted and were then compared with camera-relative samples, effectively shifting the
-profile twice. Real volumetric clouds also no longer dissolve at the camera's deck-centre crossing.
-Inside and parallel rays are handled geometrically. Early termination keeps the residual transmission
-instead of snapping the old 1% tail to zero.
+- Direct sunlight uses the actual active celestial direction and `exp(-sunTau)`.
+- The sky term integrates **actual material overhead**, up to the local envelope top, instead of
+  multiplying only the point's density by its distance to the top. A thin skin below a thick lobe
+  is therefore correctly shadowed even though its own density is low.
+- Sky visibility is `0.06 + 0.64 * exp(-skyTau)`. The small floor is unresolved hemispherical fill,
+  multiplied by incident sky radiance: it prevents artificially black undersides without making an
+  unlit cloud emissive. No screen coordinate, distance to the Sun or painted grey texture is involved.
+- The dual HG phase and powder approximation remain, but phase lobes are evaluated once per ray.
+  Powder reuses sun transmittance instead of another exponential. Higher presets retain one/two
+  weaker, more isotropic scattering orders, attenuated by sun **and** sky optical depth to avoid
+  washing out dense interiors. This remains an approximation, not a full multiple-scattering solver.
+- Day/night colour and weather still come from the existing celestial/atmosphere inputs.
 
-Full/cheap tiers remain (24/6 base samples, 6/2 light samples). Full marching targets 1.5-block steps,
-up to 64, to resolve the new 3-block detail; cheap caps at 12. The established 3.5-slab-depth integration
-limit and distance fade remain. **This can omit distant banks on extremely grazing rays.** The new
-3D field costs more ALU than the old 2D field, and volumetric ground shadows now perform six density
-samples. Empty density/shape regions skip fine detail and lighting, but no GPU timing or FPS
-improvement is claimed. Profile SPP, reflections and fog together on actual hardware.
+The near-point light march retains quadratic strata with larger budgets. At two samples it uses
+Gauss–Legendre positions/weights instead: the old two quadratic intervals assigned 75% of the weight
+to a single far sample. Ground/fog cloud shadows use uniform spatial intervals over the bank, with
+separate bounded budgets, and terminate below .00034 remaining direct-light transmission.
+
+Slab bounds remain camera-relative, including secondary rays. Real volumes never dissolve at the
+camera's deck-centre crossing. The earlier origin-Y fix and residual-transmission early termination
+are preserved. The 3.5-slab-depth integration limit and view fade also remain: **extremely grazing
+rays can still omit distant banks**. Test the horizon and in-cloud views in Minecraft.
+
+## Five quality presets
+
+Persistent key: `[composite] cloud-quality`, property: `caustica.rt.cloudQuality`. Values are
+`low`, `medium`, `high`, `very_high`, `ultra`; UI labels include **Baixo, Médio, Alto, Muito Alto,
+Ultra**. Missing/unknown values resolve to **Ultra**, preserving the previous full-detail default.
+The selector is shown only for volumetric clouds, participates in resets, and takes effect on the next
+frame. It never changes thickness, wind, weather or the retained classic settings.
+
+**Intervals and evaluations are not the same thing.** Low and Medium use two cheap density probes
+per visible integration interval (two-point Gauss–Legendre quadrature), then perform lighting once
+at their material-weighted centroid. This was necessary to reduce coherent contour bands without
+animated sampling noise or doubling light marches. We do **not** label those as eight/twelve total
+density evaluations. Short/occluded/opaque segments can exit before using the budget.
+
+| Preset | Visible intervals: vertical / cap | Actual view density evaluations: vertical / cap | Sun / sky per occupied interval | Ground shadow: vertical / cap | Extra scatter orders | Fine erosion |
+| --- | ---: | ---: | ---: | ---: | ---: | --- |
+| Low | 8 / 24 | 16 / 48 | 2 / 1 | 4 / 12 | 0 | Both fine bands filtered to their mean |
+| Medium | 12 / 32 | 24 / 64 | 2 / 1 | 5 / 16 | 1 | 6-block Worley, filtered 3-block band |
+| High | 16 / 40 | 16 / 40 | 4 / 2 | 6 / 20 | 1 | Full 6/3-block erosion |
+| Very High | 20 / 48 | 20 / 48 | 5 / 2 | 7 / 24 | 2 | Full |
+| Ultra | 24 / 64 | 24 / 64 | 6 / 3 | 8 / 28 | 2 | Full |
+
+The density-only counter is not a standalone quality ranking: Medium's extra cheap quadrature probes
+smooth extinction while High spends more on finer density, self-shadowing and sky illumination.
+**Total executed work increases through all five presets**, including diffuse and shadow queries.
+
+Diffuse indirect paths retain a separate cheaper tier, controlled by the same preset:
+
+| Preset | View steps / cap | Sun samples | Sky samples | Density probes per step |
+| --- | ---: | ---: | ---: | ---: |
+| Low | 3 / 4 | 1 | 0 | 1 |
+| Medium | 4 / 6 | 1 | 0 | 1 |
+| High | 5 / 8 | 2 | 1 | 1 |
+| Very High | 6 / 10 | 2 | 1 | 1 |
+| Ultra | 6 / 12 | 2 | 2 | 1 |
+
+Zero sky samples means the previous cheap local optical-column estimate, **not zero attenuation**.
+Camera, specular/reflected/refracted rays and the recovered water-interface prefix use the visible
+tier. Terrain and fog visibility share the shadow budget. Classic's analytic boxes, missing-map
+fallback, flat legacy path and lighting are exempt; they are checked against pre-change outputs.
+
+### Why Low actually costs less
+
+- No 6-block Worley evaluation or 3-block Perlin evaluation in the fine-erosion stage; the mean
+  erosion envelope is retained so removing detail does not inflate all cloud silhouettes.
+- Same 3D warp, 12-block main lobes, coverage and thickness field in every preset. High through Ultra
+  evaluate exactly the same density; only the integration/lighting budgets change.
+- Much smaller **hard** view and light caps; long paths cannot silently restore Ultra's budget.
+- No extra multiple-scattering phase lobes or exponentials. Phase functions are outside the loop.
+- Fewer, coarser-detail ground-shadow queries; opaque scene visibility still short-circuits them.
+- Empty volume/shape and saturated transmission exit early. Zero incident sun skips sun probes;
+  completely unlit rays integrate extinction only, skipping both light/sky marches and scatter.
+
+An initial Low cap of 12 visible intervals showed strong contour bands in CPU diagnostics. Increasing
+that long-path cap to 24, adding two-probe extinction quadrature, and replacing two-point light strata
+reduced them while keeping expensive lighting sparse. An initial two-sample ground shadow could miss
+whole banks (errors approaching 1 in transmission); bounded uniform 4–12 sampling corrected that.
+Remaining contouring/aliasing risks at Low and the far horizon are still part of in-game acceptance,
+not something these diagnostics can certify away.
+
+### Temporal decision
+
+No temporal cloud buffer, animated jitter or new history has been added. `svgf_reproject.comp` bypasses
+sky accumulation; `nrd_combine.comp` also passes sky through raw. Vendor DLSS behaviour cannot be
+assumed to provide cloud-specific motion/history. The marcher therefore uses deterministic intervals
+with a shortened last interval: changing step count starts a new interval at zero weight instead of
+moving every existing midpoint. This is checked across budget boundaries, frame indices and wind.
 
 ## Executable validation
 
@@ -134,15 +212,56 @@ SPIR-V compilation uses the production flags, never ignores capabilities, covers
 stages **and the SER variant**, and invokes `spirv-val` when available. Normal Gradle CI also validates
 all shaders and generates Java records from reflection.
 
-The 11 numerical tests cover all 28 ordered endpoint pairs, constant bounds, strict local/global
+The original numerical tests cover all 28 ordered endpoint pairs, constant bounds, strict local/global
 support, 3D morphology, periodicity, lattice boundaries, frame/order independence, wind advection,
 camera rebasing, weather monotonicity, ray clipping, secondary/inside/parallel rays, finite scatter,
 opacity ceilings, optical-depth convergence, both quality tiers, dimension/off gates, and classic
 bitmap/fallback paths. `RtCloudConfigTest` additionally starts fresh JVMs with the **real** config and
 TOML parser to test restart persistence, old/invalid files, property overrides/reload and resets.
-The GPU-less CI lane runs the CPU suite and publishes diagnostic PNGs/metrics with its test reports.
+The expanded suite has **20 tests**. It additionally checks all five presets, all 28 thickness pairs
+at every preset, actual executed work, all sample caps, budget-boundary continuity, low-sun shadow
+convergence, depth-dependent grey shading, zero-light culling, and 192 classic reference rays per
+preset (960 comparisons). `tools/clouds/classic-reference.json` was captured from the actual shader
+at `c74ec2a` before these changes, not generated from the new renderer.
 
-### Measured locally (2026-10-19)
+The work profiler instruments a **separate generated C++ library**, counts executed density/noise,
+phase, exponential, view and sky evaluations per invocation, and checks its colour/transmission
+against the untouched probe. Counters are thread-local; no counters/atomics enter production Slang
+or SPIR-V. Instrumentation can inhibit CSE: these are **source-level evaluation counts**, not GPU
+instruction counts, milliseconds or FPS. The GPU-less CI publishes diagnostics/metrics with reports.
+
+### Measured quality/shading follow-up
+
+128 fixed, full-overcast vertical rays; averages include empty samples and early-outs:
+
+| Preset | View density evaluations | Total density evaluations (view + sun + sky) | Worley calls | Extra HG work |
+| --- | ---: | ---: | ---: | --- |
+| Low | 16 | 32.80 | 28.38 | 0 extra lobes |
+| Medium | 24 | 48.70 | 73.77 | 1 extra lobe/ray |
+| High | 16 | 78.91 | 126.46 | 1 extra lobe/ray |
+| Very High | 20 | 111.93 | 180.09 | 2 extra lobes/ray |
+| Ultra | 24 | 165.19 | 274.52 | 2 extra lobes/ray |
+
+- Low performs about 80% fewer **density evaluations in this test**, not 80% less GPU time. The
+  expensive worst-case caps are also bounded: Low up to `24*(2+2+1)=120` such evaluations per visible
+  segment, Ultra `64*(1+6+3)=640`. This excludes separate receiver shadow queries and does not count
+  compiler optimisations. No RTX 2060/GPU timing was available.
+- Low density correlation to Ultra is .99913 with .9757 sampled-support overlap; Medium .99996/.9945.
+  High/Very High/Ultra density samples are identical. The thickness field is identical across all five.
+- Against 192-interval references at sun Y = 1/.5/.1, Low view T mean errors are .00195/.00156/.00090;
+  Ultra .00050/.00058/.00048. Low shadow T mean errors .0195/.0219/.0088, 95th percentiles
+  .0619/.0800/.0387. The worst Low shadow error is still .357 on a thin edge, versus Ultra .062;
+  this is a disclosed precision trade-off, not claimed perfect shadows.
+- At the tested thin cloud bases, the old local sky-depth estimate averages .060 while the integrated
+  Ultra sky depth averages 1.306. Paired material-bearing columns have mean bottom/upper radiance
+  .240/.622 under neutral test illumination: the darker bases follow actual occluding material.
+- Monotonic attenuation, neutral tint, finite values, no fictitious emission, unchanged opacity caps,
+  camera/frame/wind invariance and sampling-budget continuity pass at every preset.
+- CPU images for all five presets plus above/below/inside views were generated and inspected, with
+  fixes rerun. They are synthetic-sky diagnostics, **not Minecraft screenshots or proof of perfect
+  appearance**. In-game temporal behaviour and actual performance remain unmeasured.
+
+### Initial-overhaul measurements (2026-10-19, before quality follow-up)
 
 Executed and iterated, using Slang **2026.12** from the SlangPy distribution (the CI fallback pins
 2026.18), g++ 12 and SPIRV-Tools **2026.4** built locally. Generated binaries/images stay under
@@ -176,7 +295,8 @@ atmosphere/terrain/denoisers. **They do not establish photographic realism.**
 
 Use the same seed, coordinates, resolution/exposure and time when comparing against the old shader.
 
-- 16/16, 16/22, 19/19, 22/22; drag endpoints across each other, reopen, reset and restart.
+- All five presets with 16/16, 16/22, 19/19, 22/22; drag endpoints across each other, reopen, reset and
+  restart. Check English/Portuguese labels, old config defaults and classic-style exemption.
 - Below, above, inside, nearly parallel and terrain-clipped rays; camera-origin rebases, distant world
   coordinates and wind wrap on both axes. Watch the old camera-following horizontal band specifically.
 - Noon, low sun/backlight, sunset, moonlight, rain and thunder. Inspect dense-core shading, rim detail,
@@ -184,5 +304,7 @@ Use the same seed, coordinates, resolution/exposure and time when comparing agai
 - Water/glass reflections and refractions; DLSS-RR/NRD/SVGF and raw output. Check shimmer, ghosting,
   coarse cheap-tier indirect light, distant details and the finite horizon march.
 - Classic resource packs (normal/missing clouds.png), original thickness values, rain fill and colour.
-- GPU frame time at multiple SPP/path depths with fog enabled. No Vulkan RT device or running
-  Minecraft client was available in the implementation sandbox.
+- RTX 2060 GPU frame time at each preset, fixed camera/weather/exposure, several SPP/path depths,
+  fog and reflections on/off. Watch Low/Medium contour bands, moving silhouettes and shadow edges
+  in raw, SVGF, NRD and DLSS-RR output. Do not infer FPS from the CPU evaluation counters.
+- No Vulkan RT device or running Minecraft client was available in the implementation sandbox.

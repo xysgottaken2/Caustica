@@ -27,6 +27,48 @@ BUILD = ROOT / "build/cloud-validation"
 PERIOD = 24576.0
 METRICS = {}
 PROBE = None
+PROFILE = None
+WORK_NAMES = ()
+
+
+def instrument_cpp(source):
+    """Count executed source-level evaluations, NOT estimated GPU instructions or CPU timing.
+
+    Only the test's generated C++ is instrumented. Production Slang/SPIR-V has no counters,
+    atomics, debug uniform or profiling branch. Thread-local counters keep the OpenMP probe safe.
+    """
+    names = ('density', 'perlin', 'worley', 'phase_lobes', 'exponentials', 'view_samples', 'scatter_samples', 'sky_queries')
+    patterns = ('cloudVolumeDensity', 'cloudPerlin3', 'cloudWorley3', 'hgLobe', 'F32_exp',
+                None, 'cloudInScatter', 'cloudSkyOpticalDepth')
+    for index, name in enumerate(patterns):
+        if name is None:
+            continue
+        pattern = (r'(?m)^(?:static |SLANG_FORCE_INLINE )?(?:float|Vector<float, 3>\s*)\s+'
+                   + name + r'(?:_\d+)?\([^;{}]*\)\s*\{')
+        source, count = re.subn(pattern, lambda m: m[0] + f'\n ++cloudWork[{index}];', source)
+        if count != 1:
+            raise RuntimeError(f'expected one generated {name} definition, found {count}')
+    # Count actual eye samples at the call site, not the configured theoretical budget. Other
+    # cloudOpticalDensity calls are sunlight/sky/shadow samples and count only toward total density.
+    march = re.search(r'(?m)^(?:static )?CloudVolume_\d+ cloudMarch_\d+\([^;{}]*\)\s*\{', source)
+    if march is None:
+        raise RuntimeError('could not find the generated view marcher for work counters')
+    start = march.end()
+    depth, end = 1, start
+    while depth:
+        depth += (source[end] == '{') - (source[end] == '}')
+        end += 1
+    body = source[start:end]
+    calls = list(re.finditer(r'\bcloudOpticalDensity_\d+\(', body))
+    if len(calls) != 3:
+        raise RuntimeError('expected quadrature-left/right and midpoint density call sites in the view march')
+    for call in reversed(calls):
+        depth, close = 1, call.end()
+        while depth:
+            depth += (body[close] == '(') - (body[close] == ')')
+            close += 1
+        body = body[:call.start()] + '(++cloudWork[5], ' + body[call.start():close] + ')' + body[close:]
+    return '#include <cstdint>\nstatic thread_local uint64_t cloudWork[8];\n' + source[:start] + body + source[end:], names
 
 
 def build_probe(slangc, cxx):
@@ -44,7 +86,7 @@ def build_probe(slangc, cxx):
     wrapper.write_text(f'''#include "probe.cpp"
 extern "C" void evaluate(float* in, float* out, uint32_t count, uint32_t* cells) {{
     {global_type} params = {{}};
-    params.{names['inputs']} = {{ reinterpret_cast<Vector<float, 4>*>(in), size_t(count) * 7 }};
+    params.{names['inputs']} = {{ reinterpret_cast<Vector<float, 4>*>(in), size_t(count) * 8 }};
     params.{names['outputs']} = {{ reinterpret_cast<Vector<float, 4>*>(out), count }};
     params.{names['classicCells']} = {{ cells, 2048 }};
     #pragma omp parallel for schedule(static)
@@ -58,15 +100,29 @@ extern "C" void evaluate(float* in, float* out, uint32_t count, uint32_t* cells)
     lib = BUILD / "probe.so"
     subprocess.run([cxx, "-std=c++17", "-O2", "-shared", "-fPIC", "-fopenmp", "-ffp-contract=off",
                     str(wrapper), "-o", str(lib)], check=True)
-    return ctypes.CDLL(str(lib))
+    # Build a separately instrumented library, then compare its numeric results to the untouched
+    # probe in the tests. Counters may inhibit CSE, so report source-level work, never GPU ALU/FPS.
+    profiled, names = instrument_cpp(source)
+    (BUILD / 'probe-profile.cpp').write_text(profiled)
+    work_wrapper = wrapper.read_text().replace('#include "probe.cpp"', '#include "probe-profile.cpp"')
+    work_wrapper = work_wrapper.replace('uint32_t* cells) {', 'uint32_t* cells, uint64_t* work) {')
+    work_wrapper = work_wrapper.replace('        probe_Thread(&thread, nullptr, &params);',
+        '        for (auto& c : cloudWork) c = 0;\n'
+        '        probe_Thread(&thread, nullptr, &params);\n'
+        '        for (int k = 0; k < 8; ++k) work[size_t(i) * 8 + k] = cloudWork[k];')
+    (BUILD / 'probe-profile-host.cpp').write_text(work_wrapper)
+    profile_lib = BUILD / 'probe-profile.so'
+    subprocess.run([cxx, "-std=c++17", "-O2", "-shared", "-fPIC", "-fopenmp", "-ffp-contract=off",
+                    str(BUILD / 'probe-profile-host.cpp'), "-o", str(profile_lib)], check=True)
+    return ctypes.CDLL(str(lib)), ctypes.CDLL(str(profile_lib)), names
 
 
 def requests(positions, *, mode=0, lo=16, hi=22, coverage=0.65, fill=0, anchor=(0, 0),
              base=0, opacity=1, direction=(0, 1, 0), distance=1000,
              light=(0.4, 0.8, 0.4472135955), radiance=4, ambient=(0.2, 0.3, 0.5),
-             quality=1, style=0, shadow=1, dimension=0, frame=0):
+             quality=1, style=0, shadow=1, dimension=0, frame=0, preset=4, sun_tau=0, sky_tau=0):
     positions = np.asarray(positions, dtype=np.float32).reshape(-1, 3)
-    a = np.zeros((len(positions), 7, 4), dtype=np.float32)
+    a = np.zeros((len(positions), 8, 4), dtype=np.float32)
     a[:, 0, :3], a[:, 0, 3] = positions, mode
     a[:, 1] = (lo, hi, coverage, fill)
     a[:, 2] = (*anchor, base + hi / 2, opacity)
@@ -74,6 +130,7 @@ def requests(positions, *, mode=0, lo=16, hi=22, coverage=0.65, fill=0, anchor=(
     a[:, 4] = (*light, radiance)
     a[:, 5] = (*ambient, quality)
     a[:, 6] = (style, shadow, dimension, frame)
+    a[:, 7] = (preset, sun_tau, sky_tau, 0)
     return a
 
 
@@ -90,11 +147,43 @@ def evaluate(a, cells=None):
     return out
 
 
+def profile_work(a, cells=None):
+    a = np.ascontiguousarray(a, dtype=np.float32)
+    out = np.empty((len(a), 4), dtype=np.float32)
+    work = np.empty((len(a), len(WORK_NAMES)), dtype=np.uint64)
+    cells = np.zeros(2048, dtype=np.uint32) if cells is None else np.ascontiguousarray(cells, dtype=np.uint32)
+    PROFILE.evaluate(a.ctypes.data, out.ctypes.data, len(a), cells.ctypes.data, work.ctypes.data)
+    np.testing.assert_allclose(out, evaluate(a, cells), atol=2e-6, rtol=2e-6,
+                               err_msg="profiling must not change the shader result")
+    return work
+
+
 def points(n=2048, seed=17):
     rng = np.random.default_rng(seed)
     p = rng.uniform(-PERIOD, PERIOD, (n, 3)).astype(np.float32)
     p[:, 1] = rng.uniform(0, 22, n)
     return p
+
+
+def classic_reference_cases():
+    """Fixed rays into authored/empty cells, the fallback and the legacy sheet; no quality setting."""
+    rows = []
+    for depth in (0, 4, 55, 110):
+        for fill in (0, 0.65, 1):
+            for style in (1, 2):
+                for tier in (0, 1):
+                    for pos, direction, distance in (
+                            ((-25.5, -8, 10.25), (0.15, 1, 0.2), 1000),
+                            ((0.5, depth + 8, 1.25), (0.1, -1, -0.1), 1000),
+                            ((-18, depth * 0.5, 4.5), (1, 0.02, 0.1), 1000),
+                            ((5, -20, 7), (0.1, 0.98, 0.15), 10)):
+                        direction = np.asarray(direction) / np.linalg.norm(direction)
+                        rows.append(requests([pos], mode=1, hi=depth, fill=fill, style=style,
+                                             quality=tier, direction=direction, distance=distance, opacity=0.75))
+    x, z = np.meshgrid(np.arange(256), np.arange(256))
+    occupied = ((x // 3 + z // 5) % 3 != 0).ravel()
+    cells = np.packbits(occupied, bitorder='little').view(np.uint32)
+    return np.concatenate(rows), cells
 
 
 class Clouds(unittest.TestCase):
@@ -356,8 +445,246 @@ class Clouds(unittest.TestCase):
         for locale in ('en_us', 'pt_br'):
             data = json.loads((ROOT / f'src/main/resources/assets/caustica/lang/{locale}.json').read_text())
             for key in ('cloudMinThickness', 'cloudMinThickness.tooltip', 'cloudMaxThickness',
-                        'cloudMaxThickness.tooltip', 'cloudThickness.blocks'):
+                        'cloudMaxThickness.tooltip', 'cloudThickness.blocks',
+                        'cloudQuality', 'cloudQuality.tooltip', 'cloudQuality.low', 'cloudQuality.medium',
+                        'cloudQuality.high', 'cloudQuality.very_high', 'cloudQuality.ultra'):
                 self.assertTrue(data['caustica.options.rt.' + key])
+
+    def test_12_presets_reduce_executed_work_in_every_ray_tier(self):
+        p = points(128)
+        p[:, 1] = -2
+        expected = [(8, 24, 2, 4), (12, 32, 2, 5), (16, 40, 4, 6), (20, 48, 5, 7), (24, 64, 6, 8)]
+        diffuse_steps, diffuse_caps = [3, 4, 5, 6, 6], [4, 6, 8, 10, 12]
+        phases = [2, 3, 3, 4, 4]
+        measured = []
+        for preset, budget in enumerate(expected):
+            declared = evaluate(requests([[0, 0, 0]], mode=5, preset=preset))[0]
+            np.testing.assert_array_equal(declared, budget)
+            a = requests(p, mode=1, coverage=1, preset=preset)
+            work = profile_work(a)
+            probes = 2 if preset < 2 else 1
+            np.testing.assert_array_equal(work[:, 5], budget[0] * probes)
+            np.testing.assert_array_equal(work[:, 3], phases[preset]) # not multiplied by view samples
+            row = {'preset': preset, 'visible': dict(zip(WORK_NAMES, work.mean(axis=0).tolist()))}
+            a[:, 5, 3] = 0 # diffuse continuation, not the player's preset
+            indirect = profile_work(a)
+            np.testing.assert_array_equal(indirect[:, 5], diffuse_steps[preset])
+            row['diffuse'] = dict(zip(WORK_NAMES, indirect.mean(axis=0).tolist()))
+            # Inside, grazing rays exercise the hard caps. Low must never become a 64-step ray.
+            for tier, cap in ((1, budget[1]), (0, diffuse_caps[preset])):
+                b = requests(p, mode=1, preset=preset, quality=tier, coverage=0.5, direction=(1, 0, 0))
+                b[:, 0, 1] = 8
+                count = profile_work(b)[:, 5]
+                evaluated_cap = cap * (probes if tier else 1)
+                self.assertLessEqual(count.max(), evaluated_cap)
+                self.assertEqual(count.max(), evaluated_cap)
+            shadow = profile_work(requests(p, mode=8, preset=preset, coverage=1, light=(0, 1, 0)))
+            np.testing.assert_array_equal(shadow[:, 0], budget[3])
+            row['vertical_shadow'] = dict(zip(WORK_NAMES, shadow.mean(axis=0).tolist()))
+            measured.append(row)
+        for tier in ('visible', 'diffuse', 'vertical_shadow'):
+            calls = [row[tier]['density'] for row in measured]
+            self.assertTrue(np.all(np.diff(calls) > 0), (tier, calls))
+        self.assertLess(measured[0]['visible']['density'], measured[4]['visible']['density'] * 0.25)
+        self.assertLess(measured[0]['visible']['worley'], measured[4]['visible']['worley'] * 0.15)
+        METRICS['executed_source_work_128_overcast_vertical_rays'] = measured
+
+    def test_13_all_presets_keep_thickness_support_and_large_scale_shape(self):
+        p = points(1024, seed=39)
+        full = evaluate(requests(p))
+        morphology = []
+        for preset in range(5):
+            value = evaluate(requests(p, preset=preset))
+            np.testing.assert_array_equal(value[:, 1:3], full[:, 1:3])
+            if preset >= 2:
+                np.testing.assert_array_equal(value, full) # High+ keep the EXACT density, not a new model
+            correlation = np.corrcoef(value[:, 0], full[:, 0])[0, 1]
+            active, full_active = value[:, 0] > 0.001, full[:, 0] > 0.001
+            iou = np.sum(active & full_active) / np.sum(active | full_active)
+            self.assertGreater(correlation, 0.98)
+            self.assertGreater(iou, 0.85)
+            morphology.append({'preset': preset, 'density_correlation_to_ultra': float(correlation), 'support_iou': float(iou)})
+            for lo in range(16, 23):
+                for hi in range(lo, 23):
+                    a = requests(p[:128], preset=preset, lo=lo, hi=hi, coverage=1)
+                    reference = requests(p[:128], lo=lo, hi=hi, coverage=1)
+                    thickness = evaluate(a)[:, 1]
+                    np.testing.assert_array_equal(thickness, evaluate(reference)[:, 1])
+                    self.assertTrue(np.all((thickness >= lo) & (thickness <= hi)))
+                    if lo == hi:
+                        np.testing.assert_array_equal(thickness, lo)
+                    a[:, 0, 1] = thickness + 0.001
+                    np.testing.assert_array_equal(evaluate(a)[:, 0], 0)
+                    a[:, 0, 1] = -0.001
+                    np.testing.assert_array_equal(evaluate(a)[:, 0], 0)
+        METRICS['quality_morphology'] = morphology
+
+    def test_14_every_preset_keeps_period_wind_weather_and_frame_determinism(self):
+        p = np.round(points(1024) * 16) / 16
+        for preset in range(5):
+            a = requests(p, preset=preset)
+            ref = evaluate(a)
+            b = a.copy()
+            b[:, 0, 0] += PERIOD
+            b[:, 0, 2] -= PERIOD
+            b[:, 6, 3] = 300000
+            np.testing.assert_array_equal(evaluate(b), ref)
+            b = a.copy()
+            b[:, 2, 0] += 0.03125
+            c = a.copy()
+            c[:, 0, 0] += 0.03125
+            np.testing.assert_array_equal(evaluate(b), evaluate(c))
+            b = a.copy()
+            b[:, 0, :3] -= [12, 83, -24]
+            b[:, 2, :2] += [12, -24]
+            b[:, 2, 2] -= 83
+            np.testing.assert_array_equal(evaluate(b), ref)
+            previous = np.zeros(len(p))
+            for fill in (0, 0.25, 0.5, 0.75, 1):
+                a = requests(p, preset=preset, coverage=0.2, fill=fill)
+                a[:, 0, 1] = 5
+                density = evaluate(a)[:, 0]
+                self.assertTrue(np.all(density >= previous - 1e-6))
+                previous = density
+            self.assertTrue(np.all(previous > 0))
+            # Nontrivial density either side of the actual canonical wrap, in all five LODs.
+            previous = None
+            for epsilon in (1/16, 1/32, 1/64, 1/128):
+                a[:, 0, 0] = PERIOD - epsilon
+                left = evaluate(a)
+                a[:, 0, 0] = epsilon
+                error = np.max(np.abs(evaluate(a)[:, 0] - left[:, 0]))
+                if previous is not None:
+                    self.assertLess(error, previous * 0.8 + 0.001)
+                previous = error
+            self.assertLess(error, 0.025)
+
+    def test_15_sampling_budget_boundaries_do_not_pop(self):
+        p = [[12.5, 8, 14.25], [29, 9, 43], [17, 10, 72]]
+        caps = [24, 32, 40, 48, 64]
+        base = [8, 12, 16, 20, 24]
+        final_errors = []
+        for preset in range(5):
+            for step_index in (3, base[preset], caps[preset] - 1, caps[preset], caps[preset] + 1):
+                boundary = 22 / base[preset] * step_index
+                previous = None
+                for eps in (0.02, 0.01, 0.005):
+                    a = requests(p, mode=1, preset=preset, coverage=1, direction=(1, 0, 0), distance=boundary-eps)
+                    left = evaluate(a)
+                    a[:, 3, 3] = boundary + eps
+                    error = np.max(np.abs(evaluate(a) - left))
+                    if previous is not None:
+                        self.assertLess(error, previous * 0.85 + 0.0001)
+                    previous = error
+                self.assertLess(error, 0.006)
+                final_errors.append(float(error))
+        METRICS['sample_budget_boundary_max_change_for_0_01_blocks'] = max(final_errors)
+
+    def test_16_view_and_ground_shadow_converge_at_low_sun_without_missing_banks(self):
+        p = points(512)
+        p[:, 1] = -2
+        records = []
+        for preset in range(5):
+            for direction in ((0, 1, 0), (0.8660254, 0.5, 0), (0.9949874, 0.1, 0)):
+                direction = np.asarray(direction) / np.linalg.norm(direction)
+                a = requests(p, mode=2, preset=preset, coverage=0.65, light=direction,
+                             direction=direction, distance=192)
+                reference = evaluate(a)
+                expected = np.exp(-reference[:, 0])
+                shadow_error = np.abs(reference[:, 1] - expected)
+                a[:, 0, 3], a[:, 3, 3] = 1, 1000
+                view_error = np.abs(evaluate(a)[:, 3] - expected)
+                self.assertLess(view_error.mean(), [0.004, 0.002, 0.003, 0.002, 0.0015][preset])
+                self.assertLess(view_error.max(), [0.04, 0.025, 0.04, 0.02, 0.015][preset])
+                self.assertLess(shadow_error.mean(), [0.04, 0.03, 0.02, 0.015, 0.012][preset])
+                self.assertLess(shadow_error.max(), [0.4, 0.25, 0.15, 0.12, 0.1][preset])
+                records.append(dict(preset=preset, light_y=float(direction[1]),
+                    view_T_MAE=float(view_error.mean()), view_T_max=float(view_error.max()),
+                    shadow_T_MAE=float(shadow_error.mean()), shadow_T_max=float(shadow_error.max()),
+                    shadow_T_p95=float(np.quantile(shadow_error, 0.95))))
+        METRICS['quality_optical_reference_192_intervals'] = records
+
+    def test_17_grey_shading_depends_on_optical_depth_not_position(self):
+        for preset in range(5):
+            a = requests([[0, 0, 0]] * 17, mode=7, preset=preset, ambient=(0.3, 0.3, 0.3),
+                         radiance=10, direction=(0, 0, 1), light=(0, 1, 0))
+            depth = np.linspace(0, 8, len(a))
+            a[:, 7, 1] = depth
+            a[:, 7, 2] = depth
+            shade = evaluate(a)[:, :3]
+            self.assertTrue(np.all(np.diff(shade, axis=0) <= 1e-6))
+            self.assertGreater(shade[-1].mean() / shade[0].mean(), 0.01) # diffuse sky prevents ink-black bases
+            self.assertLess(shade[-1].mean() / shade[0].mean(), 0.10)
+            self.assertLess((shade[:, 2] / shade[:, 0]).max(), 1.05) # neutral droplet albedo, not dirty/metallic tint
+            b = a.copy()
+            b[:, 0, :3] = points(len(a))
+            b[:, 2, :2] = [19328, 4096]
+            b[:, 6, 3] = 100000
+            np.testing.assert_array_equal(evaluate(b)[:, :3], shade)
+            for lane in (1, 2): # increasing either incoming sun attenuation or sky attenuation darkens smoothly
+                a[:, 7, 1:3] = 0
+                a[:, 7, lane] = depth
+                self.assertTrue(np.all(np.diff(evaluate(a)[:, :3], axis=0) <= 1e-6))
+            a[:, 4, 3] = 0
+            a[:, 5, :3] = 0
+            np.testing.assert_array_equal(evaluate(a)[:, :3], 0) # no fictitious emissive floor
+
+    def test_18_overhead_material_darkens_thin_bases_and_preserves_lit_tops(self):
+        p = points(1024)
+        records = []
+        for preset in range(5):
+            p[:, 1] = 0.3
+            bottom = evaluate(requests(p, mode=6, preset=preset, coverage=1, light=(0, 1, 0)))
+            old_estimate = bottom[:, 2] * (bottom[:, 3] - 0.3) * 0.5
+            self.assertGreater(np.mean(bottom[:, 1] > old_estimate * 2), 0.95)
+            p[:, 1] = 13
+            upper = evaluate(requests(p, mode=6, preset=preset, coverage=1, light=(0, 1, 0)))
+            valid = (bottom[:, 2] > 0.002) & (upper[:, 2] > 0.002)
+            self.assertGreater(valid.sum(), 300)
+            colors = []
+            for tau in (bottom, upper):
+                a = requests(p, mode=7, preset=preset, light=(0, 1, 0), ambient=(0.3, 0.3, 0.3),
+                             direction=(0, 0, 1), radiance=10)
+                a[:, 7, 1:3] = tau[:, :2]
+                colors.append(evaluate(a)[valid, :3].mean())
+            self.assertGreater(colors[1], colors[0] * 1.5)
+            self.assertGreater(colors[0], 0.03)
+            records.append(dict(preset=preset, mean_bottom_radiance=float(colors[0]),
+                                mean_upper_radiance=float(colors[1]),
+                                local_sky_tau_estimate=float(old_estimate.mean()),
+                                integrated_sky_tau=float(bottom[:, 1].mean())))
+        METRICS['geometric_shading_matched_columns'] = records
+
+    def test_19_classic_matches_the_pre_quality_pr_reference_for_every_preset(self):
+        a, cells = classic_reference_cases()
+        fixture = json.loads((ROOT / 'tools/clouds/classic-reference.json').read_text())
+        self.assertEqual(fixture['commit'], 'c74ec2a98051662efbbfda096be4211ecebffe02')
+        for preset in range(5):
+            a[:, 7, 0] = preset
+            np.testing.assert_allclose(evaluate(a, cells), fixture['rgba'], atol=2e-6, rtol=2e-6)
+        METRICS['classic_reference_rays_per_preset'] = len(a)
+
+    def test_20_unlit_rays_skip_lighting_and_every_preset_preserves_segment_gates(self):
+        p = points(256)
+        p[:, 1] = -2
+        for preset in range(5):
+            a = requests(p, mode=1, coverage=1, preset=preset)
+            lit = evaluate(a)
+            a[:, 4, 3], a[:, 5, :3] = 0, 0
+            unlit = evaluate(a)
+            np.testing.assert_array_equal(unlit[:, :3], 0)
+            np.testing.assert_array_equal(unlit[:, 3], lit[:, 3])
+            work = profile_work(a)
+            np.testing.assert_array_equal(work[:, 0], work[:, 5]) # only view density, no sunlight/sky march
+            np.testing.assert_array_equal(work[:, 3], 0)
+            np.testing.assert_array_equal(work[:, 7], 0)
+            for kwargs in ({'opacity': 0}, {'coverage': 0}, {'dimension': 1}, {'dimension': 2}, {'distance': 1}):
+                clear = evaluate(requests(p, mode=1, preset=preset, **kwargs))
+                np.testing.assert_array_equal(clear, np.tile([0, 0, 0, 1], (len(p), 1)))
+            # The opacity ceiling remains independent of quality and must scale premultiplied scatter.
+            low_opacity = evaluate(requests(p, mode=1, coverage=1, preset=preset, opacity=0.25))
+            np.testing.assert_allclose(low_opacity[:, :3], lit[:, :3] * 0.25, atol=1e-6)
+            np.testing.assert_allclose(low_opacity[:, 3], 1 - (1 - lit[:, 3]) * 0.25, atol=1e-6)
 
 
 def compile_spirv(slangc):
@@ -377,15 +704,20 @@ def compile_spirv(slangc):
     METRICS['spirv_validated'] = bool(shutil.which('spirv-val'))
 
 
-def render_diagnostics():
+def render_diagnostics(names=None):
     """Actual cloudSegment integration, simple sky only: NOT a Minecraft screenshot/quality proof."""
     from PIL import Image, ImageDraw
     width, height = 360, 200
     xx, yy = np.meshgrid((np.arange(width) + 0.5) / width * 2 - 1,
                          1 - (np.arange(height) + 0.5) / height * 2)
-    for name, eye, target in [('below', (96, -24, -48), (96, 10, 112)),
-                               ('above', (96, 42, -48), (96, 9, 112)),
-                               ('side', (96, 12, -48), (96, 12, 112))]:
+    views = [('below', (96, -24, -48), (96, 10, 112), 4),
+             ('above', (96, 42, -48), (96, 9, 112), 4),
+             ('side', (96, 12, -48), (96, 12, 112), 4)]
+    views += [('quality-' + label, (96, -24, -48), (96, 10, 112), index)
+              for index, label in enumerate(('low', 'medium', 'high', 'very-high', 'ultra'))]
+    for name, eye, target, preset in views:
+        if names is not None and name not in names:
+            continue
         eye, target = np.array(eye), np.array(target)
         forward = target - eye
         forward = forward / np.linalg.norm(forward)
@@ -396,14 +728,14 @@ def render_diagnostics():
                 + yy[..., None] * up * 0.75 * height / width).reshape(-1, 3)
         rays /= np.linalg.norm(rays, axis=1)[:, None]
         sky = np.array([0.12, 0.28, 0.55])[None, :] * (1.0 + rays[:, 1:2] * 0.25)
-        a = requests(np.broadcast_to(eye, rays.shape), mode=1, coverage=0.65, radiance=5,
+        a = requests(np.broadcast_to(eye, rays.shape), mode=1, coverage=0.65, radiance=5, preset=preset,
                      light=(0.6, 0.6, -0.5291502622), ambient=(0.24, 0.32, 0.45))
         a[:, 3, :3] = rays
         v = evaluate(a)
         rgb = v[:, :3] + sky * v[:, 3:4]
         rgb = np.power(np.clip(1 - np.exp(-rgb * 1.6), 0, 1), 1 / 2.2)
         image = Image.fromarray((rgb.reshape(height, width, 3) * 255).astype(np.uint8))
-        ImageDraw.Draw(image).text((8, 8), 'CPU shader diagnostic - NOT Minecraft', fill='white')
+        ImageDraw.Draw(image).text((8, 8), 'CPU diagnostic - NOT Minecraft (quality ' + str(preset) + ')', fill='white')
         image.save(BUILD / (name + '.png'))
     # A vertical slice exposes the hard envelope and internal density without a tone mapper hiding it.
     xx, yy = np.meshgrid(np.linspace(0, 192, 768), np.linspace(24, -2, 208))
@@ -415,7 +747,7 @@ def render_diagnostics():
 
 
 def main():
-    global PROBE
+    global PROBE, PROFILE, WORK_NAMES
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--slangc', default=os.environ.get('SLANGC', 'slangc'))
     parser.add_argument('--cxx', default=os.environ.get('CXX', 'g++'))
@@ -424,9 +756,11 @@ def main():
     args = parser.parse_args()
     os.environ.setdefault('OMP_NUM_THREADS', '4')
     start = time.monotonic()
-    PROBE = build_probe(args.slangc, args.cxx)
+    PROBE, PROFILE, WORK_NAMES = build_probe(args.slangc, args.cxx)
     PROBE.evaluate.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_uint32, ctypes.c_void_p]
     PROBE.evaluate.restype = None
+    PROFILE.evaluate.argtypes = PROBE.evaluate.argtypes + [ctypes.c_void_p]
+    PROFILE.evaluate.restype = None
     result = unittest.TextTestRunner(verbosity=2).run(unittest.defaultTestLoader.loadTestsFromTestCase(Clouds))
     if args.spirv:
         compile_spirv(args.slangc)

@@ -18,6 +18,7 @@ import java.util.concurrent.TimeUnit;
 
 import static dev.comfyfluffy.caustica.CausticaConfig.Rt.Composite.CLOUD_MAX_THICKNESS;
 import static dev.comfyfluffy.caustica.CausticaConfig.Rt.Composite.CLOUD_MIN_THICKNESS;
+import static dev.comfyfluffy.caustica.CausticaConfig.Rt.Composite.CLOUD_QUALITY;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -26,17 +27,20 @@ final class RtCloudConfigTest {
     @TempDir Path directory;
     private int previousMin;
     private int previousMax;
+    private String previousQuality;
 
     @BeforeEach
     void rememberSettings() {
         previousMin = CLOUD_MIN_THICKNESS.value();
         previousMax = CLOUD_MAX_THICKNESS.value();
+        previousQuality = CLOUD_QUALITY.get();
     }
 
     @AfterEach
     void restoreSettings() {
         CLOUD_MIN_THICKNESS.set(previousMin);
         CLOUD_MAX_THICKNESS.set(previousMax);
+        CLOUD_QUALITY.set(previousQuality);
     }
 
     @Test
@@ -102,6 +106,49 @@ final class RtCloudConfigTest {
         assertTrue(runProbe("reload").contains("range=17,17"));
     }
 
+    @Test
+    void qualityHasStableIdsAndDoesNotChangeThicknessOrClassicSettings() {
+        String[] levels = {"low", "medium", "high", "very_high", "ultra"};
+        float classic = CausticaConfig.Rt.Composite.CLOUD_THICKNESS.value();
+        for (int i = 0; i < levels.length; i++) {
+            CLOUD_QUALITY.set(levels[i]);
+            assertEquals(i, CausticaConfig.Rt.Composite.cloudQualityIndex());
+            assertRange(previousMin, previousMax);
+            assertEquals(classic, CausticaConfig.Rt.Composite.CLOUD_THICKNESS.value());
+        }
+        CLOUD_QUALITY.set("unknown");
+        assertEquals("ultra", CLOUD_QUALITY.get());
+        CLOUD_QUALITY.set("Very High");
+        assertEquals(3, CausticaConfig.Rt.Composite.cloudQualityIndex());
+        CLOUD_QUALITY.resetToDefault();
+        assertEquals("ultra", CLOUD_QUALITY.get());
+    }
+
+    @Test
+    void everyQualityPersistsAcrossFreshJvmsWithoutChangingThickness() throws Exception {
+        config("[composite]\ncloud-min-thickness = 18\ncloud-max-thickness = 21\ncloud-thickness = 0.37\n");
+        assertTrue(runProbe("read").contains("quality=ultra;qualityId=4"), "missing key must preserve Ultra");
+        String[] levels = {"low", "medium", "high", "very_high", "ultra"};
+        for (int i = 0; i < levels.length; i++) {
+            assertTrue(runProbe("write-quality", levels[i]).contains("quality=" + levels[i]));
+            String loaded = runProbe("read");
+            assertTrue(loaded.contains("quality=" + levels[i] + ";qualityId=" + i), loaded);
+            assertTrue(loaded.contains("range=18,21;classic=0.37"), loaded);
+            String file = Files.readString(directory.resolve("config/caustica.toml"));
+            assertTrue(file.contains("cloud-quality = \"" + levels[i] + "\""), file);
+        }
+    }
+
+    @Test
+    void qualityPropertyOverrideInvalidValuesAndReloadUseExistingConfigPrecedence() throws Exception {
+        config("[composite]\ncloud-quality = 'high'\n");
+        assertTrue(runProbe("properties", "-Dcaustica.rt.cloudQuality=low").contains("quality=low;qualityId=0"));
+        assertTrue(runProbe("properties", "-Dcaustica.rt.cloudQuality=invalid").contains("quality=ultra;qualityId=4"));
+        assertTrue(runProbe("reload-quality").contains("quality=very_high;qualityId=3"));
+        config("[composite]\ncloud-quality = 'unknown-preset'\n");
+        assertTrue(runProbe("read").contains("quality=ultra;qualityId=4"));
+    }
+
     private void config(String text) throws Exception {
         Files.createDirectories(directory.resolve("config"));
         Files.writeString(directory.resolve("config/caustica.toml"), text);
@@ -154,12 +201,19 @@ final class RtCloudConfigProbe {
             CLOUD_MAX_THICKNESS.set(Integer.parseInt(args[2]));
             CausticaConfig.Rt.Composite.CLOUD_THICKNESS.set(0.37f);
             CausticaConfig.save();
+        } else if ("write-quality".equals(args[0])) {
+            CLOUD_QUALITY.set(args[1]);
+            CausticaConfig.save();
+        } else if ("reload-quality".equals(args[0])) {
+            System.setProperty("caustica.rt.cloudQuality", "very-high");
+            CausticaConfig.reloadFromSystemProperties();
         } else if ("reload".equals(args[0])) {
             System.setProperty("caustica.rt.cloudMinThickness", "22");
             System.setProperty("caustica.rt.cloudMaxThickness", "17");
             CausticaConfig.reloadFromSystemProperties();
         }
         System.out.println("range=" + CLOUD_MIN_THICKNESS.value() + "," + CLOUD_MAX_THICKNESS.value()
-                + ";classic=" + CausticaConfig.Rt.Composite.CLOUD_THICKNESS.value());
+                + ";classic=" + CausticaConfig.Rt.Composite.CLOUD_THICKNESS.value()
+                + ";quality=" + CLOUD_QUALITY.get() + ";qualityId=" + CausticaConfig.Rt.Composite.cloudQualityIndex());
     }
 }

@@ -176,7 +176,7 @@ public struct WorldPush {
     // emitter scatter terms can never tint differently. Trailing lane after fogParams — the
     // generated WorldPushData appends it; RtFogShaderRegressionTest pins the pairing.
     public float4   fogTint;
-    // Volumetric formation envelope in blocks: x minimum, y maximum (16..22, ordered), zw reserved.
+    // Volumetric envelope: x minimum, y maximum (16..22 blocks, ordered), z quality (0 Low .. 4 Ultra), w reserved.
     // Appended in the BDA record, not the already-full 128-byte push constants. Classic ignores it.
     public float4   cloudThickness;
 };

@@ -93,7 +93,12 @@ final class RtCloudShaderRegressionTest {
         assertTrue(common.contains("public float4   cloudThickness;"));
         assertTrue(composite.contains("fogTint(),\n                    clouds.thickness()"));
         assertTrue(composite.contains("float thickness = volumetric ? maxThickness"));
-        assertTrue(composite.contains("new Float4(minThickness, maxThickness, 0f, 0f)"));
+        assertTrue(composite.contains("new Float4(minThickness, maxThickness,"));
+        assertTrue(composite.contains("CausticaConfig.Rt.Composite.cloudQualityIndex(), 0f)"));
+        assertTrue(shader.contains("clamp(push.cloudThickness.z, 0.0, 4.0)"));
+        assertTrue(ui.contains("options.add(cloudQuality())"));
+        assertTrue(ui.contains("List.of(\"low\", \"medium\", \"high\", \"very_high\", \"ultra\")"));
+        assertTrue(reset.contains("CLOUD_QUALITY"));
         assertTrue(composite.contains("CLOUD_MAX_THICKNESS_BLOCKS = 110.0f"));
         assertTrue(ui.contains("cloudFormationThickness(true, styleChanged)"));
         assertTrue(ui.contains("cloudFormationThickness(false, styleChanged)"));
@@ -106,6 +111,27 @@ final class RtCloudShaderRegressionTest {
         assertTrue(composite.contains("CLOUD_FIELD_PERIOD_BLOCKS = 24576.0"));
         assertTrue(shader.contains("cloudFormationThickness(push, samplePos)"));
         assertTrue(shader.contains("if (h <= 0.0 || h >= 1.0) return 0.0;"));
+    }
+
+    @Test
+    void cloudQualityControlsEveryVolumetricConsumerAndDoesNotAddTemporalHistory() throws IOException {
+        String source = Files.readString(CLOUDS);
+        String shadow = slice(source, "public float cloudSunShadow", "// ---- Classic");
+        assertTrue(shadow.contains("cloudShadowOpticalDepth(push, pointRel, lightDir)"));
+        String march = slice(source, "public CloudVolume cloudMarch", "// ---- Unified");
+        for (String budget : new String[] {"quality.viewSteps", "quality.viewCap", "quality.diffuseSteps",
+                "quality.diffuseCap", "quality.lightSteps", "quality.diffuseLightSteps", "quality.skySteps",
+                "quality.diffuseSkySteps", "quality.multipleOrders"}) {
+            assertTrue(march.contains(budget), "unused cloud budget: " + budget);
+        }
+        assertTrue(march.contains("if (classic) {"), "classic must keep its legacy march and lighting");
+        assertFalse(source.contains("push.frameIndex"), "do not animate sample locations to hide a low budget");
+        assertTrue(Files.readString(WORLD_RMISS).contains("cloudLayer(worldPush,"));
+        assertTrue(Files.readString(WORLD_RGEN).contains("cloudSegment(worldPush,"));
+        assertTrue(source.contains("if (detailLevel >= 1)"));
+        assertTrue(source.contains("if (detailLevel >= 2)"));
+        assertTrue(source.contains("if (multipleOrders >= 1)"));
+        assertTrue(source.contains("if (multipleOrders >= 2)"));
     }
 
     private static String slice(String source, String startNeedle, String endNeedle) {

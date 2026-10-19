@@ -208,6 +208,7 @@ public final class RtVideoOptions {
         options.add(cloudStyle(styleChanged));
         if (!"classic".equals(CausticaConfig.Rt.Composite.CLOUD_STYLE.get())) {
             options.add(cloudCoverage());
+            options.add(cloudQuality());
         }
         options.add(cloudHeight());
         if ("classic".equals(CausticaConfig.Rt.Composite.CLOUD_STYLE.get())) {
@@ -925,6 +926,18 @@ public final class RtVideoOptions {
     private static OptionInstance<Integer> cloudThickness() {
         return percent("caustica.options.rt.cloudThickness",
                 CausticaConfig.Rt.Composite.CLOUD_THICKNESS);
+    }
+
+    /** Five real shader budgets; no rebuild is needed because no other rows depend on the preset. */
+    private static OptionInstance<String> cloudQuality() {
+        StringSetting setting = CausticaConfig.Rt.Composite.CLOUD_QUALITY;
+        return new OptionInstance<>(
+            "caustica.options.rt.cloudQuality",
+            OptionInstance.cachedConstantTooltip(Component.translatable("caustica.options.rt.cloudQuality.tooltip")),
+            (caption, value) -> Component.translatable("caustica.options.rt.cloudQuality." + value),
+            new OptionInstance.Enum<>(List.of("low", "medium", "high", "very_high", "ultra"), Codec.STRING),
+            setting.get(),
+            setting::set);
     }
 
     /** Block-valued independent endpoints; rebuild dependent rows only when the peer has moved. */

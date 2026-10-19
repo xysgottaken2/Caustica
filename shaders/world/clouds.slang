@@ -32,29 +32,53 @@ public static const float CLOUD_FLAT_EPSILON = 0.25;
 public static const uint CLOUD_STYLE_CLASSIC = 0u;
 public static const uint CLOUD_STYLE_VOLUMETRIC = 1u;
 
-// ---- Volumetric march budget.
-//
-// This is the whole cost of the volumetric style, and it multiplies by SPP and by path depth, so it is
-// split into two tiers rather than being one flat number:
-//   * FULL is used where the clouds are actually looked at — the camera ray and specular/mirror bounces
-//     (reflections of the sky in water and glass). This is what the player sees, so it gets the light
-//     march and the full step count.
-//   * CHEAP is used for diffuse indirect bounces. Those contribute a broad, low-frequency sky-fill term
-//     that gets averaged over the hemisphere and then denoised; resolving cloud detail there is
-//     invisible in the result but would multiply the cost by the bounce count. It keeps the same
-//     extinction and phase, so the ENERGY stays right — only the detail is coarser.
-// Quality comes from the light march and the phase function rather than raw step count.
+// ---- Budgets. These legacy constants are kept ONLY for the classic missing-map fallback.
+// A volumetric preset bounds both the base sampling rate and the adaptive cap, so Low cannot silently
+// grow back to Ultra cost at grazing angles. highQuality still distinguishes visible/specular rays
+// from diffuse indirect rays; it is not the player's quality selector.
 public static const int   CLOUD_MARCH_STEPS = 24;
 public static const int   CLOUD_LIGHT_STEPS = 6;
 public static const int   CLOUD_MARCH_STEPS_CHEAP = 6;
 public static const int   CLOUD_LIGHT_STEPS_CHEAP = 2;
-// Upper bounds used when the step count is scaled to the path length (see cloudMarch). A fixed step
-// COUNT means a deeper slab silently gets coarser steps, which bands: cloud lobes are tens of blocks
-// wide, so a 60-block step walks straight past them. These cap the cost of that scaling.
 public static const int   CLOUD_MARCH_STEPS_MAX = 64;
 public static const int   CLOUD_MARCH_STEPS_CHEAP_MAX = 12;
-// Target distance between samples. Comfortably finer than a lobe, so the march resolves shape.
 public static const float CLOUD_TARGET_STEP_BLOCKS = 1.5;
+
+struct CloudQualitySettings {
+    int viewSteps;           // integration intervals per vertical slab; short segments need fewer
+    int viewCap;            // hard bound even at the horizon
+    int diffuseSteps;
+    int diffuseCap;
+    int lightSteps;          // per occupied visible sample
+    int diffuseLightSteps;
+    int shadowSteps;         // per terrain/fog shadow query, after scene visibility
+    int shadowCap;           // grazing shadows must resolve intervening banks, even on Low
+    int skySteps;            // per occupied visible sample toward the sky
+    int diffuseSkySteps;     // zero uses the previous local-column estimate
+    int multipleOrders;     // extra phase/attenuation orders; zero disables them
+    int densityProbes;      // Low/Medium: two-point quadrature, one lighting query per interval
+};
+
+int cloudQualityLevel(WorldPush push) {
+    return int(clamp(push.cloudThickness.z, 0.0, 4.0));
+}
+
+CloudQualitySettings cloudQualitySettings(WorldPush push) {
+    // Keep Low's vertical budget at eight, but allow 24 along long/grazing paths: a 12-step cap
+    // visibly sliced curved banks into bands in the CPU diagnostic. Light/detail work dominates;
+    // Low/Medium use two density probes per visible interval, but shade only their density-weighted
+    // centroid. This reduces coherent midpoint bands without temporal noise or doubling light marches.
+    // Low costs at most 24*(2+2+1) density queries versus Ultra's 64*(1+6+3).
+    //                  view/cap  diffuse/cap  sun/diffuse  shadow/cap  sky/diffuse  MS  density probes
+    switch (cloudQualityLevel(push)) {
+        case 0: return { 8, 24,    3,  4,       2, 1,        4, 12,      1, 0,       0, 2 }; // Low
+        case 1: return {12, 32,    4,  6,       2, 1,        5, 16,      1, 0,       1, 2 }; // Medium
+        case 2: return {16, 40,    5,  8,       4, 2,        6, 20,      2, 1,       1, 1 }; // High
+        case 3: return {20, 48,    6, 10,       5, 2,        7, 24,      2, 1,       2, 1 }; // Very high
+        default:return {24, 64,    6, 12,       6, 2,        8, 28,      3, 2,       2, 1 }; // Ultra
+    }
+}
+
 public static const float CLOUD_EXTINCTION = 0.115; // per block, at density 1
 // Optical depth is normalised against this thickness, so making the deck taller adds VOLUME without
 // making it more opaque. Without it, tau = density * sigma * pathLength grows with the slab depth and
@@ -334,7 +358,7 @@ public float cloudSunShadow(WorldPush push, float3 pointRel, float3 lightDir) {
     }
 
     if (cloudStyle(push) == CLOUD_STYLE_VOLUMETRIC) {
-        float tau = cloudLightOpticalDepth(push, pointRel, lightDir, CLOUD_LIGHT_STEPS);
+        float tau = cloudShadowOpticalDepth(push, pointRel, lightDir);
         return 1.0 - strength * saturate(push.clouds.y) * (1.0 - exp(-tau));
     }
 
@@ -710,8 +734,16 @@ float cloudVolumeDensity(WorldPush push, float3 posRel) {
     // Secondary 6-block cellular scallops plus 3-block gradient erosion are restricted to the
     // boundary. They remove material, never expand it;
     // the core retains low-frequency density variation instead of becoming homogeneous white cotton.
-    float detail = saturate(cloudWorley3(q * 2.0 + float3(23.0, 5.0, 41.0))) * 0.8
-                 + (0.5 + 0.5 * cloudPerlin3(q * 4.0 + float3(11.0, 47.0, 3.0))) * 0.2;
+    // Low filters the two fine bands to their mean instead of removing the erosion envelope
+    // (which would inflate every formation). The 3D warp, 12-block lobes, profile and thickness are
+    // identical at ALL presets. Medium keeps cellular scallops, High+ also resolves 3-block fraying.
+    int detailLevel = cloudQualityLevel(push);
+    float detail = 0.5;
+    if (detailLevel >= 1) {
+        float fine = 0.5;
+        if (detailLevel >= 2) fine += 0.5 * cloudPerlin3(q * 4.0 + float3(11.0, 47.0, 3.0));
+        detail = saturate(cloudWorley3(q * 2.0 + float3(23.0, 5.0, 41.0))) * 0.8 + fine * 0.2;
+    }
     float erosion = detail * lerp(0.35, 0.60, type) * (1.0 - shape) * (1.0 - shape);
     float baseProfile = smoothstep(0.0, lerp(0.045, 0.10, type), h);
     float topProfile = 1.0 - smoothstep(0.86, 1.0, h);
@@ -751,10 +783,20 @@ bool cloudSlabInterval(WorldPush push, float3 originRel, float3 dir, float maxDi
 }
 
 /** Optical depth toward the active celestial, clipped to the actual slab, with no camera fades. */
-float cloudLightOpticalDepth(WorldPush push, float3 posRel, float3 lightDir, int lightSteps) {
+float cloudLightOpticalDepth(WorldPush push, float3 posRel, float3 lightDir, int lightSteps,
+                            float maxDistance) {
     float t0, t1;
-    if (!cloudSlabInterval(push, posRel, lightDir, 1.0e9, t0, t1)) return 0.0;
+    if (!cloudSlabInterval(push, posRel, lightDir, maxDistance, t0, t1)) return 0.0;
     t1 = min(t1, t0 + push.cloudAnchor.z * CLOUD_MAX_SLAB_CROSSINGS);
+    if (lightSteps == 2 && cloudStyle(push) == CLOUD_STYLE_VOLUMETRIC) {
+        // With just two points, quadratic strata put 75% of the weight on one distant sample.
+        // Two-point Gauss-Legendre covers the full interval more evenly without adding a query;
+        // this also avoids coherent light bands when combined with a small view budget.
+        float left = lerp(t0, t1, 0.2113248654);
+        float right = lerp(t0, t1, 0.7886751346);
+        return (cloudOpticalDensity(push, posRel + lightDir * left)
+              + cloudOpticalDensity(push, posRel + lightDir * right)) * ((t1 - t0) * 0.5);
+    }
     float optical = 0.0;
     for (int i = 0; i < lightSteps; i++) {
         // Quadratic strata resolve nearby occluders better than the old six equal, slab-sized steps.
@@ -766,6 +808,73 @@ float cloudLightOpticalDepth(WorldPush push, float3 posRel, float3 lightDir, int
         optical += cloudOpticalDensity(push, posRel + lightDir * ((a + b) * 0.5)) * (b - a);
     }
     return optical;
+}
+
+float cloudLightOpticalDepth(WorldPush push, float3 posRel, float3 lightDir, int lightSteps) {
+    return cloudLightOpticalDepth(push, posRel, lightDir, lightSteps, 1.0e9);
+}
+
+// A receiver shadow crosses a whole bank, unlike self-shadow from inside one. Quadratic near-point
+// strata undersampled the far half and two samples could miss entire banks at low sun. Use bounded,
+// uniform spatial intervals instead; Low still halves the vertical budget and filters fine erosion.
+float cloudShadowOpticalDepth(WorldPush push, float3 posRel, float3 lightDir) {
+    float t0, t1;
+    if (!cloudSlabInterval(push, posRel, lightDir, 1.0e9, t0, t1)) return 0.0;
+    float thickness = push.cloudAnchor.z;
+    t1 = min(t1, t0 + thickness * CLOUD_MAX_SLAB_CROSSINGS);
+    CloudQualitySettings quality = cloudQualitySettings(push);
+    float stepLen = max(thickness / float(quality.shadowSteps), (t1 - t0) / float(quality.shadowCap));
+    int steps = min(int(ceil((t1 - t0) / stepLen)), quality.shadowCap);
+    float optical = 0.0;
+    for (int i = 0; i < steps; i++) {
+        float a = t0 + stepLen * float(i);
+        float b = min(t1, a + stepLen);
+        if (b <= a) continue;
+        optical += cloudOpticalDensity(push, posRel + lightDir * ((a + b) * 0.5)) * (b - a);
+        if (optical > 8.0) break; // direct visibility only: residual sun transmission < 0.00034
+    }
+    return optical;
+}
+
+// Sky is not a point sun. Integrate the actual cloud material overhead, even when the local sample is
+// on a thin skin below a thick lobe. The old localDensity * distance estimate brightened such skins
+// regardless of the occluder above them. Diffuse Low/Medium keep that estimate to bound indirect cost.
+float cloudSkyOpticalDepth(WorldPush push, float3 p, float opticalDensity, int skySteps) {
+    float localThickness = cloudFormationThickness(push, push.cloudAnchor.xy + p.xz);
+    float height = p.y - (push.clouds.w - push.cloudAnchor.z * 0.5);
+    float remaining = max(localThickness - height, 0.0);
+    if (skySteps == 0) return opticalDensity * remaining * 0.5;
+    return cloudLightOpticalDepth(push, p, float3(0.0, 1.0, 0.0), skySteps, remaining);
+}
+
+struct CloudScatteringPhases {
+    float single;
+    float second;
+    float third;
+    float backWeight;
+};
+
+// Phase angles are constant along a ray: evaluate them ONCE, not at every occupied march sample.
+CloudScatteringPhases cloudScatteringPhases(float cosT, int multipleOrders) {
+    CloudScatteringPhases p = { cloudPhase(cosT), 0.0, 0.0, 1.0 - smoothstep(-0.2, 0.7, cosT) };
+    if (multipleOrders >= 1) p.second = 0.30 * hgLobe(cosT, CLOUD_HG_G * 0.5);
+    if (multipleOrders >= 2) p.third = 0.10 * hgLobe(cosT, CLOUD_HG_G * 0.25);
+    return p;
+}
+
+// Neutral droplet scattering, not a screen/sun-distance colour ramp. Direct sun, diffuse sky and
+// weak multiple scattering all lose energy with optical depth. The small sky floor represents
+// unresolved hemispherical fill, not emission: a cloud with no incident light still emits nothing.
+float3 cloudInScatter(float3 sunRadiance, float3 skyRadiance, float sunTau, float skyTau,
+                      CloudScatteringPhases phases, int multipleOrders) {
+    float sunT = exp(-sunTau);
+    // Optical-depth powder term, using the transmittance already calculated (no extra exp).
+    float single = sunT * phases.single * (1.0 - 0.25 * phases.backWeight * sunT * sunT);
+    float multiple = 0.0;
+    if (multipleOrders >= 1) multiple += phases.second * exp(-0.50 * sunTau - 0.15 * skyTau);
+    if (multipleOrders >= 2) multiple += phases.third * exp(-0.25 * sunTau - 0.15 * skyTau);
+    float skyVisibility = 0.06 + 0.64 * exp(-skyTau);
+    return CLOUD_ALBEDO * (sunRadiance * (single + multiple) + skyRadiance * skyVisibility);
 }
 
 /** Result of a volumetric march: premultiplied scattered radiance and the surviving transmittance. */
@@ -794,6 +903,8 @@ public CloudVolume cloudMarch(WorldPush push, float3 originRel, float3 dir, floa
 
     float thickness = max(push.cloudAnchor.z, 1.0);
     bool classic = cloudStyle(push) == CLOUD_STYLE_CLASSIC;
+    CloudQualitySettings quality = cloudQualitySettings(push);
+    if (!classic) lightSteps = highQuality ? quality.lightSteps : quality.diffuseLightSteps;
     // Keep the legacy fallback's crossing fade, but NEVER dissolve a real volumetric formation
     // around the observer. Bounded slab intersections handle inside/parallel rays without a band.
     float halfThickness = thickness * 0.5;
@@ -826,15 +937,29 @@ public CloudVolume cloudMarch(WorldPush push, float3 originRel, float3 dir, floa
     }
 
     float3 sunRadiance = push.lightRadiance.xyz;
-    float cosT = dot(dir, push.lightDir.xyz);
-    float phase = cloudPhase(cosT);
     float opacity = clamp(push.clouds.y, 0.0, 1.0);
-    // Scale the step count to the distance actually being marched, so a thick deck is sampled as finely
-    // as a thin one instead of just taking longer strides. Clamped both ways: never coarser than the
-    // base count, never more expensive than the cap.
-    int stepCap = highQuality ? CLOUD_MARCH_STEPS_MAX : CLOUD_MARCH_STEPS_CHEAP_MAX;
-    marchSteps = clamp(int(ceil((t1 - t0) / CLOUD_TARGET_STEP_BLOCKS)), marchSteps, stepCap);
-    float stepLen = (t1 - t0) / float(marchSteps);
+    bool hasSun = max(sunRadiance.x, max(sunRadiance.y, sunRadiance.z)) > 0.0;
+    bool needsSky = max(skyBehind.x, max(skyBehind.y, skyBehind.z)) > 0.0
+                 || (hasSun && quality.multipleOrders > 0);
+    int multipleOrders = hasSun ? quality.multipleOrders : 0;
+    CloudScatteringPhases phases = {};
+    if (!classic && hasSun) phases = cloudScatteringPhases(dot(dir, push.lightDir.xyz), multipleOrders);
+
+    float stepLen;
+    if (classic) {
+        // Preserve the missing-map fallback exactly; the quality selector must not change classic.
+        int cap = highQuality ? CLOUD_MARCH_STEPS_MAX : CLOUD_MARCH_STEPS_CHEAP_MAX;
+        marchSteps = clamp(int(ceil((t1 - t0) / CLOUD_TARGET_STEP_BLOCKS)), marchSteps, cap);
+        stepLen = (t1 - t0) / float(marchSteps);
+    } else {
+        int baseSteps = highQuality ? quality.viewSteps : quality.diffuseSteps;
+        int cap = highQuality ? quality.viewCap : quality.diffuseCap;
+        stepLen = max(thickness / float(baseSteps), (t1 - t0) / float(cap));
+        marchSteps = min(int(ceil((t1 - t0) / stepLen)), cap);
+        // Fixed-width intervals with a shortened last interval: adding/removing a step does NOT
+        // relocate all other samples, unlike span / ceil(span / targetStep). The new interval starts
+        // with zero optical weight. This avoids budget-boundary pops without animated jitter/history.
+    }
     // Vanilla shades cloud faces by ORIENTATION with flat, constant tones — no smooth lighting model.
     // Reproducing that inside the march is what keeps the classic style looking like Minecraft even
     // though it is now a real volume: the box's top is bright, its underside dark, its vertical sides
@@ -847,38 +972,45 @@ public CloudVolume cloudMarch(WorldPush push, float3 originRel, float3 dir, floa
     }
 
     for (int i = 0; i < marchSteps; i++) {
-        float3 p = originRel + dir * (t0 + stepLen * (float(i) + 0.5));
-        float opticalDensity = cloudOpticalDensity(push, p);
+        float a = t0 + stepLen * float(i);
+        float b = min(t1, a + stepLen);
+        if (b <= a) continue;
+        float distance = classic ? t0 + stepLen * (float(i) + 0.5) : (a + b) * 0.5;
+        float opticalDensity;
+        if (!classic && highQuality && quality.densityProbes > 1) {
+            // Two-point Gauss-Legendre extinction; avoid sampling every curved edge at the same
+            // midpoint phase. Lighting stays once per interval at the material-weighted centroid.
+            // Count these as TWO real density samples, not a cosmetic "8 samples" quality label.
+            float left = lerp(a, b, 0.2113248654);
+            float right = lerp(a, b, 0.7886751346);
+            float sigmaLeft = cloudOpticalDensity(push, originRel + dir * left);
+            float sigmaRight = cloudOpticalDensity(push, originRel + dir * right);
+            opticalDensity = (sigmaLeft + sigmaRight) * 0.5;
+            distance = lerp(left, right, sigmaRight / max(sigmaLeft + sigmaRight, 1.0e-20));
+        } else {
+            opticalDensity = cloudOpticalDensity(push, originRel + dir * distance);
+        }
+        float3 p = originRel + dir * distance;
         if (opticalDensity <= 0.0) {
             continue;
         }
-        float sampleTransmittance = exp(-opticalDensity * stepLen * fade * crossFade);
-        float lightTau = cloudLightOpticalDepth(push, p, push.lightDir.xyz, lightSteps);
-        float lightT = exp(-lightTau);
+        float interval = classic ? stepLen : b - a;
+        float sampleTransmittance = exp(-opticalDensity * interval * fade * crossFade);
+        float lightTau = (classic || hasSun)
+                ? cloudLightOpticalDepth(push, p, push.lightDir.xyz, lightSteps) : 0.0;
         float3 inScatter;
         if (classic) {
             // Flat, vanilla-style face tone. Self-shadowing is deliberately damped (mixed only 40% in)
             // so cloud boxes keep the poster-flat look instead of developing soft volumetric gradients.
-            float shade = lerp(1.0, lightT, 0.4);
+            float shade = lerp(1.0, exp(-lightTau), 0.4);
             inScatter = push.cloudColor.xyz * CLOUD_INV_PI
                     * (sunRadiance * classicFace * shade * 3.0 + skyBehind * 1.4);
         } else {
-            // Single scattering keeps the forward silver lining; two successively more isotropic,
-            // weaker orders approximate multiple scattering without a uniform white ambient boost.
-            // All orders reuse the SAME optical depth, not a second density or a brightness texture.
-            float powder = 1.0 - exp(-opticalDensity * 4.0);
-            float backWeight = 1.0 - smoothstep(-0.2, 0.7, cosT);
-            float single = lightT * phase * lerp(1.0, powder, 0.35 * backWeight);
-            float multiple = 0.30 * hgLobe(cosT, CLOUD_HG_G * 0.5) * exp(-lightTau * 0.5)
-                           + 0.10 * hgLobe(cosT, CLOUD_HG_G * 0.25) * exp(-lightTau * 0.25);
-            // Approximate hemispherical sky occlusion from the remaining LOCAL vertical column.
-            // Unlike a constant sky fill it leaves the underside and dense interiors visibly darker.
-            float localThickness = cloudFormationThickness(push, push.cloudAnchor.xy + p.xz);
-            float height = p.y - (push.clouds.w - thickness * 0.5);
-            float skyTau = opticalDensity * max(localThickness - height, 0.0) * 0.5;
-            float skyVisibility = 0.12 + 0.58 * exp(-skyTau);
-            inScatter = CLOUD_ALBEDO
-                    * (sunRadiance * (single + multiple) + skyBehind * skyVisibility);
+            int skySteps = highQuality ? quality.skySteps : quality.diffuseSkySteps;
+            float skyTau = needsSky ? cloudSkyOpticalDepth(push, p, opticalDensity, skySteps) : 0.0;
+            inScatter = (hasSun || needsSky)
+                    ? cloudInScatter(sunRadiance, skyBehind, lightTau, skyTau, phases, multipleOrders)
+                    : float3(0.0, 0.0, 0.0);
 
         }
         // Energy-conserving accumulation: integrate in-scatter over the step's absorbed fraction.

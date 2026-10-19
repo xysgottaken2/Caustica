@@ -2222,13 +2222,13 @@ public final class RtComposite {
      *               z shadow strength, w camera-relative deck height
      * @param anchor xy wrapped sample anchor, z slab thickness, w view limit
      * @param color  xyz vanilla CLOUD_COLOR in linear space, w weather overcast fill 0..1
-     * @param thickness xy volumetric envelope endpoints in blocks (classic ignores them), zw reserved
+     * @param thickness xy volumetric envelope endpoints in blocks, z quality id 0..4, w reserved; classic ignores it
      */
     private record CloudPush(Float4 clouds, Float4 anchor, Float4 color, Float4 thickness) {
         /** No deck at all: a zeroed coverage/opacity pair short-circuits every cloud path in the shader. */
         static final CloudPush NONE =
                 new CloudPush(new Float4(0f, 0f, 0f, 0f), new Float4(0f, 0f, 0f, 0f),
-                        new Float4(1f, 1f, 1f, 0f), new Float4(16f, 22f, 0f, 0f));
+                        new Float4(1f, 1f, 1f, 0f), new Float4(16f, 22f, 4f, 0f));
     }
 
     /**
@@ -2517,7 +2517,8 @@ public final class RtComposite {
                         Math.clamp(shadow, 0f, 1f), (float) (deckCentre - cameraY)),
                 new Float4(wrapCloudAnchor(anchorX), wrapCloudAnchor(anchorZ),
                         thickness, cloudViewLimit(deckCentre - (float) cameraY)),
-                cloudColorState(fill), new Float4(minThickness, maxThickness, 0f, 0f));
+                cloudColorState(fill), new Float4(minThickness, maxThickness,
+                        CausticaConfig.Rt.Composite.cloudQualityIndex(), 0f));
     }
 
     /**

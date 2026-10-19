@@ -300,6 +300,7 @@ public final class RtSubScreens {
         return List.of(
                 CausticaConfig.Rt.Composite.CLOUDS,
                 CausticaConfig.Rt.Composite.CLOUD_STYLE,
+                CausticaConfig.Rt.Composite.CLOUD_QUALITY,
                 CausticaConfig.Rt.Composite.CLOUD_COVERAGE,
                 CausticaConfig.Rt.Composite.CLOUD_HEIGHT,
                 CausticaConfig.Rt.Composite.CLOUD_THICKNESS,
