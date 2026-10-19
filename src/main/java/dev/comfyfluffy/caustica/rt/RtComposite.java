@@ -443,36 +443,14 @@ public final class RtComposite {
     private static final float NRD_DENOISING_RANGE = 500000.0f;
     // ---- Cloud deck. These mirror clouds.slang and must stay in lock-step with it.
     //
-    // The classic field repeats every CLOUD_CELL_BLOCKS * CLOUD_PERIOD_CELLS = 12 * 512 = 6144 blocks,
-    // but the VOLUMETRIC field samples the same hash at CLOUD_VOLUMETRIC_SCALE (0.5), so in its own
-    // sampled space 6144 blocks is only half a period. Wrapping the anchor there landed mid-period and
-    // snapped the entire cloudscape to a different pattern — clouds visibly changing shape while
-    // walking, in the volumetric style only.
-    //
-    // The wrap must therefore be a whole period in EVERY space the field is sampled in: the base
-    // octaves, the domain warp, and both billow layers. The binding constraint is the largest octave
-    // divisor (CLOUD_WARP_DIV = 2.0 in clouds.slang):
-    //
-    //     period = 512 cells * 12 blocks/cell * maxDivisor(2.0) / scale(0.5) = 24576 blocks
-    //
-    // Every divisor there is a power of two, so all of these multiplies are exact in binary floating
-    // point and the wrap identity holds bit-for-bit rather than approximately. Verified: the full
-    // density function (base octaves + warp + billow) is now identical across a wrap to 0.0.
-    private static final double CLOUD_FIELD_PERIOD_BLOCKS = 512.0 * 12.0 * 2.0 / 0.5;
+    // Base value noise repeats at 6144, but the largest procedural wavelength is 48 blocks:
+    // 512 * 48 = 24576. Preserve the existing anchor period for every volume octave and parameter
+    // field, as well as the classic 3072-block bitmap. CPU shader tests verify complete-field wraps.
+    private static final double CLOUD_FIELD_PERIOD_BLOCKS = 24576.0;
     // Vanilla's clouds drift at 0.03 blocks/tick; matched so the sky moves at a familiar speed.
     private static final double CLOUD_WIND_BLOCKS_PER_TICK = 0.03;
-    // Deck thickness at the slider's 100%. Both styles march a real slab now, so this is the depth the
-    // clouds actually have in the world: at full thickness a bank is tall enough to fly into, while the
-    // slider at 0 collapses the deck to the old flat plane.
-    // Real cumulus is as tall as it is wide, often taller — a bank whose base sits at cloud height can
-    // easily tower 100+ blocks. 40 was too shallow for the deck to ever read as heaped rather than
-    // layered, and since extinction is now normalised by the slab depth (CLOUD_REFERENCE_THICKNESS in
-    // clouds.slang) raising this adds VOLUME without making the clouds more opaque.
+    // Legacy classic percentage slider. Volumetric uses its separate 16..22-block endpoint pair.
     private static final float CLOUD_MAX_THICKNESS_BLOCKS = 110.0f;
-    // Classic boxes never get thinner than vanilla's own 4-block extrusion (CloudRenderer's
-    // putVec3(12, 4, 12)): the thickness slider scales the box HEIGHT from that baseline up, per the
-    // classic rework's "vanilla shapes, slider-driven depth" decision. Volumetric keeps the full
-    // 0..110 range, including the flat-sheet collapse at zero.
     private static final float CLOUD_CLASSIC_MIN_THICKNESS = 4.0f;
     // Vanilla offsets the deck half a cell minus a sliver in Z (CloudRenderer.render: cameraZ + 3.96),
     // so the camera sits asymmetrically inside the cell grid. Matched for shape-parity with vanilla;
@@ -1708,7 +1686,7 @@ public final class RtComposite {
             WeatherState weather = weatherState(level,
                     Minecraft.getInstance().getDeltaTracker().getGameTimeDeltaPartialTick(false));
             SkyPush sky = skyPush(dimension, weather);
-            // Two lanes, resolved together from the same weather + camera state the sky above used.
+            // Cloud lanes resolved together from the same weather + camera state the sky above used.
             CloudPush clouds = cloudState(dimension, weather, camY);
             // Analytic held-item light: position + intensity lane and the item's RGB tint; w == 0
             // disables the shader term (toggle off, no luminous item, or no player).
@@ -1794,7 +1772,8 @@ public final class RtComposite {
                     fogParams(),
                     // Biome/weather tint for the fog's scatter (WorldPush.fogTint): the game's
                     // own FOG_COLOR attribute, blended by the slider — see fogTint() above.
-                    fogTint()
+                    fogTint(),
+                    clouds.thickness()
             ).write(push);
             int flushBytes = Math.max(WORLD_PUSH_SIZE, READY_MASK_OFFSET + readyMaskBytes);
             if (cloudCellsAddress != 0L) {
@@ -2243,12 +2222,13 @@ public final class RtComposite {
      *               z shadow strength, w camera-relative deck height
      * @param anchor xy wrapped sample anchor, z slab thickness, w view limit
      * @param color  xyz vanilla CLOUD_COLOR in linear space, w weather overcast fill 0..1
+     * @param thickness xy volumetric envelope endpoints in blocks (classic ignores them), zw reserved
      */
-    private record CloudPush(Float4 clouds, Float4 anchor, Float4 color) {
+    private record CloudPush(Float4 clouds, Float4 anchor, Float4 color, Float4 thickness) {
         /** No deck at all: a zeroed coverage/opacity pair short-circuits every cloud path in the shader. */
         static final CloudPush NONE =
                 new CloudPush(new Float4(0f, 0f, 0f, 0f), new Float4(0f, 0f, 0f, 0f),
-                        new Float4(1f, 1f, 1f, 0f));
+                        new Float4(1f, 1f, 1f, 0f), new Float4(16f, 22f, 0f, 0f));
     }
 
     /**
@@ -2466,9 +2446,8 @@ public final class RtComposite {
     }
 
     /**
-     * Resolve this frame's cloud deck into the two {@link WorldPushData} lanes {@code clouds.slang}
-     * reads: {@code clouds} (coverage, opacity, shadow strength, camera-relative deck height) and
-     * {@code cloudAnchor} (wind-scrolled sample anchor, slab thickness, view limit).
+     * Resolve the shared cloud state: coverage/opacity/shadow/height, wind anchor + bounding slab,
+     * authored classic colour + weather fill, and the independent volumetric thickness endpoints.
      *
      * <p><b>Coverage and weather.</b> Rain pushes coverage toward fully overcast on top of the
      * configured clear-sky value, and thunder finishes closing it. That is the same rain/thunder pair
@@ -2518,16 +2497,15 @@ public final class RtComposite {
         // offset matches vanilla's own (cameraZ + 3.96 in CloudRenderer.render).
         double anchorX = camX + drift;
         double anchorZ = camZ + CLOUD_Z_OFFSET_BLOCKS;
-        // Player-controlled thickness. At 0 the shader takes its flat-plane path (see
-        // CLOUD_FLAT_EPSILON in clouds.slang), so the slider bottoming out is genuinely a flat deck
-        // rather than a degenerate zero-length march — that stays true for the volumetric style. The
-        // classic style floors at vanilla's own 4-block box height instead: its shapes come from the
-        // authored clouds.png cells, and the slider scales box HEIGHT from the vanilla baseline up.
-        float thickness = Math.clamp(CausticaConfig.Rt.Composite.CLOUD_THICKNESS.value(), 0f, 1f)
-                * CLOUD_MAX_THICKNESS_BLOCKS;
-        if (CausticaConfig.Rt.Composite.cloudStyleIndex() != CLOUD_STYLE_VOLUMETRIC) {
-            thickness = Math.max(CLOUD_CLASSIC_MIN_THICKNESS, thickness);
-        }
+        // Classic keeps its existing percentage slider and authored boxes. Volumetric uses the
+        // maximum as its acceleration slab; the shader computes a continuous local envelope between
+        // the independent endpoints. The old value remains persisted for switching back to classic.
+        float minThickness = CausticaConfig.Rt.Composite.CLOUD_MIN_THICKNESS.value();
+        float maxThickness = CausticaConfig.Rt.Composite.CLOUD_MAX_THICKNESS.value();
+        boolean volumetric = CausticaConfig.Rt.Composite.cloudStyleIndex() == CLOUD_STYLE_VOLUMETRIC;
+        float thickness = volumetric ? maxThickness : Math.max(CLOUD_CLASSIC_MIN_THICKNESS,
+                Math.clamp(CausticaConfig.Rt.Composite.CLOUD_THICKNESS.value(), 0f, 1f)
+                        * CLOUD_MAX_THICKNESS_BLOCKS);
         // The slider sets the deck's BASE, but the shader's slab is centred on the pushed height, so the
         // half-thickness is added back here. Pushing the base directly would make the clouds appear to
         // sink as the thickness slider is raised (the slab would grow downward as well as upward), which
@@ -2539,7 +2517,7 @@ public final class RtComposite {
                         Math.clamp(shadow, 0f, 1f), (float) (deckCentre - cameraY)),
                 new Float4(wrapCloudAnchor(anchorX), wrapCloudAnchor(anchorZ),
                         thickness, cloudViewLimit(deckCentre - (float) cameraY)),
-                cloudColorState(fill));
+                cloudColorState(fill), new Float4(minThickness, maxThickness, 0f, 0f));
     }
 
     /**

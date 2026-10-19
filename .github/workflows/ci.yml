@@ -90,6 +90,11 @@ jobs:
           vulkan-sdk-version: ${{ env.VULKAN_SDK_VERSION }}
           vulkan-sdk-sha256: ${{ env.VULKAN_SDK_SHA256 }}
           slang-version: ${{ env.SLANG_VERSION }}
+      - name: Execute procedural cloud shader tests on CPU
+        run: |
+          python3 -m venv build/cloud-check-env
+          build/cloud-check-env/bin/python -m pip install numpy==2.4.6 Pillow==13.0.0
+          build/cloud-check-env/bin/python tools/validate_clouds.py --render
       # JUnit stays separate so a contract failure is reported as its own step.
       - name: Test the ABI verifier and hook contracts (synthetic classfiles)
         run: ./gradlew --no-daemon -p buildSrc test
@@ -126,6 +131,8 @@ jobs:
             build-output.log
             build/reports/
             build/test-results/
+            build/cloud-validation/metrics.json
+            build/cloud-validation/*.png
             build/libs/
             buildSrc/build/reports/
             buildSrc/build/test-results/

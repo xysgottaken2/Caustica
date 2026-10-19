@@ -81,6 +81,33 @@ final class RtCloudShaderRegressionTest {
                 "if (!cloudShadowReady) {");
     }
 
+    @Test
+    void volumeThicknessCrossesConfigUiAndReflectedPushWithoutChangingClassicDepth() throws IOException {
+        String composite = Files.readString(RT_COMPOSITE);
+        String shader = Files.readString(CLOUDS);
+        String common = Files.readString(REPO_ROOT.resolve("shaders/world/world_common.slang"));
+        String ui = Files.readString(REPO_ROOT.resolve(
+                "src/main/java/dev/comfyfluffy/caustica/client/RtVideoOptions.java"));
+        String reset = Files.readString(REPO_ROOT.resolve(
+                "src/main/java/dev/comfyfluffy/caustica/client/gui/RtSubScreens.java"));
+        assertTrue(common.contains("public float4   cloudThickness;"));
+        assertTrue(composite.contains("fogTint(),\n                    clouds.thickness()"));
+        assertTrue(composite.contains("float thickness = volumetric ? maxThickness"));
+        assertTrue(composite.contains("new Float4(minThickness, maxThickness, 0f, 0f)"));
+        assertTrue(composite.contains("CLOUD_MAX_THICKNESS_BLOCKS = 110.0f"));
+        assertTrue(ui.contains("cloudFormationThickness(true, styleChanged)"));
+        assertTrue(ui.contains("cloudFormationThickness(false, styleChanged)"));
+        assertTrue(ui.contains("new OptionInstance.IntRange(16, 22)"));
+        assertTrue(ui.contains("if (peer.value() != previousPeer) reopen.run()"));
+        for (String endpoint : new String[] {"CLOUD_MIN_THICKNESS", "CLOUD_MAX_THICKNESS"}) {
+            assertTrue(reset.contains(endpoint), endpoint + " must participate in page/global reset");
+        }
+        assertTrue(shader.contains("CLOUD_FIELD_PERIOD_BLOCKS = 24576.0"));
+        assertTrue(composite.contains("CLOUD_FIELD_PERIOD_BLOCKS = 24576.0"));
+        assertTrue(shader.contains("cloudFormationThickness(push, samplePos)"));
+        assertTrue(shader.contains("if (h <= 0.0 || h >= 1.0) return 0.0;"));
+    }
+
     private static String slice(String source, String startNeedle, String endNeedle) {
         int start = source.indexOf(startNeedle);
         assertTrue(start >= 0, "missing shader snippet start: " + startNeedle);

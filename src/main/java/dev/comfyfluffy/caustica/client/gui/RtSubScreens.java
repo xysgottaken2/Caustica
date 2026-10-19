@@ -303,6 +303,8 @@ public final class RtSubScreens {
                 CausticaConfig.Rt.Composite.CLOUD_COVERAGE,
                 CausticaConfig.Rt.Composite.CLOUD_HEIGHT,
                 CausticaConfig.Rt.Composite.CLOUD_THICKNESS,
+                CausticaConfig.Rt.Composite.CLOUD_MIN_THICKNESS,
+                CausticaConfig.Rt.Composite.CLOUD_MAX_THICKNESS,
                 CausticaConfig.Rt.Composite.CLOUD_SHADOW_STRENGTH,
                 CausticaConfig.Rt.Composite.CLOUD_OPACITY);
     }

@@ -96,10 +96,9 @@ public struct WorldPush {
     // single source of truth for how much the weather dims things, so Java's NEE radiance and the sky
     // shader can never disagree about how dark a storm is.
     public float4   weather;          // x rain 0..1, y thunder 0..1, z sky darkening, w light attenuation
-    // Flat vanilla-style cloud deck (clouds.slang). Coverage already folds in the weather on the Java
-    // side (RtComposite.cloudState), so the shader reads one resolved state rather than re-deriving the
-    // storm ramp the sky darkening also depends on. The two slider lanes (shadow strength, opacity) are
-    // pushed raw so a mid-frame change takes effect on the next frame like every other RT option.
+    // Both cloud styles. Player coverage and weather fill remain separate: cloudColor.w supplies
+    // the latter to both authored classic cells and the procedural 3D density. Opacity/shadow are
+    // independent controls. The centre + maximum depth define the ray-marching acceleration slab.
     public float4   clouds;           // x coverage 0..1, y opacity 0..1, z shadow strength 0..1, w deck height (camera-relative blocks)
     public float4   cloudAnchor;      // xy wind-scrolled sample anchor (blocks, wrapped), z slab thickness, w view limit
     // Classic-style authored shape + colour. cloudColor.xyz is vanilla's own EnvironmentAttributes
@@ -177,6 +176,9 @@ public struct WorldPush {
     // emitter scatter terms can never tint differently. Trailing lane after fogParams — the
     // generated WorldPushData appends it; RtFogShaderRegressionTest pins the pairing.
     public float4   fogTint;
+    // Volumetric formation envelope in blocks: x minimum, y maximum (16..22, ordered), zw reserved.
+    // Appended in the BDA record, not the already-full 128-byte push constants. Classic ignores it.
+    public float4   cloudThickness;
 };
 
 // worldPush.dimension: the sky/lighting model this frame renders with. The Overworld runs the full

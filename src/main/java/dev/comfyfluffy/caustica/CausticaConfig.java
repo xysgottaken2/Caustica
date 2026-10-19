@@ -108,7 +108,10 @@ public final class CausticaConfig {
                         + " path-traced image at full resolution (noisy reference view). Requires dlss-rr.enabled.\n"
                         + " water-wave-strength/-speed/-detail: height multiplier, animation speed and spectrum\n"
                         + " component count for Animated Water. parallax-quality: multiplier on the POM\n"
-                        + " texel-crossing budget (sampling level), independent of parallax-strength (relief depth).");
+                        + " texel-crossing budget (sampling level), independent of parallax-strength (relief depth).\n"
+                        + " cloud-min-thickness / cloud-max-thickness: volumetric envelope in blocks (16..22).\n"
+                        + " Editing an endpoint past its peer moves the peer; equal endpoints disable variation.\n"
+                        + " cloud-thickness: legacy classic-box depth fraction; unaffected by the volumetric range.");
         FILE.setComment("materials",
                 " Material appearance controls. metallic-shininess reduces roughness only on authored metallic\n"
                         + " surfaces; 0 preserves resource-pack material data and 1 gives metals their strongest shine.");
@@ -328,6 +331,17 @@ public final class CausticaConfig {
         private final int defaultValue;
         private final IntUnaryOperator sanitize;
         private volatile int value;
+        // Optional ordered pair. Only linked controls use these; the last edited endpoint wins.
+        private IntSetting lowerBound;
+        private IntSetting upperBound;
+
+        private void orderBefore(IntSetting upper) {
+            this.upperBound = upper;
+            upper.lowerBound = this;
+            // Both initial values have already been read from TOML/properties. The maximum is loaded
+            // second, so it wins an invalid persisted pair, just as when that control is edited last.
+            upper.set(upper.value());
+        }
 
         private IntSetting(String key, String tomlPath, int defaultValue, IntUnaryOperator sanitize) {
             this.key = key;
@@ -365,24 +379,22 @@ public final class CausticaConfig {
         @Override
         public void set(Integer value) {
             this.value = sanitize.applyAsInt(value != null ? value : defaultValue);
+            if (lowerBound != null && lowerBound.value > this.value) lowerBound.value = this.value;
+            if (upperBound != null && upperBound.value < this.value) upperBound.value = this.value;
         }
 
         @Override
         public void resetToDefault() {
-            this.value = defaultValue;
+            set(defaultValue);
         }
 
         @Override
         public void reloadFromSystemProperties() {
             String prop = System.getProperty(key);
-            if (prop == null) {
-                this.value = defaultValue;
-                return;
-            }
             try {
-                this.value = sanitize.applyAsInt(Integer.parseInt(prop.trim()));
+                set(prop == null ? defaultValue : Integer.parseInt(prop.trim()));
             } catch (NumberFormatException e) {
-                this.value = defaultValue;
+                set(defaultValue);
             }
         }
 
@@ -776,35 +788,31 @@ public final class CausticaConfig {
             /**
              * Cloud rendering style.
              *
-             * <p>{@code classic} reproduces vanilla's flat, blocky deck: coverage is quantised to the
-             * 12-block cell grid so the silhouette is genuinely square-edged, and the slab is shaded
-             * with vanilla's distinct top/side/bottom faces. {@code volumetric} extrudes the same
-             * coverage map into a ray-marched slab with self-shadowing and forward scattering — the
-             * look heavy shaderpacks produce, at a real GPU cost.
-             *
-             * <p>Both styles read one shared coverage field, so switching does not move the clouds and
-             * the cloud shadows stay identical between them.
+             * <p>{@code classic} intersects vanilla's authored clouds.png boxes with face shading.
+             * {@code volumetric} builds a procedural Perlin-Worley medium with local thickness,
+             * erosion and light-marched self-shadowing. Both advect with the same wind, but their
+             * shape sources and depth controls are independent.
              */
             public static final StringSetting CLOUD_STYLE =
                     string("caustica.rt.cloudStyle", "composite.cloud-style", "classic",
                             Composite::sanitizeCloudStyle);
-            /**
-             * Cloud thickness, 0..1, as a fraction of {@link #CLOUD_MAX_THICKNESS_BLOCKS}.
-             *
-             * <p>Volumetric: 0 is a flat sheet (the deck collapses to a plane and takes the cheap
-             * non-marched path); 1 is a deep bank. Classic: the slider scales the HEIGHT of vanilla's
-             * authored cell boxes, floored at vanilla's own 4-block extrusion — classic clouds are
-             * always real boxes with lit tops and shaded sides, never thinner than the game draws them.
-             */
+            /** Legacy classic-box depth, kept in its original TOML key and 4..110-block range. */
             public static final FloatSetting CLOUD_THICKNESS =
                     clampedFloat("caustica.rt.cloudThickness", "composite.cloud-thickness", 0.5f, 0.0f, 1.0f);
+            /** Volumetric envelope endpoints in blocks, inclusive. The classic style ignores them. */
+            public static final IntSetting CLOUD_MIN_THICKNESS =
+                    clampedInt("caustica.rt.cloudMinThickness", "composite.cloud-min-thickness", 16, 16, 22);
+            public static final IntSetting CLOUD_MAX_THICKNESS =
+                    clampedInt("caustica.rt.cloudMaxThickness", "composite.cloud-max-thickness", 22, 16, 22);
+            static {
+                CLOUD_MIN_THICKNESS.orderBefore(CLOUD_MAX_THICKNESS);
+            }
             /**
              * How much the cloud deck darkens the sun/moon light reaching the ground beneath it.
              *
              * <p>0 means clouds are visible in the sky but cast nothing; 1 means a fully opaque cloud
-             * blocks the celestial light completely. The shadow is an analytic query against the same
-             * density function the visible deck is drawn from, so it costs no extra ray and the shadow
-             * on the ground always matches the cloud overhead.
+             * blocks the celestial light completely. Volumetric shadows integrate the actual medium;
+             * classic uses its authored footprint. Neither adds a hardware scene-visibility ray.
              */
             public static final FloatSetting CLOUD_SHADOW_STRENGTH =
                     clampedFloat("caustica.rt.cloudShadowStrength", "composite.cloud-shadow-strength",

@@ -80,6 +80,11 @@ that rebuilds the JAR with those shim artifacts and asserts that every requested
 really inside it. A failing job publishes its trimmed Gradle diagnostics to a `ci-logs-*` ref,
 because Actions logs and artifacts expire long before the code does.
 
+The volumetric cloud field also has a GPU-less executable shader harness (Slang → C++), including
+thickness bounds, periodicity, wind, optical-depth and classic-path checks. See
+[Procedural clouds: implementation and validation](docs/procedural-clouds.md) for its commands,
+measured limits and in-game visual acceptance checklist.
+
 **CI does not run the game.** A green build proves that the sources compile against 26.3, that the
 shaders validate as SPIR-V, and that the documented injection points still exist in the client
 bytecode. It cannot prove that a Mixin applies, that a hook is reached, or that the rendered image

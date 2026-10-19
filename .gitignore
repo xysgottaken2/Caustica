@@ -19,3 +19,7 @@ src/main/resources/caustica/natives/**/*.so
 
 # The Gradle wrapper JAR stays tracked.
 !gradle/wrapper/gradle-wrapper.jar
+
+# Python cloud-validation tooling (all generated probe/render outputs live under build/).
+__pycache__/
+*.pyc

@@ -210,7 +210,12 @@ public final class RtVideoOptions {
             options.add(cloudCoverage());
         }
         options.add(cloudHeight());
-        options.add(cloudThickness());
+        if ("classic".equals(CausticaConfig.Rt.Composite.CLOUD_STYLE.get())) {
+            options.add(cloudThickness());
+        } else {
+            options.add(cloudFormationThickness(true, styleChanged));
+            options.add(cloudFormationThickness(false, styleChanged));
+        }
         options.add(cloudShadowStrength());
         options.add(cloudOpacity());
         return options.toArray(OptionInstance<?>[]::new);
@@ -848,10 +853,8 @@ public final class RtVideoOptions {
     /**
      * Cloud rendering style: vanilla's flat blocky deck, or a ray-marched volumetric slab.
      *
-     * <p>Both styles are two readings of one shared coverage field, so switching does not move the
-     * clouds — the same cloud is simply drawn flat or with depth — and the cloud shadows are unchanged
-     * between them. Volumetric costs real GPU time (it marches the slab and light-marches for
-     * self-shadowing); classic is nearly free.
+     * <p>Classic uses authored boxes, volumetric a procedural 3D medium with local thickness and
+     * self-shadowing. The wind is shared but the shapes and depth controls are independent.
      *
      * <p>{@code styleChanged} reopens the screen so the coverage slider swaps to its disabled
      * placeholder (or back) as soon as the style flips — classic decks bake coverage into the
@@ -917,14 +920,32 @@ public final class RtVideoOptions {
     }
 
     /**
-     * Cloud thickness, as a percentage of the maximum deck depth. Applies to both styles: 0% is a flat
-     * sheet, 100% is a deep bank you can fly into. Classic clouds become real boxes with lit tops and
-     * darker sides, the way vanilla's cloud geometry looks; volumetric clouds gain the depth their
-     * shading needs. Thicker clouds cost more to march.
+     * Preserved classic-box percentage depth (4..110 blocks). Volumetric has block-valued bounds.
      */
     private static OptionInstance<Integer> cloudThickness() {
         return percent("caustica.options.rt.cloudThickness",
                 CausticaConfig.Rt.Composite.CLOUD_THICKNESS);
+    }
+
+    /** Block-valued independent endpoints; rebuild dependent rows only when the peer has moved. */
+    private static OptionInstance<Integer> cloudFormationThickness(boolean minimum, Runnable reopen) {
+        IntSetting setting = minimum ? CausticaConfig.Rt.Composite.CLOUD_MIN_THICKNESS
+                : CausticaConfig.Rt.Composite.CLOUD_MAX_THICKNESS;
+        IntSetting peer = minimum ? CausticaConfig.Rt.Composite.CLOUD_MAX_THICKNESS
+                : CausticaConfig.Rt.Composite.CLOUD_MIN_THICKNESS;
+        String key = minimum ? "caustica.options.rt.cloudMinThickness" : "caustica.options.rt.cloudMaxThickness";
+        return new OptionInstance<>(
+            key,
+            OptionInstance.cachedConstantTooltip(Component.translatable(key + ".tooltip")),
+            (caption, value) -> Options.genericValueLabel(caption,
+                    Component.translatable("caustica.options.rt.cloudThickness.blocks", value)),
+            new OptionInstance.IntRange(16, 22),
+            setting.value(),
+            value -> {
+                int previousPeer = peer.value();
+                setting.set(value);
+                if (peer.value() != previousPeer) reopen.run();
+            });
     }
 
     /**
