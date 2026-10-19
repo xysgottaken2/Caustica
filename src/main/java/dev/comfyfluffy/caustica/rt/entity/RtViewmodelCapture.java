@@ -29,11 +29,16 @@ import org.joml.Matrix4f;
  * hand's own animation (bob/swing/item swap) trails by one frame, and its per-vertex motion deltas are
  * measured in that same camera-relative space, so the reprojection stays exact.
  *
- * <p><b>Geometry space.</b> Vanilla seeds the hand {@code PoseStack} with the camera view rotation, so
- * the captured vertices are in view space. They are re-expressed into camera-relative world axes (and
- * laterally scaled for a fixed viewmodel FOV — see {@code RtEntities#viewmodelLateralScale}) before the
- * upload, which lets the instance live at a translation-only transform and keeps motion vectors correct
- * while the camera turns.
+ * <p><b>Geometry space.</b> {@code renderItemInHand} seeds the hand {@code PoseStack} with
+ * {@code viewRotationMatrix.invert()}, i.e. the view-to-world camera rotation, and the hand pass binds
+ * the view rotation itself as its model-view ({@code RenderSystem.getModelViewStack().mul(viewRotationMatrix)}).
+ * Every submitted vertex is therefore in <b>camera-relative world space for the capture frame</b>: world
+ * axes, camera at the origin, still carrying that frame's camera orientation. The frame that consumes
+ * the capture would misplace it if it were uploaded as-is (the arm would be stuck pointing in the
+ * capture frame's directions instead of staying in front of the eye), so {@link #takePosed} rotates it
+ * by the relative camera rotation between the two frames and applies the fixed-viewmodel-FOV lateral
+ * scale in view space. The instance transform is then a pure translation to the camera position, and the
+ * per-vertex motion deltas stay exact while the camera turns.
  *
  * <p><b>Failure policy.</b> Until a capture has succeeded once, the submission is mirrored into the
  * caller's collector, so the vanilla hand keeps drawing. A capture that throws latches the RT viewmodel
@@ -58,6 +63,11 @@ public final class RtViewmodelCapture {
     private static final int EMPTY_STREAK_WARN = 120;
     /** Hand FOV (degrees) that vanilla used for the hand projection of the capture being consumed. */
     private float handFov = 70.0f;
+    /** World-to-view basis of the frame the pending capture came from (JOML storage order). */
+    private final float[] captureBasis = new float[9];
+    private boolean captureBasisKnown;
+    /** Scratch for the consuming frame's world-to-view basis. */
+    private final float[] currentBasis = new float[9];
 
     private RtViewmodelCapture() {
     }
@@ -101,12 +111,19 @@ public final class RtViewmodelCapture {
         }
     }
 
-    /** Seal the submission started by {@link #begin}: the capture becomes available to the frame. */
-    public void end() {
+    /**
+     * Seal the submission started by {@link #begin}: the capture becomes available to the frame.
+     *
+     * @param captureViewRotation world-to-view rotation of the camera the hand was submitted with, i.e.
+     *                            the rotation baked into the captured vertices. Recorded so the consuming
+     *                            frame can re-express the arm in its own camera orientation.
+     */
+    public void end(Matrix4f captureViewRotation) {
         if (!this.capturing) {
             return;
         }
         this.capturing = false;
+        this.captureBasisKnown = basis(captureViewRotation, this.captureBasis);
         try {
             this.collector.begin(null, false);
             this.pending = this.capture.idx.size() >= 3 && this.capture.verts.size() >= 9;
@@ -151,66 +168,104 @@ public final class RtViewmodelCapture {
     }
 
     /**
-     * Consume the pending capture, re-expressing it from view space into camera-relative world axes and
-     * applying the fixed-viewmodel-FOV lateral scale. Returns {@code null} when nothing was captured.
+     * Consume the pending capture, re-expressing it in this frame's camera orientation and applying the
+     * fixed-viewmodel-FOV lateral scale. Returns {@code null} when nothing was captured.
      *
-     * <p>The transform is in-place: {@link RtEntityCapture#verts} becomes the camera-relative position
-     * array (fed straight to the motion tracker and the geometry upload) and each triangle's stored
-     * normal is rotated the same way, so the hit shader's normal is already in world axes for the
-     * translation-only instance transform.
+     * @param currentViewRotation world-to-view rotation of the frame consuming the capture
      */
-    RtEntityCapture takePosed(float lateralScale, Matrix4f viewRotation) {
-        if (!this.pending || viewRotation == null) {
+    RtEntityCapture takePosed(float lateralScale, Matrix4f currentViewRotation) {
+        if (!this.pending) {
             return null;
         }
         this.pending = false;
-        pose(lateralScale, viewRotation);
+        if (!basis(currentViewRotation, this.currentBasis)) {
+            return this.capture; // no camera basis this frame: upload as captured rather than guess
+        }
+        if (!this.captureBasisKnown) {
+            // Nothing recorded at seal time (RT was not active when the hand was submitted): the capture
+            // is at most one frame old, so treating it as already current is the closest available guess.
+            System.arraycopy(this.currentBasis, 0, this.captureBasis, 0, 9);
+        }
+        poseCameraRelative(this.capture.verts.elements(), this.capture.verts.size(),
+                this.capture.prim.elements(), this.capture.prim.size(),
+                lateralScale, this.captureBasis, this.currentBasis);
         return this.capture;
     }
 
-    private void pose(float lateralScale, Matrix4f viewRotation) {
-        float s = lateralScale > 0.0f && Float.isFinite(lateralScale) ? lateralScale : 1.0f;
-        // cameraState.viewRotationMatrix is view -> world (its columns are the camera's world-space axes,
-        // matching RtComposite's camRight/camForward extraction), so it maps captured vertices and normals
-        // straight into world axes. JOML names elements m<column><row>: world row 0 is
-        // m00*x + m10*y + m20*z, which is why the m<col><row> getters are indexed that way below.
-        float r00 = viewRotation.m00();
-        float r10 = viewRotation.m10();
-        float r20 = viewRotation.m20();
-        float r01 = viewRotation.m01();
-        float r11 = viewRotation.m11();
-        float r21 = viewRotation.m21();
-        float r02 = viewRotation.m02();
-        float r12 = viewRotation.m12();
-        float r22 = viewRotation.m22();
+    /** Copy a world-to-view rotation into {@code out} (JOML storage order); false when {@code m} is null. */
+    private static boolean basis(Matrix4f m, float[] out) {
+        if (m == null) {
+            return false;
+        }
+        out[0] = m.m00();
+        out[1] = m.m01();
+        out[2] = m.m02();
+        out[3] = m.m10();
+        out[4] = m.m11();
+        out[5] = m.m12();
+        out[6] = m.m20();
+        out[7] = m.m21();
+        out[8] = m.m22();
+        return true;
+    }
 
-        float[] verts = this.capture.verts.elements();
-        int vertexFloats = this.capture.verts.size();
+    /**
+     * Re-express a capture from its own camera orientation into {@code currentView}'s, scaling it
+     * laterally by {@code s}, in place.
+     *
+     * <p>Vertices arrive in world axes with the capture camera at the origin. Undoing that frame's
+     * world-to-view rotation puts them in view space — the hand's true camera-local pose, which must not
+     * change when the camera merely turns. The lateral scale then belongs there too (the FOV acts on
+     * view x/y), and applying the consuming frame's view-to-world rotation finally places the arm in
+     * front of the <em>current</em> camera. Normals use the inverse-transpose (V_cᵀ·S⁻¹·V_c followed by
+     * V_cur), renormalised.
+     *
+     * <p>Bases are 9 floats in JOML storage order (m00,m01,m02,m10,m11,m12,m20,m21,m22). Package-private
+     * with primitive arguments so the transform can be unit-tested without a render context.
+     */
+    static void poseCameraRelative(float[] verts, int vertexFloats, float[] prim, int primFloats, float s,
+                                   float[] captureView, float[] currentView) {
+        if (currentView == null) {
+            return;
+        }
+        float k = s > 0.0f && Float.isFinite(s) ? s : 1.0f;
         for (int i = 0; i < vertexFloats; i += 3) {
-            float x = verts[i] * s;
-            float y = verts[i + 1] * s;
+            float x = verts[i];
+            float y = verts[i + 1];
             float z = verts[i + 2];
-            verts[i] = r00 * x + r10 * y + r20 * z;
-            verts[i + 1] = r01 * x + r11 * y + r21 * z;
-            verts[i + 2] = r02 * x + r12 * y + r22 * z;
+            // World -> view in the capture frame (rows of V_c; a[0..2] is its first math row).
+            float vx = captureView == null ? x : captureView[0] * x + captureView[3] * y + captureView[6] * z;
+            float vy = captureView == null ? y : captureView[1] * x + captureView[4] * y + captureView[7] * z;
+            float vz = captureView == null ? z : captureView[2] * x + captureView[5] * y + captureView[8] * z;
+            vx *= k;
+            vy *= k;
+            // View -> world for the current frame (V_curᵀ; math row r contributes to every column).
+            verts[i] = currentView[0] * vx + currentView[1] * vy + currentView[2] * vz;
+            verts[i + 1] = currentView[3] * vx + currentView[4] * vy + currentView[5] * vz;
+            verts[i + 2] = currentView[6] * vx + currentView[7] * vy + currentView[8] * vz;
         }
 
-        // Normals follow the same change of basis; the anisotropic lateral scale maps through the
-        // inverse-transpose, i.e. (nx / s, ny / s, nz), renormalised.
-        float[] prim = this.capture.prim.elements();
-        int primFloats = this.capture.prim.size();
         for (int base = 0; base < primFloats; base += 12) {
-            float nx = prim[base] / s;
-            float ny = prim[base + 1] / s;
+            float nx = prim[base];
+            float ny = prim[base + 1];
             float nz = prim[base + 2];
-            float wx = r00 * nx + r10 * ny + r20 * nz;
-            float wy = r01 * nx + r11 * ny + r21 * nz;
-            float wz = r02 * nx + r12 * ny + r22 * nz;
+            float vx = captureView == null ? nx : captureView[0] * nx + captureView[3] * ny + captureView[6] * nz;
+            float vy = captureView == null ? ny : captureView[1] * nx + captureView[4] * ny + captureView[7] * nz;
+            float vz = captureView == null ? nz : captureView[2] * nx + captureView[5] * ny + captureView[8] * nz;
+            vx /= k;
+            vy /= k;
+            float wx = currentView[0] * vx + currentView[1] * vy + currentView[2] * vz;
+            float wy = currentView[3] * vx + currentView[4] * vy + currentView[5] * vz;
+            float wz = currentView[6] * vx + currentView[7] * vy + currentView[8] * vz;
             float len = (float) Math.sqrt(wx * wx + wy * wy + wz * wz);
-            if (len > 1.0e-8f) {
+            if (len > 1.0e-8f && Float.isFinite(len)) {
                 wx /= len;
                 wy /= len;
                 wz /= len;
+            } else {
+                wx = 0.0f;
+                wy = 0.0f;
+                wz = 0.0f;
             }
             prim[base] = wx;
             prim[base + 1] = wy;
@@ -259,6 +314,7 @@ public final class RtViewmodelCapture {
         this.capturedOnce = false;
         this.emptyStreak = 0;
         this.reportedEmpty = false;
+        this.captureBasisKnown = false;
         this.capture.reset();
         this.collector.delegate(null);
         this.collector.viewmodelMode(false);

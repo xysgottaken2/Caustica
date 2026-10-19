@@ -199,9 +199,12 @@ public abstract class GameRendererMixin {
 	// Seal at RETURN rather than right after the submit call: if this Minecraft version defers the
 	// hand's item quads to a feature-dispatcher flush later inside renderItemInHand, that flush still
 	// submits into the collector installed above and the capture must stay open until it is done.
+	// The camera rotation goes with it: renderItemInHand bakes it into the submitted vertices, and the
+	// frame that consumes the capture must undo it before placing the arm in its own view.
 	@Inject(method = "renderItemInHand", require = 0, at = @At("RETURN"))
-	private void caustica$finishViewmodelCapture(CallbackInfo ci) {
-		RtViewmodelCapture.INSTANCE.end();
+	private void caustica$finishViewmodelCapture(CameraRenderState cameraState, PlayerRenderState playerState,
+			GpuTextureView depthTextureView, CallbackInfo ci) {
+		RtViewmodelCapture.INSTANCE.end(cameraState.viewRotationMatrix);
 	}
 
 	// ---- Hand FOV (viewmodel FOV) ----------------------------------------------------------------

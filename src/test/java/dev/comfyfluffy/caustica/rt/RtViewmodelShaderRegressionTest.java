@@ -16,7 +16,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * (Java writer + Slang reader), a payload bit, the held-item-light suppression, and the TLAS instance
  * mask.
  * None of these are checked by the compiler, and dropping any one of them fails quietly — a shadow
- * appears, the arm pokes through a wall, or the hand never renders at all. These tests pin the wiring.
+ * appears, the arm pokes through a wall, or the hand never renders at all. These tests pin the wiring;
+ * the camera-space transform itself is covered by {@code RtViewmodelTransformTest}.
  */
 final class RtViewmodelShaderRegressionTest {
     private static final Path REPO_ROOT = repoRoot();
@@ -120,7 +121,8 @@ final class RtViewmodelShaderRegressionTest {
                 "the capture hook must target the ABI-confirmed submission descriptor");
         assertTrue(mixin.contains("@ModifyArg(method = \"renderItemInHand\""));
         assertTrue(mixin.contains("RtViewmodelCapture.INSTANCE.begin(collector)"));
-        assertTrue(mixin.contains("RtViewmodelCapture.INSTANCE.end()"));
+        assertTrue(mixin.contains("RtViewmodelCapture.INSTANCE.end(cameraState.viewRotationMatrix)"),
+                "the seal must carry the capture frame's camera rotation into the capture");
         assertTrue(abi.contains("submitHandsWithItems\t(F"), "the ABI contract must list the captured method");
         assertTrue(capture.contains("this.collector.delegate(this.capturedOnce ? null : vanilla);"),
                 "until a capture succeeds the vanilla hand must keep drawing (no disappearing viewmodel)");

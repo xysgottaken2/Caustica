@@ -690,10 +690,14 @@ public final class RtEntities {
      * Upload the first-person viewmodel captured during the previous frame's {@code render3dHud}
      * ({@link RtViewmodelCapture}) as its own transient BLAS + TLAS instance.
      *
-     * <p>The mesh is posed into this frame's camera axes and lives in camera-relative world space; the
-     * instance transform is therefore a pure translation to the camera position, which keeps the hit
-     * shader's normal handling exact (identity rotation) while the per-vertex motion delta — measured in
-     * that same camera-relative space — stays valid as the camera turns. The instance mask makes it
+     * <p>The capture arrives in camera-relative world space carrying the orientation of the frame that
+     * submitted it (vanilla seeds the hand PoseStack with the inverse view rotation). {@link
+     * RtViewmodelCapture#takePosed} rotates it by the relative camera rotation into this frame and applies
+     * the Hand-FOV lateral scale along the camera's own view axes, so the arm always sits in front of the
+     * current eye. The instance transform is then a pure translation to the camera position, which keeps
+     * the hit shader's normal handling exact (identity rotation) while the per-vertex motion delta —
+     * measured in that same camera-relative space — stays valid as the camera turns. The instance mask
+     * makes it
      * primary-camera-only, and {@link #ENTITY_FLAG_VIEWMODEL} tags the geometry-table entry so
      * {@code world.rchit} can mark viewmodel hits, which raygen uses to skip the held-item light on the
      * hand itself. Being an ordinary TLAS instance also means a nearer block wins the nearest hit, so the
@@ -733,9 +737,12 @@ public final class RtEntities {
      * Lateral (x/y) scale that makes the captured viewmodel appear at the hand FOV while the world is
      * traced with the world's own projection.
      *
-     * <p>Scaling the mesh about the camera origin does not change its on-screen size, so the exact fix is
-     * the axis-aligned factor {@code tan(worldFovY/2) / tan(handFovY/2)}: the projection of the laterally
-     * scaled mesh equals the projection of the original through the hand's projection. The hand FOV is
+     * <p>A uniform scale about the camera origin would not change the on-screen size (the depth would
+     * scale with it), so the fix is the axis-aligned factor {@code tan(worldFovY/2) / tan(handFovY/2)}
+     * applied to the lateral view-space coordinates only: the projection of the laterally scaled mesh
+     * equals the projection of the original through the hand's projection. {@link
+     * RtViewmodelCapture#takePosed} applies that scale along the camera's own axes, not world x/y. The
+     * hand FOV is
      * the one {@code GameRendererMixin.caustica$applyHandFov} actually fed to the hand projection of the
      * frame this mesh was captured in — vanilla's fixed 70 degrees (plus the death/fluid modulation) when
      * {@code Rt.Hand.FOV_FOLLOWS_CAMERA} is off, and the FOV slider when it is on. That keeps the

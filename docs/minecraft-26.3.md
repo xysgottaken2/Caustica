@@ -154,9 +154,16 @@ vanilla é reimplementado: `HandRenderSelection`, main/offhand, modelos especiai
 `ItemQuads`, tint layers e `renderToBuffer` continuam vindo da submissão
 original; só o destino dos vértices muda.
 
-**Consumo.** `RtEntities.beginFrame` re-expressa a captura (espaço de visão) em
-eixos mundiais relativos à câmera, aplica o fator lateral de FOV e sobe um BLAS
-transitório com instância própria (`ENTITY_BIT`, máscara `0x02`) e
+**Consumo.** `GameRenderer.renderItemInHand` semeia o `PoseStack` da mão com
+`viewRotationMatrix.invert()` (visão→mundo) e o pass da mão liga
+`viewRotationMatrix` como model-view; a submissão chega, portanto, em **espaço
+mundial relativo à câmera do quadro da captura** (eixos do mundo, câmera na
+origem, mas ainda com a orientação daquela câmera). No quadro seguinte,
+`RtViewmodelCapture.takePosed` desfaz essa rotação (`V_captura`), aplica o fator
+lateral de FOV nas coordenadas de visão e reaplica a rotação da câmera atual
+(`V_atual⁻¹`), de modo que o braço acompanhe a câmera em vez de ficar preso aos
+eixos do mundo. `RtEntities.beginFrame` sobe então um BLAS transitório com
+instância própria (`ENTITY_BIT`, máscara `0x02`) e
 `EntityGeom.flags = ENTITY_GEOM_VIEWMODEL`. A instância entra no mesmo TLAS do
 terreno e das entidades, então o nearest-hit **já é** o teste de profundidade:
 um bloco mais próximo que o braço vence o pixel e o braço aparece clipado, sem
@@ -177,9 +184,9 @@ analítica do item na própria mão.
   `MATERIAL_OPAQUE`), normais/AO LabPBR, emissão e glint, então itens PBR e itens
   luminosos funcionam sem um segundo conjunto de materiais.
 - *FOV*: a captura é reescalada lateralmente por
-  `tan(worldFovY/2) / tan(handFovY/2)`. Escalar o mesh em torno da câmera não muda
-  o tamanho na tela (a profundidade acompanha), então o fator lateral reproduz
-  exatamente a projeção do hand FOV. O valor usado é o que
+  `tan(worldFovY/2) / tan(handFovY/2)`, aplicado nas coordenadas laterais do
+  espaço de visão da câmera (não em x/y do mundo): a projeção do mesh reescalado
+  reproduz exatamente a projeção do hand FOV. O valor usado é o que
   `caustica$applyHandFov` realmente passou para a projeção da mão no quadro da
   captura (`RtViewmodelCapture.setHandFov`), então a modulação de morte/água/lava
   também coincide. Com `hand.fov-follows-camera` desligado esse valor é o
@@ -187,9 +194,10 @@ analítica do item na própria mão.
   ligado, ele segue o slider.
 - *Movimento*: a captura é consumida no quadro seguinte, porque a submissão da mão
   acontece em `render3dHud`, depois do composite RT (que roda no seam antes da
-  mão). Como ela é re-expressa nos eixos da câmera atual, rotação/translação não
-  atrasam; só a animação própria (bob/swing/troca de item) fica um quadro atrás,
-  com motion vectors medidos nesse mesmo espaço relativo.
+  mão). A rotação relativa entre os dois quadros é desfeita na captura, então
+  girar a câmera não descola nem atrasa o braço; só a animação própria
+  (bob/swing/troca de item) fica um quadro atrás, com motion vectors medidos
+  nesse mesmo espaço relativo à câmera.
 
 **Limitação conhecida.** Como só o raio primário vê o braço, uma superfície
 dielétrica entre a câmera e a mão (vidro encostado no rosto) faz o braço
