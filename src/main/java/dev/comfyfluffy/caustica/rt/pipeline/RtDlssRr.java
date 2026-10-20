@@ -86,8 +86,12 @@ public final class RtDlssRr {
     /**
      * Record a DLSS-RR evaluation: denoise + upscale the noisy path-traced color (at render res) using
      * the guide buffers, writing the display-res result into {@code out}. {@code jitterX/jitterY} is the
-     * sub-pixel camera jitter applied to the primary ray this frame, in render pixels. Returns false
-     * (disabling RR) on failure. MVs are already in render-pixel space (scale 1).
+     * sub-pixel camera jitter applied to the primary ray this frame, in render pixels, passed AS APPLIED
+     * (un-negated): NGX defines the offset in the motion vectors' coordinate system (image space, +Y
+     * down), which is the space the offset was applied in. Negating it makes DLSS compensate the jitter
+     * in the wrong direction (2x-jitter mis-registration of the temporal history every frame —
+     * moving-camera flicker). Returns false (disabling RR) on failure. MVs are already in render-pixel
+     * space (scale 1).
      */
     public boolean evaluate(long cmd, RtImage color, RtImage depth, RtImage motion,
                             RtImage diffuseAlbedo, RtImage specularAlbedo, RtImage normals,

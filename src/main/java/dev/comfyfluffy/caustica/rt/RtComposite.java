@@ -1944,9 +1944,24 @@ public final class RtComposite {
             if (rrPath && RtDlssRr.INSTANCE.ensureFeature(cmd.address(), renderW, renderH, displayW, displayH)) {
                 try (RtDebugLabels.Scope ignored = RtDebugLabels.scope(ctx, cmd, "DLSS-RR evaluate");
                      RtFrameStats.Scope ignoredStats = RtFrameStats.FRAME.stage("frame.dlssRr")) {
+                    // The jitter goes to NGX AS APPLIED to the primary ray -- same values the
+                    // WorldPush carries -- NOT negated. DLSS wants the offset in render-pixel
+                    // space in the motion vectors' coordinate system (origin upper-left, +Y
+                    // down; Programming Guide 3.6.1/3.7.3, and the NGX header's "Jitter offset
+                    // must be in input/render pixel space"), which is exactly the image-space
+                    // offset world_primary.rgen adds to the pixel centre. This call used to
+                    // negate both components, so DLSS compensated the jitter in the wrong
+                    // direction: every frame's history sample was mis-registered by 2x the
+                    // jitter (up to ~1 px per axis, rotating through the Halton sequence),
+                    // which reads as light/shadow flicker and edge crawl whenever the camera
+                    // moves -- the DLSS-path half of the moving-flicker report, invisible to
+                    // the SVGF fix because SVGF never receives a jitter value to get wrong.
+                    // (Same reasoning the XeSS dispatch documents: an API taking pixel-space
+                    // jitter wants the applied offset as-is; the FFX paths keep their negation
+                    // because the FFX API defines its jitter in projection space instead.)
                     rrDone = RtDlssRr.INSTANCE.evaluate(cmd.address(), output, gDepth, gMotion, gAlbedo,
                             gSpecAlbedo, gNormal, gSpecMotion, rrOutput, renderW, renderH, displayW, displayH,
-                            -jitterX, -jitterY, frameViewRotation, frameProjection);
+                            jitterX, jitterY, frameViewRotation, frameProjection);
                 }
             }
 

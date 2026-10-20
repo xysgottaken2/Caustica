@@ -370,6 +370,31 @@ final class RtDenoiserShaderRegressionTest {
      * camera never moved, smearing generated frames in exactly the moving-camera case. Pin the
      * snapshot that {@code updateMotion()} takes before advancing, and its use at present time.
      */
+    /**
+     * DLSS-RR must be told the jitter offset AS APPLIED to the primary ray. NGX defines the
+     * offset in render-pixel space in the motion vectors' coordinate system (image space,
+     * +Y down — DLSS Programming Guide 3.6.1/3.7.3), and that is the space
+     * {@code world_primary.rgen.slang} applies it in ({@code (pix + 0.5 + jitter) / size} in
+     * the same y-down NDC the motion vectors are computed in). The evaluate call used to
+     * negate both components, so DLSS compensated the offset in the wrong direction: every
+     * frame's temporal history was mis-registered by 2x the jitter (up to ~1 px per axis,
+     * cycling through the Halton sequence), which reads as light/shadow flicker and edge
+     * crawl while the camera moves. It survived review because the FFX paths genuinely do
+     * negate (the FFX API defines its jitter in projection space) — NGX is not FFX, and the
+     * XeSS dispatch in this repo documents the pixel-space rule explicitly. Pin the as-applied
+     * pass-through; the FSR call's negation is a different API's convention and stays.
+     */
+    @Test
+    void dlssRayReconstructionReceivesTheAppliedJitter() throws IOException {
+        String composite = Files.readString(
+                REPO_ROOT.resolve("src/main/java/dev/comfyfluffy/caustica/rt/RtComposite.java"));
+
+        assertTrue(composite.contains("jitterX, jitterY, frameViewRotation, frameProjection);"),
+                "DLSS-RR must receive the jitter offset exactly as applied to the primary ray");
+        assertFalse(composite.contains("-jitterX, -jitterY, frameViewRotation"),
+                "negating the jitter makes DLSS compensate it the wrong way (2x-jitter flicker)");
+    }
+
     @Test
     void dlssFrameGenerationUsesTheTruePreviousViewProjection() throws IOException {
         String composite = Files.readString(
