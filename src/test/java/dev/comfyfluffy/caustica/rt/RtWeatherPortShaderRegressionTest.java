@@ -41,7 +41,7 @@ final class RtWeatherPortShaderRegressionTest {
     @Test
     void underwaterHazeIsSourceLitWithStableBlueChromaticity() throws IOException {
         String medium = read("shaders/world/medium.slang");
-        String world = read("src/main/java/dev/comfyfluffy/caustica/rt/RtComposite.java");
+        String world = read("shaders/world/world.rgen.slang");
         assertTrue(medium.contains("public float3 waterHazeScattering(float3 rayDir, float segmentDistance)"));
         assertTrue(medium.contains("float3 lightRadiance = max(worldPush.lightRadiance.xyz"),
                 "haze brightness must come from the frame's real celestial light");
