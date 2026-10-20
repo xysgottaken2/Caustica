@@ -101,12 +101,22 @@ public float3 tracePath(PathSegment seg, uint2 pix, uint sampleIndex,
                 throughput *= preFog.transmittance;
             }
             // The cloud crossing belongs to the camera->surface prefix, so it is recovered here in
-            // full rather than applied per split branch.
-            CloudVolume pre = cloudSegment(worldPush, float3(0.0, 0.0, 0.0), toStart / prefixDist,
-                                           prefixDist, cloudSkyAmbient(worldPush), seg.showCelestial);
-            L += throughput * pre.scatter;
-            Lspec += throughput * pre.scatter;
-            throughput *= pre.transmittance;
+            // full rather than applied per split branch. A submerged camera's prefix lies in
+            // water, not air: integrating the deck through it produced a hard horizon seam, so
+            // underwater the prefix recovers the water haze in-scatter instead (the resumed air
+            // segment still evaluates clouds normally after the interface). Applied to BOTH split
+            // branches like the cloud crossing — their throughputs sum back to one crossing.
+            if (cameraSubmerged()) {
+                float3 prefixWaterScatter = waterHazeScattering(toStart / prefixDist, prefixDist);
+                L += throughput * prefixWaterScatter;
+                Lspec += throughput * prefixWaterScatter;
+            } else {
+                CloudVolume pre = cloudSegment(worldPush, float3(0.0, 0.0, 0.0), toStart / prefixDist,
+                                               prefixDist, cloudSkyAmbient(worldPush), seg.showCelestial);
+                L += throughput * pre.scatter;
+                Lspec += throughput * pre.scatter;
+                throughput *= pre.transmittance;
+            }
         }
     }
     float rayConeWidth = seg.rayConeWidth;
@@ -187,6 +197,23 @@ public float3 tracePath(PathSegment seg, uint2 pix, uint sampleIndex,
             // world.rmiss writes sky radiance (gradient + sun/moon disc + stars) into payload.albedo. The
             // packed show-celestial flag decides whether this path segment may see the bright disc.
             float3 sky = payload.albedo;
+            // A miss while still inside water never crossed the water interface — there is no
+            // valid scene surface behind the ray (most visibly at the end of loaded chunks).
+            // Replace the air sky with the source-lit water column integrated to the configured
+            // fallback length, converging to a dark blue far-water environment, so unattenuated
+            // sky never leaks through missing water geometry (PR #21 port).
+            float skyWaterDistance = clamp(worldPush.underwaterEffects.w, 0.0, 128.0);
+            if (medium.current.water && cameraSubmerged() && skyWaterDistance > 0.0) {
+                float3 waterColumnScatter = waterHazeScattering(float3(0.0, 1.0, 0.0),
+                        skyWaterDistance);
+                float hazeStrength = clamp(worldPush.underwaterEffects.x, 0.0, 2.0);
+                float fallbackOpticalDepth = skyWaterDistance * 0.075 * hazeStrength;
+                float fallbackOpacity = 1.0 - exp(-max(fallbackOpticalDepth, 0.0));
+                float blueBias = saturate(worldPush.underwaterEffects.y);
+                float3 farWaterBlue = lerp(float3(0.010, 0.035, 0.095),
+                                           float3(0.008, 0.045, 0.145), blueBias);
+                sky = waterColumnScatter + farWaterBlue * fallbackOpacity;
+            }
             // Fog between here and the sky: a ray that misses runs through the whole air column,
             // so the sky it carries — sun and moon discs included, which is half of what makes
             // god rays read — arrives dimmed by the column's transmittance and lifted by its
@@ -219,6 +246,18 @@ public float3 tracePath(PathSegment seg, uint2 pix, uint sampleIndex,
         // lies within it), shifting the transmitted radiance with distance. Air's extinction is zero, so
         // the ordinary case costs one comparison.
         if (any(medium.current.extinction > 0.0)) {
+            // Source-lit water in-scatter along this segment (PR #21 port): only light the
+            // current celestial source can actually provide, blue-biased and proportional to
+            // lightRadiance, so it fades into darkness at night instead of glowing.
+            if (medium.current.water && cameraSubmerged()) {
+                float3 waterFogContribution = waterHazeScattering(rd, payload.hitT);
+                L += throughput * waterFogContribution;
+                if (channel == 2) {
+                    Lspec += throughput * waterFogContribution;
+                } else {
+                    Ldiff += throughput * waterFogContribution;
+                }
+            }
             throughput *= exp(-medium.current.extinction * payload.hitT);
         }
 
@@ -713,6 +752,21 @@ public float3 tracePath(PathSegment seg, uint2 pix, uint sampleIndex,
                 Lspec += handNee;
             } else {
                 Ldiff += handNee;
+            }
+        }
+
+        // Procedural lightning flash as a local point light (PR #21 port): zero outside the
+        // brief flash window, so this costs one visibility query only during a strike.
+        if (worldPush.lightning.w > 0.0) {
+            float3 lightningIrr = lightningIrradiance(p, hitPos, n, isDynamicEntityEarly);
+            if (max(lightningIrr.x, max(lightningIrr.y, lightningIrr.z)) > 0.0) {
+                float3 lightningNee = throughput * diffAlb * INV_PI * lightningIrr;
+                L += lightningNee;
+                if (channel == 2) {
+                    Lspec += lightningNee;
+                } else {
+                    Ldiff += lightningNee;
+                }
             }
         }
 

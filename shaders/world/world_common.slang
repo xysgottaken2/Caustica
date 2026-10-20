@@ -187,6 +187,19 @@ public struct WorldPush {
     // emitter scatter terms can never tint differently. Trailing lane after fogParams — the
     // generated WorldPushData appends it; RtFogShaderRegressionTest pins the pairing.
     public float4   fogTint;
+    // Rain-driven material state (PR #21 port). x = global surface-wetness envelope 0..1: the CPU
+    // soaks it over wetness-wet-seconds and dries it over wetness-dry-seconds. y/z/w reserved.
+    public float4   surfaceWetness;
+    // Live rain/water controls, trailing so all previous field offsets are preserved.
+    // rainEffects: x water-ripple scale, y water-ripple strength (0 disables), z/w reserved.
+    public float4   rainEffects;
+    // underwaterEffects: x underwater haze strength (0 = off), y blue colour bias 0..1,
+    // z reserved, w fallback water-column length for underwater sky misses. The haze density is
+    // spatially uniform (see waterHazeScattering in medium.slang).
+    public float4   underwaterEffects;
+    // Lightning state, trailing: xyz strike position in terrain-rebased world blocks,
+    // w momentary flash intensity (0 when inactive).
+    public float4   lightning;
 };
 
 // worldPush.dimension: the sky/lighting model this frame renders with. The Overworld runs the full

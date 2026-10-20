@@ -145,6 +145,9 @@ public final class RtVideoOptions {
             particles(),
             weatherParticles(),
             rainDensity(),
+            lightning(),
+            lightningStrikes(),
+            lightningSound(),
             entityGlow(),
             nameTags(),
             blockOutline(),
@@ -159,6 +162,12 @@ public final class RtVideoOptions {
             waterWaveStrength(),
             waterWaveSpeed(),
             waterWaveDetail(),
+            waterRainRipples(),
+            waterRippleScale(),
+            waterRippleStrength(),
+            underwaterHaze(),
+            underwaterHazeStrength(),
+            underwaterBlueTint(),
         };
     }
 
@@ -805,6 +814,62 @@ public final class RtVideoOptions {
 
     private static OptionInstance<Integer> rainDensity() {
         return percent("caustica.options.rt.rainDensity", CausticaConfig.Rt.Entities.RAIN_DENSITY);
+    }
+
+    /** Procedural lightning master switch (scheduler, sky bolt, point light and thunder). */
+    private static OptionInstance<Boolean> lightning() {
+        return bool("caustica.options.rt.lightning", CausticaConfig.Rt.Composite.LIGHTNING_ENABLED);
+    }
+
+    /** Expected strikes per minute while it rains; arrivals are randomised, not metronomic. */
+    private static OptionInstance<Integer> lightningStrikes() {
+        FloatSetting setting = CausticaConfig.Rt.Composite.LIGHTNING_STRIKES_PER_MINUTE;
+        return new OptionInstance<>(
+            "caustica.options.rt.lightningStrikes",
+            OptionInstance.cachedConstantTooltip(Component.translatable("caustica.options.rt.lightningStrikes.tooltip")),
+            (caption, value) -> Options.genericValueLabel(caption,
+                    Component.translatable("caustica.options.rt.lightningStrikes.count", value)),
+            new OptionInstance.IntRange(1, 60),
+            Math.clamp(Math.round(setting.value()), 1, 60),
+            value -> setting.set((float) value));
+    }
+
+    /** Distance-delayed vanilla thunder for each procedural strike. */
+    private static OptionInstance<Boolean> lightningSound() {
+        return bool("caustica.options.rt.lightningSound", CausticaConfig.Rt.Composite.LIGHTNING_SOUND_ENABLED);
+    }
+
+    /** Rain-impact micro-ripples on water surfaces. */
+    private static OptionInstance<Boolean> waterRainRipples() {
+        return bool("caustica.options.rt.waterRainRipples", CausticaConfig.Rt.Composite.WATER_RAIN_RIPPLES);
+    }
+
+    /** Ring radius/spacing multiplier for rain ripples (config clamps the stored value to 0.25x-2.0x). */
+    private static OptionInstance<Integer> waterRippleScale() {
+        return multiplier("caustica.options.rt.waterRippleScale",
+                CausticaConfig.Rt.Composite.WATER_RIPPLE_SCALE, 3, 20);
+    }
+
+    /** Ring amplitude multiplier for rain ripples; 0.0x is a second off switch. */
+    private static OptionInstance<Integer> waterRippleStrength() {
+        return multiplier("caustica.options.rt.waterRippleStrength",
+                CausticaConfig.Rt.Composite.WATER_RIPPLE_STRENGTH, 0, 20);
+    }
+
+    /** Source-lit underwater haze while the camera is submerged. */
+    private static OptionInstance<Boolean> underwaterHaze() {
+        return bool("caustica.options.rt.underwaterHaze", CausticaConfig.Rt.Composite.UNDERWATER_HAZE_ENABLED);
+    }
+
+    /** Haze strength 0%-200%: how fast underwater visibility closes in. */
+    private static OptionInstance<Integer> underwaterHazeStrength() {
+        return percentRange("caustica.options.rt.underwaterHazeStrength",
+                CausticaConfig.Rt.Composite.UNDERWATER_HAZE_STRENGTH, 0, 200);
+    }
+
+    /** How blue the underwater haze chromaticity is. */
+    private static OptionInstance<Integer> underwaterBlueTint() {
+        return percent("caustica.options.rt.underwaterBlueTint", CausticaConfig.Rt.Composite.UNDERWATER_BLUE_TINT);
     }
 
     private static OptionInstance<Boolean> waterWaves() {

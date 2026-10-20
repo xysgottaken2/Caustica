@@ -59,6 +59,13 @@ public final class CausticaConfig {
             Rt.ENABLED, Rt.Composite.SPP, Rt.Composite.MAX_BOUNCES, Rt.Composite.SSS,
             Rt.Composite.WEATHER_LIGHTING, Rt.Composite.DENOISER, Rt.Composite.METALLIC_SHININESS,
             Rt.Composite.WATER_WAVE_STRENGTH, Rt.Composite.WATER_WAVE_SPEED, Rt.Composite.WATER_WAVE_DETAIL,
+            Rt.Composite.WATER_RAIN_RIPPLES, Rt.Composite.WATER_RIPPLE_SCALE, Rt.Composite.WATER_RIPPLE_STRENGTH,
+            Rt.Composite.WETNESS_ENABLED, Rt.Composite.WETNESS_WET_SECONDS, Rt.Composite.WETNESS_DRY_SECONDS,
+            Rt.Composite.UNDERWATER_HAZE_ENABLED, Rt.Composite.UNDERWATER_HAZE_STRENGTH,
+            Rt.Composite.UNDERWATER_BLUE_TINT, Rt.Composite.UNDERWATER_SKY_ENABLED,
+            Rt.Composite.UNDERWATER_SKY_DISTANCE, Rt.Composite.LIGHTNING_ENABLED,
+            Rt.Composite.LIGHTNING_STRIKES_PER_MINUTE, Rt.Composite.LIGHTNING_INTENSITY,
+            Rt.Composite.LIGHTNING_SOUND_ENABLED, Rt.Composite.LIGHTNING_SOUND_VOLUME,
             Rt.Composite.PARALLAX_QUALITY,
             Rt.Terrain.ASYNC_DISPATCH_PER_PASS, Rt.Omm.ENABLED,
             Rt.Entities.ENABLED, Rt.Entities.GLOW_ENABLED, Rt.EntityTextures.MAX_TEXTURES,
@@ -691,6 +698,62 @@ public final class CausticaConfig {
              */
             public static final IntSetting WATER_WAVE_DETAIL =
                     clampedInt("caustica.rt.waterWaveDetail", "composite.water-wave-detail", 7, 1, 7);
+            /**
+             * Rain-impact micro-ripples on open water (ported from PR #21, adapted to the 26.3
+             * push layout). Normal-only detail on top of the geometric wave field: it never enters
+             * the Newton height solve, so intersections stay stable while raindrop rings show up
+             * in reflections. Scale enlarges the rings, strength scales their amplitude.
+             */
+            public static final BooleanSetting WATER_RAIN_RIPPLES =
+                    bool("caustica.rt.waterRainRipples", "composite.water-rain-ripples", true);
+            public static final FloatSetting WATER_RIPPLE_SCALE =
+                    clampedFloat("caustica.rt.waterRippleScale", "composite.water-ripple-scale", 0.65f, 0.25f, 2.0f);
+            public static final FloatSetting WATER_RIPPLE_STRENGTH =
+                    clampedFloat("caustica.rt.waterRippleStrength", "composite.water-ripple-strength", 1.0f, 0.0f, 2.0f);
+            /**
+             * Global surface-wetness envelope: how fast surfaces soak once rain starts and how
+             * long they take to dry afterwards. The value eases rain-driven effects (currently the
+             * water ripple amplitude) in and out instead of popping with the rain level.
+             */
+            public static final BooleanSetting WETNESS_ENABLED =
+                    bool("caustica.rt.wetness", "composite.wetness", true);
+            public static final FloatSetting WETNESS_WET_SECONDS =
+                    clampedFloat("caustica.rt.wetnessWetSeconds", "composite.wetness-wet-seconds", 5.0f, 1.0f, 30.0f);
+            public static final FloatSetting WETNESS_DRY_SECONDS =
+                    clampedFloat("caustica.rt.wetnessDrySeconds", "composite.wetness-dry-seconds", 30.0f, 5.0f, 120.0f);
+            /**
+             * Underwater haze (ported from PR #21): source-lit, blue-biased in-scattering on top
+             * of Beer-Lambert extinction while the camera is submerged. Strength scales the haze
+             * extinction, the blue tint biases its chromaticity, and the sky distance is the
+             * fallback water-column length integrated for underwater TLAS misses (chunk edges),
+             * so open water never leaks the unattenuated air sky.
+             */
+            public static final BooleanSetting UNDERWATER_HAZE_ENABLED =
+                    bool("caustica.rt.underwaterHaze", "composite.underwater-haze", true);
+            public static final FloatSetting UNDERWATER_HAZE_STRENGTH =
+                    clampedFloat("caustica.rt.underwaterHazeStrength", "composite.underwater-haze-strength", 0.1f, 0.0f, 2.0f);
+            public static final FloatSetting UNDERWATER_BLUE_TINT =
+                    clampedFloat("caustica.rt.underwaterBlueTint", "composite.underwater-blue-tint", 0.5f, 0.0f, 1.0f);
+            public static final BooleanSetting UNDERWATER_SKY_ENABLED =
+                    bool("caustica.rt.underwaterSky", "composite.underwater-sky", true);
+            public static final FloatSetting UNDERWATER_SKY_DISTANCE =
+                    clampedFloat("caustica.rt.underwaterSkyDistance", "composite.underwater-sky-distance", 128.0f, 8.0f, 128.0f);
+            /**
+             * Procedural lightning during rain (ported from PR #21): a render-thread scheduler
+             * publishes a short-lived strike position + pulse envelope to the shaders (sky bolt,
+             * flash and a local point light) and plays distance-delayed vanilla thunder. It never
+             * spawns a server entity or mutates the world.
+             */
+            public static final BooleanSetting LIGHTNING_ENABLED =
+                    bool("caustica.rt.lightning", "composite.lightning", true);
+            public static final FloatSetting LIGHTNING_STRIKES_PER_MINUTE =
+                    clampedFloat("caustica.rt.lightningStrikesPerMinute", "composite.lightning-strikes-per-minute", 2.0f, 1.0f, 60.0f);
+            public static final FloatSetting LIGHTNING_INTENSITY =
+                    clampedFloat("caustica.rt.lightningIntensity", "composite.lightning-intensity", 1.5f, 0.0f, 5.0f);
+            public static final BooleanSetting LIGHTNING_SOUND_ENABLED =
+                    bool("caustica.rt.lightningSound", "composite.lightning-sound", true);
+            public static final FloatSetting LIGHTNING_SOUND_VOLUME =
+                    clampedFloat("caustica.rt.lightningSoundVolume", "composite.lightning-sound-volume", 1.0f, 0.0f, 2.0f);
             /**
              * Extra polish applied only to surfaces authored as metallic. 0 preserves the resource
              * pack's LabPBR roughness; 1 reduces metallic roughness to 15% of its authored value.

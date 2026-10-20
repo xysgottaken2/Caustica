@@ -113,6 +113,11 @@ public final class RtComposite {
 
     // WorldPushData and its serializer are generated from Slang's reflected Std430DataLayout. Java never
     // owns or calculates a shader byte offset, struct size, array stride, or fixed-array capacity.
+    // Procedural lightning scheduler + surface-wetness envelope (PR #21 port). Both are
+    // render-thread only, matching every other per-frame state holder in this class.
+    private static final RtLightning LIGHTNING = new RtLightning();
+    private static final RtSurfaceWetness SURFACE_WETNESS = new RtSurfaceWetness();
+
     private static final int WORLD_PUSH_SIZE = WorldPushData.BYTE_SIZE;
     // Per-frame DH/Voxy hand-off readiness mask, appended in the same BDA ring slot behind WorldPush.
     private static final int READY_MASK_OFFSET = (WORLD_PUSH_SIZE + 15) & ~15;
@@ -162,6 +167,21 @@ public final class RtComposite {
      * it reaches the base plane, so the budget scales with the configured depth; the shader clamps it
      * to PARALLAX_MIN/MAX_CROSSINGS either way.
      */
+    /**
+     * This frame's global wetness 0..1. Disabling the option resets the envelope so a stale
+     * soaked value cannot reappear when it is toggled back on.
+     */
+    private static float surfaceWetnessForFrame(boolean raining) {
+        long now = System.nanoTime();
+        if (!CausticaConfig.Rt.Composite.WETNESS_ENABLED.value()) {
+            SURFACE_WETNESS.reset(now);
+            return 0.0f;
+        }
+        return SURFACE_WETNESS.update(raining, now,
+                CausticaConfig.Rt.Composite.WETNESS_WET_SECONDS.value(),
+                CausticaConfig.Rt.Composite.WETNESS_DRY_SECONDS.value());
+    }
+
     private static Float4 parallaxParams() {
         boolean enabled = CausticaConfig.Rt.Composite.PARALLAX_ENABLED.value();
         float strength = CausticaConfig.Rt.Composite.PARALLAX_STRENGTH.value();
@@ -1720,6 +1740,15 @@ public final class RtComposite {
             SkyPush sky = skyPush(dimension, weather);
             // Two lanes, resolved together from the same weather + camera state the sky above used.
             CloudPush clouds = cloudState(dimension, weather, camY);
+            // Procedural lightning (PR #21 port): publishes the strike position + pulse envelope
+            // for the trailing WorldPush.lightning lane; plays its own positional thunder.
+            RtLightning.State lightning = LIGHTNING.update(level, camX, camY, camZ, weather.rain(),
+                    CausticaConfig.Rt.Composite.LIGHTNING_ENABLED.value(),
+                    CausticaConfig.Rt.Composite.LIGHTNING_STRIKES_PER_MINUTE.value(),
+                    CausticaConfig.Rt.Composite.LIGHTNING_INTENSITY.value(),
+                    CausticaConfig.Rt.Composite.LIGHTNING_SOUND_ENABLED.value(),
+                    CausticaConfig.Rt.Composite.LIGHTNING_SOUND_VOLUME.value(), System.nanoTime());
+            float surfaceWetness = surfaceWetnessForFrame(weather.rain() > 0.001f);
             // Analytic held-item light: position + intensity lane and the item's RGB tint; w == 0
             // disables the shader term (toggle off, no luminous item, or no player).
             HandLightState hand = handLightState(terrain);
@@ -1805,7 +1834,33 @@ public final class RtComposite {
                     fogParams(),
                     // Biome/weather tint for the fog's scatter (WorldPush.fogTint): the game's
                     // own FOG_COLOR attribute, blended by the slider — see fogTint() above.
-                    fogTint()
+                    fogTint(),
+                    // Trailing weather lanes (PR #21 port, appended after fogTint so every
+                    // established WorldPush offset is preserved — see world_common.slang).
+                    // surfaceWetness: x global wetness envelope 0..1 (y/z/w reserved for the
+                    // wet-film work that needs rain-exposure prim flags).
+                    new Float4(surfaceWetness, 0.0f, 0.0f, 0.0f),
+                    // rainEffects: x water-ripple scale, y water-ripple strength eased by the
+                    // wetness envelope (0 with ripples off), z/w reserved.
+                    new Float4(CausticaConfig.Rt.Composite.WATER_RIPPLE_SCALE.value(),
+                            CausticaConfig.Rt.Composite.WATER_RAIN_RIPPLES.value()
+                                    ? CausticaConfig.Rt.Composite.WATER_RIPPLE_STRENGTH.value()
+                                            * (CausticaConfig.Rt.Composite.WETNESS_ENABLED.value()
+                                                    ? Math.max(surfaceWetness, weather.rain()) : 1.0f)
+                                    : 0.0f,
+                            0.0f, 0.0f),
+                    // underwaterEffects: x haze strength (0 = off), y blue bias, z reserved,
+                    // w fallback water-column length for underwater misses (0 = off).
+                    new Float4(CausticaConfig.Rt.Composite.UNDERWATER_HAZE_ENABLED.value()
+                                    ? CausticaConfig.Rt.Composite.UNDERWATER_HAZE_STRENGTH.value() : 0.0f,
+                            CausticaConfig.Rt.Composite.UNDERWATER_BLUE_TINT.value(),
+                            0.0f,
+                            CausticaConfig.Rt.Composite.UNDERWATER_SKY_ENABLED.value()
+                                    ? CausticaConfig.Rt.Composite.UNDERWATER_SKY_DISTANCE.value() : 0.0f),
+                    // lightning: xyz strike position in terrain-rebased blocks, w flash intensity.
+                    new Float4((float) (lightning.x() - terrain.blockX),
+                            (float) (lightning.y() - terrain.blockY),
+                            (float) (lightning.z() - terrain.blockZ), lightning.intensity())
             ).write(push);
             int flushBytes = Math.max(WORLD_PUSH_SIZE, READY_MASK_OFFSET + readyMaskBytes);
             if (cloudCellsAddress != 0L) {

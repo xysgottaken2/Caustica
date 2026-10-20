@@ -238,6 +238,44 @@ void writeSkyMiss(inout Payload payload, float3 radiance) {
     payload.rayCone = 0u;
 }
 
+float lightningHash(float3 p) {
+    return frac(sin(dot(p, float3(12.9898, 78.233, 37.719))) * 43758.5453);
+}
+
+float3 lightningNode(float3 ground, int index) {
+    const float segments = 9.0;
+    float t = float(index) / segments;
+    float seed = dot(ground.xz, float2(0.1031, 0.11369));
+    float jitterX = (lightningHash(float3(seed, float(index) + 1.7, 2.3)) - 0.5) * 5.2 * t;
+    float jitterZ = (lightningHash(float3(seed, float(index) + 8.1, 7.9)) - 0.5) * 5.2 * t;
+    return ground + float3(jitterX, 48.0 * t, jitterZ);
+}
+
+// Distance from the view ray to a 9-segment jagged bolt polyline rising from the strike point.
+// Returns (core, halo) coverage; both are view-dependent glow terms, not geometry.
+float2 lightningBoltCoverage(float3 rayOrigin, float3 rayDirection, float3 strikeGround) {
+    float core = 0.0;
+    float halo = 0.0;
+    const int SEGMENTS = 9;
+    for (int i = 0; i < SEGMENTS; ++i) {
+        float3 a = lightningNode(strikeGround, i);
+        float3 b = lightningNode(strikeGround, i + 1);
+        float3 segment = b - a;
+        float3 offset = rayOrigin - a;
+        float raySegment = dot(rayDirection, segment);
+        float denominator = max(dot(segment, segment) - raySegment * raySegment, 1.0e-4);
+        float segmentT = clamp((dot(segment, offset) - raySegment * dot(rayDirection, offset))
+                / denominator, 0.0, 1.0);
+        float3 closestSegment = a + segment * segmentT;
+        float rayT = max(dot(closestSegment - rayOrigin, rayDirection), 0.0);
+        float distanceToRay = length(rayOrigin + rayDirection * rayT - closestSegment);
+        float radius = 0.16 + rayT * 0.0015;
+        core = max(core, 1.0 - smoothstep(radius * 0.18, radius * 0.80, distanceToRay));
+        halo = max(halo, 1.0 - smoothstep(radius * 0.65, radius * 3.5, distanceToRay));
+    }
+    return float2(core, halo);
+}
+
 [shader("miss")]
 void main(inout Payload payload) {
     WorldPush worldPush = ConstPtr<WorldPush>(pc.worldPushAddr)[0];
@@ -333,6 +371,18 @@ void main(inout Payload payload) {
 
     col = cloudLayer(worldPush, WorldRayOrigin() - worldPush.camOffset, dir, 1.0e9, col, skyAmbient,
                      showCelestial);
+
+    // A short lightning event is authored in world space (PR #21 port). The bolt itself is a
+    // narrow jagged polyline against the sky; the broad, brief radiance lift represents the
+    // atmospheric flash, while the separate point-light term in world.rgen illuminates nearby
+    // ground. Submerged cameras never reach this miss shader with an air sky (world.rgen
+    // substitutes the water column), so no underwater gating is needed here.
+    float flash = clamp(worldPush.lightning.w, 0.0, 5.0);
+    if (flash > 1.0e-4) {
+        col += float3(2.5, 3.2, 4.8) * flash;
+        float2 bolt = lightningBoltCoverage(WorldRayOrigin(), dir, worldPush.lightning.xyz);
+        col += (float3(48.0, 58.0, 72.0) * bolt.x + float3(4.0, 6.0, 10.0) * bolt.y) * flash;
+    }
 
     writeSkyMiss(payload, col);
 }

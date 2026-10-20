@@ -167,6 +167,73 @@ public float3 applyWaterWaves(float3 nGeo, float2 worldXZ, float t, float footpr
     return nGeo.y >= 0.0 ? up : -up;
 }
 
+// Rain-impact micro-ripples (PR #21 port). Each world-anchored cell emits one short-lived splash
+// at a deterministic pseudo-random point. The expanding Gaussian-ring profile gives the familiar
+// concentric circles from raindrops on a pond without spawning particles or allocating a texture.
+// This is a normal-only microdetail layer on top of the geometric swell: keeping it out of the
+// Newton height solve preserves stable intersection/continuation while still producing the sharp
+// reflected highlights that make the rings legible. The live rainEffects.x slider scales their
+// radius/spacing and rainEffects.y controls amplitude (already eased by the CPU wetness envelope).
+static const float RAIN_RIPPLE_CELL_SIZE = 0.52;
+static const float RAIN_RIPPLE_LIFETIME = 0.62;
+static const float RAIN_RIPPLE_SPEED = 0.48;
+static const float RAIN_RIPPLE_WIDTH = 0.050;
+static const float RAIN_RIPPLE_WAVENUMBER = 58.0;
+static const float RAIN_RIPPLE_HEIGHT = 0.0028;
+
+float rainRippleHash(float3 p) {
+    p = frac(p * 0.1031);
+    p += dot(p, p.yzx + 33.33);
+    return frac((p.x + p.y) * p.z);
+}
+
+float2 rainRippleGrad(float2 worldXZ, float timeSeconds, float rainAmount, float footprint) {
+    float rain = smoothstep(0.01, 0.30, saturate(rainAmount));
+    float lodFade = 1.0 - smoothstep(0.28, 1.15, max(footprint, 0.0));
+    float scale = clamp(worldPush.rainEffects.x, 0.25, 2.0);
+    float strength = rain * lodFade * clamp(worldPush.rainEffects.y, 0.0, 2.0);
+    float cellSize = RAIN_RIPPLE_CELL_SIZE * scale;
+    float ringWidth = RAIN_RIPPLE_WIDTH * scale;
+    float ringSpeed = RAIN_RIPPLE_SPEED * scale;
+    float waveNumber = RAIN_RIPPLE_WAVENUMBER / scale;
+    float rippleHeight = RAIN_RIPPLE_HEIGHT * scale;
+    if (strength <= 1.0e-4) return float2(0.0, 0.0);
+
+    float2 cellF = floor(worldXZ / cellSize);
+    float2 grad = float2(0.0, 0.0);
+    // Nine neighbouring cells are enough: ripple radius is capped below ~0.3 blocks and the
+    // randomized impact location stays inside its cell, so the pattern has no visible cell seams.
+    [unroll]
+    for (int z = -1; z <= 1; z++) {
+        [unroll]
+        for (int x = -1; x <= 1; x++) {
+            float2 cell = cellF + float2(float(x), float(z));
+            float3 seed = float3(cell.x, 17.0, cell.y);
+            float h0 = rainRippleHash(seed + float3(11.7, 3.1, 5.3));
+            float h1 = rainRippleHash(seed + float3(37.2, 9.2, 19.1));
+            float h2 = rainRippleHash(seed + float3(73.4, 2.7, 41.8));
+            float2 impact = (cell + float2(0.16 + 0.68 * h0, 0.16 + 0.68 * h1))
+                    * cellSize;
+            float age = frac(timeSeconds / RAIN_RIPPLE_LIFETIME + h2) * RAIN_RIPPLE_LIFETIME;
+            float2 delta = worldXZ - impact;
+            float radius = length(delta);
+            if (radius < 1.0e-3) continue;
+
+            float ringDistance = radius - age * ringSpeed;
+            float ringUnit = ringDistance / ringWidth;
+            if (abs(ringUnit) > 2.8) continue;
+            float envelope = exp(-0.5 * ringUnit * ringUnit) * exp(-1.15 * age);
+            float phase = ringDistance * waveNumber;
+            // Derivative of A * exp(-d²/2w²) * cos(kd), projected onto the radial direction.
+            float radialSlope = rippleHeight * envelope
+                    * (-sin(phase) * waveNumber
+                    - cos(phase) * ringDistance / (ringWidth * ringWidth));
+            grad += radialSlope * (delta / radius);
+        }
+    }
+    return grad * strength;
+}
+
 // Geometric wave hit: the rest-plane triangle the BLAS actually contains, plus the height-field point
 // the shading/depth/continuations should use. Side faces leave position == planePos.
 public struct WaterWaves {
@@ -233,6 +300,14 @@ public WaterWaves evaluateWaterWaves(float3 ro, float3 rd, float hitT, float3 nG
     float2 previousGrad;
     waterWaveFieldTemporal(domain, currentT, previousT, footprint,
             height, grad, previousHeight, previousGrad);
+    // Rain rings ride the same world-space domain and wrapped clock as the geometric spectrum.
+    // Both temporal phases are sampled so the moving ring highlights stay compatible with
+    // temporal reprojection (previousGrad feeds the previous-frame normal / motion vectors).
+    // Unlike PR #21's heightmap prim flag, exposure is not gated per-quad in this port: the
+    // rain lane itself is the gate, so cave water under a rain sky can ripple faintly.
+    float rainAmount = saturate(worldPush.weather.x);
+    grad += rainRippleGrad(domain, currentT, rainAmount, footprint);
+    previousGrad += rainRippleGrad(domain, previousT, rainAmount, footprint);
 
     float orientation = nGeo.y >= 0.0 ? 1.0 : -1.0;
     WaterWaves waves;

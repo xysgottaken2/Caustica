@@ -790,6 +790,41 @@ public float3 handLightIrradiance(float3 origin, float3 hitPos, float3 n, bool t
     return vis * (worldPush.handLightColor.xyz * ndl * intensity / max(d2, 0.25));
 }
 
+// Brief local point light from a lightning strike (PR #21 port). It is zero outside the short
+// flash window, so the extra visibility query only runs for a few frames per storm. The smooth
+// radius falloff prevents an inverse-square singularity while keeping terrain close to the
+// strike dramatically illuminated.
+public float3 lightningIrradiance(float3 origin, float3 hitPos, float3 n, bool twoSided) {
+    float intensity = clamp(worldPush.lightning.w, 0.0, 5.0);
+    if (intensity <= 1.0e-4) {
+        return float3(0.0, 0.0, 0.0);
+    }
+    float3 toLight = worldPush.lightning.xyz - hitPos;
+    float distanceSquared = dot(toLight, toLight);
+    if (distanceSquared < 1.0e-4) {
+        return float3(0.0, 0.0, 0.0);
+    }
+    float distanceToLight = sqrt(distanceSquared);
+    float radiusFade = saturate(1.0 - distanceToLight / 72.0);
+    if (radiusFade <= 0.0) {
+        return float3(0.0, 0.0, 0.0);
+    }
+    float3 ldir = toLight / distanceToLight;
+    float ndlSigned = dot(n, ldir);
+    float ndl = twoSided ? abs(ndlSigned) : max(0.0, ndlSigned);
+    if (ndl <= 0.0) {
+        return float3(0.0, 0.0, 0.0);
+    }
+    // Callers already provide a bias-safe ray origin for this surface/particle hit.
+    VisibilityResult shadow = visibility(origin, ldir, max(distanceToLight - 0.25, 2.0 * RAY_TMIN));
+    float3 vis = shadow.transmittance;
+    if (max(vis.r, max(vis.g, vis.b)) <= 0.0) {
+        return float3(0.0, 0.0, 0.0);
+    }
+    float attenuation = (2500.0 * intensity * radiusFade * radiusFade) / max(distanceSquared, 16.0);
+    return vis * float3(1.0, 0.96, 0.88) * (ndl * attenuation);
+}
+
 // TLAS instance-mask bits (set on the Java side, ANDed against these per-ray cull masks):
 //   bit 0 (0x01) — secondary rays: shadows, GI bounces, reflections.
 //   bit 1 (0x02) — the primary camera ray.
