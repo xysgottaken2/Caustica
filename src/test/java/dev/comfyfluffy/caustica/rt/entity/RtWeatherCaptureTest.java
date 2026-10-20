@@ -367,9 +367,16 @@ final class RtWeatherCaptureTest {
                 "snow needs its own payload bit; reusing PAYLOAD_WEATHER would refract it");
 
         // The capture: rain keeps the plain weather tag, snow adds the extra one.
-        int rainCall = src.indexOf("state.rainColumns");
-        int snowCall = src.indexOf("state.snowColumns");
-        assertTrue(rainCall > 0 && snowCall > rainCall, "the rain list must be captured before the snow list");
+        //
+        // Anchored on the capture() method and on the captureColumns() calls themselves, not on the bare
+        // field names: "state.rainColumns" also appears in isRainingAt() above, and a first-match search
+        // silently compared the wrong region of the file.
+        int captureMethod = src.indexOf("public int capture(RtEntityCapture capture");
+        assertTrue(captureMethod > 0, "capture() must still be the entry point that tags both lists");
+        int rainCall = src.indexOf("captureColumns(capture, out, state.rainColumns", captureMethod);
+        int snowCall = src.indexOf("captureColumns(capture, out, state.snowColumns", captureMethod);
+        assertTrue(rainCall > captureMethod && snowCall > rainCall,
+                "the rain list must be captured before the snow list");
         String beforeRain = src.substring(Math.max(0, rainCall - 400), rainCall);
         String between = src.substring(rainCall, snowCall);
         assertTrue(beforeRain.contains("capture.currentPrimFlags = RtEntityCapture.PRIM_FLAG_WEATHER;"),
