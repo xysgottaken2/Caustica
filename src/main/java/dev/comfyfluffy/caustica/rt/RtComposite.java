@@ -37,6 +37,8 @@ import net.minecraft.world.item.BlockItem;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.level.MoonPhase;
+import net.minecraft.world.level.biome.Biome;
+import net.minecraft.world.level.levelgen.Heightmap;
 import net.minecraft.world.level.material.FluidState;
 import net.minecraft.world.phys.Vec3;
 import org.joml.Matrix4f;
@@ -60,7 +62,6 @@ import dev.comfyfluffy.caustica.rt.accel.RtBuffer;
 import dev.comfyfluffy.caustica.rt.accel.RtImage;
 import dev.comfyfluffy.caustica.rt.entity.RtEntities;
 import dev.comfyfluffy.caustica.rt.entity.RtEntityTextures;
-import dev.comfyfluffy.caustica.rt.entity.RtWeatherCapture;
 import dev.comfyfluffy.caustica.rt.material.RtBlockMaterials;
 import dev.comfyfluffy.caustica.rt.material.RtEmissionSemantics;
 import dev.comfyfluffy.caustica.rt.material.RtMaterialOverrides;
@@ -160,9 +161,17 @@ public final class RtComposite {
      *
      * <p>{@code getRainLevel} describes the storm, not what falls out of it: it reads the same in a
      * snowy taiga as in a jungle, so keying the surface response off it alone put impact rings on water
-     * and a wet film on the ground while the game was drawing snowflakes. Vanilla answers the real
-     * question per column; {@link RtWeatherCapture#isRainingAt} asks it for the camera's column, so the
-     * rain-only effects below agree with the precipitation actually being rendered.
+     * and a wet film on the ground while the game was drawing snowflakes.
+     *
+     * <p>The answer therefore comes from the biome, which is the authority vanilla itself consults: a
+     * column is rain only when its biome reports {@link Biome.Precipitation#RAIN} at that spot. Snow
+     * reports {@code SNOW}, and biomes that never get precipitation at all — deserts, badlands, most
+     * savannas — report {@code NONE}, so all of them are excluded by the same comparison rather than by
+     * a biome list this renderer would have to keep in sync with the world.
+     *
+     * <p>The column is sampled at its surface instead of at the eye: the answer decides what lands on
+     * the ground, and temperature (hence rain vs. snow) varies with height, so a mountain column in a
+     * temperate biome is correctly snow while the valley below it is rain.
      *
      * <p>Everything else the weather drives — sky darkening, cloud thickening, fog density, the storm
      * greying — deliberately stays keyed on the global level: snow is just as overcast as rain.
@@ -170,7 +179,23 @@ public final class RtComposite {
     private static boolean liquidRainAt(ClientLevel level, double cameraX, double cameraZ, float partialTick) {
         return level != null
                 && level.getRainLevel(partialTick) > 0.001f
-                && RtWeatherCapture.isRainingAt(cameraX, cameraZ);
+                && liquidPrecipitationAt(level, cameraX, cameraZ);
+    }
+
+    /**
+     * Vanilla's own rain/snow question for one column: {@code Biome.getPrecipitationAt} at the surface.
+     *
+     * <p>This is the same call the game's weather renderer makes to decide whether a column gets the
+     * rain sheet or the snow sheet, so the surface response cannot disagree with the precipitation on
+     * screen — including at biome borders, where the column under the camera is what matters.
+     */
+    private static boolean liquidPrecipitationAt(ClientLevel level, double cameraX, double cameraZ) {
+        int blockX = Mth.floor(cameraX);
+        int blockZ = Mth.floor(cameraZ);
+        int surfaceY = level.getHeight(Heightmap.Types.MOTION_BLOCKING, blockX, blockZ);
+        BlockPos pos = new BlockPos(blockX, Math.max(surfaceY, level.getMinY()), blockZ);
+        return level.getBiome(pos).value().getPrecipitationAt(pos, level.getSeaLevel())
+                == Biome.Precipitation.RAIN;
     }
 
     /**

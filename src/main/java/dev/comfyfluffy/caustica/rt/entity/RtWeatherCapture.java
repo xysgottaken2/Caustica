@@ -184,42 +184,6 @@ public final class RtWeatherCapture {
     }
 
     /**
-     * Whether <em>liquid</em> rain — as opposed to snow — is falling on the camera's own column.
-     *
-     * <p>{@code Level.getRainLevel} is a single global weather value: it reads the same in a snowy taiga
-     * as in a jungle, because it only says how hard the storm is, not what is coming out of it. Anything
-     * that keys off it alone therefore runs in a snow biome too, which is how rain rings ended up on
-     * water and a wet film on the ground under a clear sheet of snowflakes.
-     *
-     * <p>Vanilla itself makes the distinction per column: it asks the biome for its precipitation type
-     * and files the column into {@code rainColumns} or {@code snowColumns}, which is exactly why this
-     * capture has two lists to replay. Asking whether the camera's own column appears in the rain list is
-     * therefore asking the game the same question it already answered to build the weather it is
-     * drawing — no second opinion, no duplicated biome/altitude rules.
-     *
-     * <p>Note this is deliberately narrower than {@link #willRenderWeather()}: snow still renders, still
-     * darkens the sky and still thickens the cloud deck. Only the surface effects that a raindrop causes
-     * and a flake cannot — impact rings and a wet film — are gated on this.
-     */
-    public static boolean isRainingAt(double cameraX, double cameraZ) {
-        WeatherRenderState state = weatherState();
-        if (state == null || state.rainColumns == null || state.rainColumns.isEmpty()) {
-            return false;
-        }
-        int columnX = Mth.floor(cameraX);
-        int columnZ = Mth.floor(cameraZ);
-        // The list is built over a grid centred on the camera, so the camera's own cell is always in it
-        // whenever rain reaches this biome at all. Its entry is the degenerate one the capture skips
-        // (vanilla hides it behind a NaN vertex), but it is still the authoritative "rain here" signal.
-        for (WeatherEffectRenderer.ColumnInstance column : state.rainColumns) {
-            if (column.x() == columnX && column.z() == columnZ) {
-                return true;
-            }
-        }
-        return false;
-    }
-
-    /**
      * Append this frame's rain and snow columns to {@code capture} (a particle-mode capture: the caller
      * has already set the any-hit alpha bucket and the camera-relative → rebased offset on
      * {@code out}).
