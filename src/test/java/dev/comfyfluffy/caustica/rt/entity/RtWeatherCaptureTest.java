@@ -351,11 +351,12 @@ final class RtWeatherCaptureTest {
     @Test
     void snowIsTaggedSeparatelySoItIsNotRefracted() throws IOException {
         String src = Files.readString(source());
-        String capture = Files.readString(REPO_ROOT.resolve(
+        Path root = repoRoot();
+        String capture = Files.readString(root.resolve(
                 "src/main/java/dev/comfyfluffy/caustica/rt/entity/RtEntityCapture.java"));
-        String common = Files.readString(REPO_ROOT.resolve("shaders/world/world_common.slang"));
-        String rchit = Files.readString(REPO_ROOT.resolve("shaders/world/world.rchit.slang"));
-        String rgen = Files.readString(REPO_ROOT.resolve("shaders/world/world.rgen.slang"));
+        String common = Files.readString(root.resolve("shaders/world/world_common.slang"));
+        String rchit = Files.readString(root.resolve("shaders/world/world.rchit.slang"));
+        String rgen = Files.readString(root.resolve("shaders/world/world.rgen.slang"));
 
         // The bit has to mean the same thing on both sides of the ABI.
         assertTrue(capture.contains("PRIM_FLAG_WEATHER_SNOW = 32;"),
