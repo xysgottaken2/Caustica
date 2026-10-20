@@ -396,6 +396,69 @@ final class RtWeatherCaptureTest {
                 "raygen must not branch on the snow tag at all: snow simply skips the droplet path");
     }
 
+    /**
+     * Snow must not produce rain's surface response.
+     *
+     * <p>{@code getRainLevel} is one global number: it says how hard the storm is, not what is falling
+     * out of it, so it reads the same in a snowy taiga as in a jungle. Keying the wet film, the ground
+     * rings and the water rings off it alone made a snow biome look like it was being hosed down — glossy
+     * dark ground and impact rings under a sky of flakes.
+     *
+     * <p>Vanilla itself splits precipitation per column when it builds the weather it draws, filing each
+     * one into {@code rainColumns} or {@code snowColumns}. {@code RtWeatherCapture.isRainingAt} asks that
+     * same split about the camera's own column, and the composite gates exactly the rain-only lanes on
+     * it — while the storm-wide response (sky darkening, cloud thickening, fog) stays keyed on the level,
+     * because snow is just as overcast as rain.
+     */
+    @Test
+    void snowDoesNotProduceRainRipplesOrAWetGround() throws IOException {
+        String capture = Files.readString(source());
+        Path root = repoRoot();
+        String composite = Files.readString(root.resolve(
+                "src/main/java/dev/comfyfluffy/caustica/rt/RtComposite.java"));
+
+        // --- the signal: vanilla's own rain/snow split, asked about the camera's column ---
+        assertTrue(capture.contains("public static boolean isRainingAt(double cameraX, double cameraZ)"),
+                "RtWeatherCapture must expose a liquid-rain query for the camera's column");
+        int query = capture.indexOf("public static boolean isRainingAt(double cameraX, double cameraZ)");
+        int queryEnd = capture.indexOf("\n    }\n", query);
+        String body = capture.substring(query, queryEnd);
+        assertTrue(body.contains("state.rainColumns"),
+                "the query must read vanilla's rain columns, the list that already excludes snow");
+        assertFalse(body.contains("snowColumns"),
+                "snow columns must never satisfy the liquid-rain query");
+        // The camera's own cell is the one that answers "here", not any column in the radius: a snow
+        // biome next to a rain biome must not borrow its neighbour's splashes.
+        assertTrue(body.contains("column.x() == columnX && column.z() == columnZ"),
+                "the query must match the camera's own block, not merely find some nearby rain");
+
+        // --- the consumers: every rain-only surface effect asks the query ---
+        assertTrue(composite.contains("boolean liquidRain = liquidRainAt(level, camX, camZ, partialTick);"),
+                "the composite must resolve liquid precipitation once per frame");
+        assertTrue(composite.contains("private static boolean liquidRainAt(")
+                        && composite.contains("level.getRainLevel(partialTick) > 0.001f")
+                        && composite.contains("RtWeatherCapture.isRainingAt(cameraX, cameraZ)"),
+                "liquidRainAt must require a storm AND rain (not snow) at the camera");
+
+        assertTrue(composite.contains("surfaceWetnessForFrame(liquidRain)"),
+                "the wet film must accumulate only under liquid rain");
+        assertFalse(composite.contains("surfaceWetnessForFrame(level != null && level.getRainLevel"),
+                "the old rain-level-only wetness call must be gone, or snow wets the ground again");
+
+        assertTrue(composite.contains("liquidRain && CausticaConfig.Rt.Composite.GROUND_RAIN_RIPPLES.value()"),
+                "ground rain ripples must be gated on liquid rain");
+        assertTrue(composite.contains("liquidRain && CausticaConfig.Rt.Composite.WATER_RAIN_RIPPLES.value()"),
+                "water rain ripples must be gated on liquid rain");
+
+        // --- lightning: vanilla's isRainingAt() also requires RAIN, so there is no thundersnow ---
+        assertTrue(composite.contains("liquidRain ? weather.rain() : 0f"),
+                "the strike scheduler must not run while snow is falling");
+
+        // --- the storm response stays global: snow is still overcast ---
+        assertTrue(composite.contains("float fill = rainCloudResponse ? Math.min(1f, weather.rain() + weather.thunder()) : 0f;"),
+                "cloud thickening must keep following the storm, not the precipitation type");
+    }
+
     private static Path anyHitShader() {
         return repoRoot().resolve("shaders/world/world.rahit.slang");
     }

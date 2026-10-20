@@ -60,6 +60,7 @@ import dev.comfyfluffy.caustica.rt.accel.RtBuffer;
 import dev.comfyfluffy.caustica.rt.accel.RtImage;
 import dev.comfyfluffy.caustica.rt.entity.RtEntities;
 import dev.comfyfluffy.caustica.rt.entity.RtEntityTextures;
+import dev.comfyfluffy.caustica.rt.entity.RtWeatherCapture;
 import dev.comfyfluffy.caustica.rt.material.RtBlockMaterials;
 import dev.comfyfluffy.caustica.rt.material.RtEmissionSemantics;
 import dev.comfyfluffy.caustica.rt.material.RtMaterialOverrides;
@@ -152,6 +153,24 @@ public final class RtComposite {
 
     private static boolean waterWaves() {
         return CausticaConfig.Rt.Composite.WATER_WAVES.value();
+    }
+
+    /**
+     * Whether liquid rain — not snow — is falling on the camera's own column.
+     *
+     * <p>{@code getRainLevel} describes the storm, not what falls out of it: it reads the same in a
+     * snowy taiga as in a jungle, so keying the surface response off it alone put impact rings on water
+     * and a wet film on the ground while the game was drawing snowflakes. Vanilla answers the real
+     * question per column; {@link RtWeatherCapture#isRainingAt} asks it for the camera's column, so the
+     * rain-only effects below agree with the precipitation actually being rendered.
+     *
+     * <p>Everything else the weather drives — sky darkening, cloud thickening, fog density, the storm
+     * greying — deliberately stays keyed on the global level: snow is just as overcast as rain.
+     */
+    private static boolean liquidRainAt(ClientLevel level, double cameraX, double cameraZ, float partialTick) {
+        return level != null
+                && level.getRainLevel(partialTick) > 0.001f
+                && RtWeatherCapture.isRainingAt(cameraX, cameraZ);
     }
 
     /**
@@ -1740,10 +1759,15 @@ public final class RtComposite {
             int dimension = dimensionId(level);
             float partialTick = Minecraft.getInstance().getDeltaTracker().getGameTimeDeltaPartialTick(false);
             WeatherState weather = weatherState(level, partialTick);
+            // Liquid precipitation at the eye. Snow shares the storm, the darkened sky and the thicker
+            // deck, but it cannot splash: no impact rings, no wet film, and no bolt through it (vanilla's
+            // own isRainingAt() likewise requires RAIN precipitation, so thundersnow does not exist).
+            boolean liquidRain = liquidRainAt(level, camX, camZ, partialTick);
             // Render-thread lightning scheduler. It publishes a short-lived strike position and pulse
             // envelope to the shaders (sky bolt + local point light) and plays positional thunder; it
             // never mutates the world or spawns a server entity.
-            RtLightning.State lightning = LIGHTNING.update(level, camX, camY, camZ, weather.rain(),
+            RtLightning.State lightning = LIGHTNING.update(level, camX, camY, camZ,
+                    liquidRain ? weather.rain() : 0f,
                     CausticaConfig.Rt.Composite.LIGHTNING_ENABLED.value(),
                     CausticaConfig.Rt.Composite.LIGHTNING_STRIKES_PER_MINUTE.value(),
                     CausticaConfig.Rt.Composite.LIGHTNING_INTENSITY.value(),
@@ -1839,16 +1863,20 @@ public final class RtComposite {
                     // own FOG_COLOR attribute, blended by the slider — see fogTint() above.
                     fogTint(),
                     // Live rain material state. Disabling wetness clears it instead of leaving a stale
-                    // wet ground value to reappear if the option is toggled back on.
-                    new Float4(surfaceWetnessForFrame(level != null && level.getRainLevel(partialTick) > 0.001f),
+                    // wet ground value to reappear if the option is toggled back on. Both the film and the
+                    // ground rings are rain-only: under snow the lane drops to dry at once, so a taiga
+                    // never shows a glossy dark surface with splashes on it.
+                    new Float4(surfaceWetnessForFrame(liquidRain),
                             CausticaConfig.Rt.Composite.WETNESS_GLOSS.value(),
-                            CausticaConfig.Rt.Composite.GROUND_RAIN_RIPPLES.value()
+                            liquidRain && CausticaConfig.Rt.Composite.GROUND_RAIN_RIPPLES.value()
                                     ? CausticaConfig.Rt.Composite.GROUND_RIPPLE_STRENGTH.value() : 0.0f,
                             CausticaConfig.Rt.Composite.WETNESS_TRANSITION_DISTANCE.value()),
                     // x shrinks/enlarges procedural water rings; y disables/scales their amplitude;
                     // z scales rain-lens ray bending; w caps how much weather fill clouds may add.
+                    // Rings are rain-only for the same reason as the ground ones: a flake landing on
+                    // water does not kick up a crown.
                     new Float4(CausticaConfig.Rt.Composite.WATER_RIPPLE_SCALE.value(),
-                            CausticaConfig.Rt.Composite.WATER_RAIN_RIPPLES.value()
+                            liquidRain && CausticaConfig.Rt.Composite.WATER_RAIN_RIPPLES.value()
                                     ? CausticaConfig.Rt.Composite.WATER_RIPPLE_STRENGTH.value() : 0.0f,
                             CausticaConfig.Rt.Composite.RAIN_REFRACTION_ENABLED.value()
                                     ? CausticaConfig.Rt.Composite.RAIN_REFRACTION_STRENGTH.value() : 0.0f,
