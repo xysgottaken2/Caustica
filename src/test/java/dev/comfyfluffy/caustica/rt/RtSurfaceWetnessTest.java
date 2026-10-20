@@ -83,7 +83,10 @@ final class RtSurfaceWetnessTest {
         String snapshots = Files.readString(root.resolve(
                 "src/main/java/dev/comfyfluffy/caustica/rt/terrain/RtSectionSnapshots.java"));
         assertTrue(common.contains("public float4   surfaceWetness;"));
-        assertTrue(composite.contains("surfaceWetnessForFrame(level != null && level.getRainLevel(partialTick) > 0.001f"));
+        // Liquid rain only: snow shares the storm but must not soak the ground (see
+        // RtWeatherCapture.isRainingAt, and RtWeatherCaptureTest for the full gate).
+        assertTrue(composite.contains("boolean liquidRain = liquidRainAt(level, camX, camZ, partialTick);"));
+        assertTrue(composite.contains("surfaceWetnessForFrame(liquidRain)"));
         assertTrue(composite.contains("SURFACE_WETNESS.update(raining, now,"));
         assertTrue(hit.contains("smoothstep(0.45, 0.85, n.y)"));
         assertTrue(hit.contains("float roughnessScale = lerp(0.30, 0.035, gloss)"));

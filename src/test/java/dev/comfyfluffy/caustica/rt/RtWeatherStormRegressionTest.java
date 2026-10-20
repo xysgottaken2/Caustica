@@ -68,13 +68,17 @@ final class RtWeatherStormRegressionTest {
      * <p>{@code WEATHER_LIGHTING} exists to restore clear-sky lighting for players who dislike the
      * darkening. Gating the scheduler on it would also stop the bolts, which is not what the option
      * says; the flash and the point light are zeroed per-lane instead.
+     *
+     * <p>The rain level it reads is the <em>liquid</em> one: a snow biome carries the same global storm
+     * value while the game draws flakes, and vanilla's own {@code isRainingAt()} requires RAIN
+     * precipitation, so there is no thundersnow to reproduce.
      */
     @Test
     void lightningIsDrivenByRainNotByThePresentationToggle() throws IOException {
         String java = Files.readString(COMPOSITE);
 
-        assertTrue(java.contains("LIGHTNING.update(level, camX, camY, camZ, weather.rain(),"),
-                "the scheduler must read the live rain level, whoever produced it");
+        assertTrue(java.contains("liquidRain ? weather.rain() : 0f"),
+                "the scheduler must read the live rain level, and only while rain (not snow) falls");
         // Ordering: update() runs before the push record is built, so a strike can never be a frame late.
         int update = java.indexOf("LIGHTNING.update(");
         int push = java.indexOf("new Float4((float) (lightning.x() - terrain.blockX)");
