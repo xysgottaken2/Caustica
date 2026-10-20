@@ -101,6 +101,31 @@ public final class RtVideoOptions {
         return options.toArray(OptionInstance<?>[]::new);
     }
 
+    /** Per-frame cost controls gathered beside the quick profiles for easier performance tuning. */
+    public static OptionInstance<?>[] performanceOptions() {
+        return new OptionInstance<?>[] {
+            risCandidates(),
+            restirSampling(),
+            restirSpatialNeighbours(),
+            subsurfaceScattering(),
+            parallaxEnabled(),
+            parallaxQuality(),
+            waterWaves(),
+            waterWaveDetail(),
+        };
+    }
+
+    /** An explicit quick profile. Reopening the page refreshes every slider after the settings change. */
+    public static Button performanceProfileButton(RtPerformanceProfiles.Profile profile, Runnable reopen) {
+        String key = "caustica.options.rt.performanceProfile." + profile.translationKey();
+        Button button = Button.builder(Component.translatable(key), clicked -> {
+            RtPerformanceProfiles.apply(profile);
+            reopen.run();
+        }).width(310).build();
+        button.setTooltip(Tooltip.create(Component.translatable(key + ".tooltip")));
+        return button;
+    }
+
     /**
      * The upscaling sub-screen's rows: the same selector that heads the Quality section, then every
      * knob of the selected backend — DLSS Ray Reconstruction gets quality, model preset and its

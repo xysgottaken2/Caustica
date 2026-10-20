@@ -1,11 +1,13 @@
 package dev.comfyfluffy.caustica.client.gui;
 
 import dev.comfyfluffy.caustica.CausticaConfig;
+import dev.comfyfluffy.caustica.client.RtPerformanceProfiles;
 import dev.comfyfluffy.caustica.client.RtVideoOptions;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.function.Function;
 import net.minecraft.client.Minecraft;
+import net.minecraft.client.OptionInstance;
 import net.minecraft.client.Options;
 import net.minecraft.client.gui.components.Button;
 import net.minecraft.client.gui.screens.Screen;
@@ -44,12 +46,23 @@ public final class RtSubScreens {
 
     // ===== Sub-screens =====
 
-    /** Path-tracing quality + upscaler basics, plus the opacity-micromap controls. */
+    /** Path-tracing quality, quick performance profiles, and live per-frame cost controls. */
     public static RtSettingsSubScreen quality(Screen parent) {
         return new RtSettingsSubScreen(parent, options(),
                 Component.translatable("caustica.options.rt.qualityHeader"),
                 qualitySettings(), RtSubScreens::quality,
-                reopen -> List.of(RtSettingsSubScreen.Section.of(null, RtVideoOptions.qualityOptions(reopen))));
+                reopen -> List.of(
+                        RtSettingsSubScreen.Section.of(
+                                Component.translatable("caustica.options.rt.performanceProfilesHeader"),
+                                new OptionInstance<?>[0],
+                                RtVideoOptions.performanceProfileButton(
+                                        RtPerformanceProfiles.Profile.PERFORMANCE, reopen),
+                                RtVideoOptions.performanceProfileButton(
+                                        RtPerformanceProfiles.Profile.BALANCED, reopen)),
+                        RtSettingsSubScreen.Section.of(null, RtVideoOptions.qualityOptions(reopen)),
+                        RtSettingsSubScreen.Section.of(
+                                Component.translatable("caustica.options.rt.performanceControlsHeader"),
+                                RtVideoOptions.performanceOptions())));
     }
 
     /** The upscaler backend and every per-backend knob: DLSS RR, FSR 3 or XeSS. */
@@ -213,7 +226,17 @@ public final class RtSubScreens {
                 CausticaConfig.Rt.Xess.QUALITY,
                 CausticaConfig.Rt.Denoise.ENABLED,
                 CausticaConfig.Rt.Omm.ENABLED,
-                CausticaConfig.Rt.Omm.SUBDIVISION);
+                CausticaConfig.Rt.Omm.SUBDIVISION,
+                // The Performance Controls section exposes these same live settings from their
+                // lighting/effects/water pages, so this page's reset must include them too.
+                CausticaConfig.Rt.Lights.RIS_CANDIDATES,
+                CausticaConfig.Rt.Lights.RESTIR_SAMPLING,
+                CausticaConfig.Rt.Lights.RESTIR_SPATIAL_NEIGHBOURS,
+                CausticaConfig.Rt.Composite.SSS,
+                CausticaConfig.Rt.Composite.PARALLAX_ENABLED,
+                CausticaConfig.Rt.Composite.PARALLAX_QUALITY,
+                CausticaConfig.Rt.Composite.WATER_WAVES,
+                CausticaConfig.Rt.Composite.WATER_WAVE_DETAIL);
     }
 
     private static List<CausticaConfig.RuntimeSetting<?>> upscalingSettings() {
