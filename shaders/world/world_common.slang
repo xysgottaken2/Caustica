@@ -187,6 +187,22 @@ public struct WorldPush {
     // emitter scatter terms can never tint differently. Trailing lane after fogParams — the
     // generated WorldPushData appends it; RtFogShaderRegressionTest pins the pairing.
     public float4   fogTint;
+    // Rain-driven material response. x = global surface wetness 0..1, advanced on the CPU over the
+    // configured wet duration and dried over the configured dry duration after rain stops.
+    // y = wet-film gloss 0..1; z = ground rain-ripple amplitude (0 disables);
+    // w = live wetness-transition radius in blocks (0 keeps the strict rain-exposure cutoff).
+    public float4   surfaceWetness;
+    // Live controls for rain/water effects. x = water-ripple scale, y = water-ripple strength
+    // (0 disables), z = rain-refraction strength, w = rain-driven cloud fill multiplier (0 disables
+    // the weather-driven share of cloud coverage). Trailing lanes preserve every earlier offset.
+    public float4   rainEffects;
+    // Underwater haze. x = haze strength 0..2, y = blue colour bias 0..1, z = reserved (0),
+    // w = fallback integration distance for underwater sky misses (0 disables the fallback).
+    // Haze density is spatially uniform so it cannot thicken at every roof edge.
+    public float4   underwaterEffects;
+    // Lightning state, trailing to preserve the established WorldPush offsets: xyz = strike position
+    // in terrain-rebased world blocks, w = momentary flash intensity (0 when inactive).
+    public float4   lightning;
 };
 
 // worldPush.dimension: the sky/lighting model this frame renders with. The Overworld runs the full
@@ -208,6 +224,12 @@ public static const uint FEATURE_RESTIR = 32u;            // temporal + spatial 
 public static const uint FEATURE_NRD = 64u;              // NRD denoiser signal capture (per-lobe radiance + hit distance)
 public static const uint FEATURE_VIEWZ = 128u;           // a renderer-side denoiser needs gViewZ (reprojection validation + sky cutoff)
 public static const uint FEATURE_SHARC = 256u;           // experimental spatial-hash radiance cache
+
+// How far a full thunderstorm pulls the sky and the fog toward their own luminance, in 0..1. One shared
+// number on purpose: world.rmiss desaturates the sky with it and fog.slang desaturates the scattered
+// air with it, so the horizon, the shafts and the ambient fill read as one closed grey lid instead of
+// a blue sky with grey clouds pasted into it. Both sites gate on FEATURE_WEATHER_LIGHTING.
+public static const float STORM_GREY_MIX = 0.35;
 
 // WorldPush.flags: physical state of the camera/frame, not user options (those are featureFlags).
 public static const uint WORLD_FLAG_SUBMERGED = 1u; // bit0: the eye is inside a water volume
@@ -283,12 +305,20 @@ public static const uint TERRAIN_PRIM_IN_LIGHT_BUFFER = 1u;
 // the dedicated portal branches (Nether swirl / End night sky) instead of the block texture.
 public static const uint TERRAIN_PRIM_PORTAL_NETHER = 2u;
 public static const uint TERRAIN_PRIM_PORTAL_END = 4u;
-// Prim.flags (entity prims): a vanilla rain/snow sheet captured by RtWeatherCapture. Shares the flags
-// lane the portal tags use on terrain — particles never carry portal tags, so the bit is unambiguous.
-// Raygen shades these sheets UNLIT (see PAYLOAD_WEATHER): the path tracer's direct/indirect light was
-// visibly breaking the rain (blotchy over-lit streaks), and vanilla's own weather pass is essentially
-// unlit too. The sheets stay real BLAS geometry, so terrain still occludes them and the heightmap
-// clip still works — only the lighting response is removed.
+// TerrainPrim.flags bit 3: the surface column reaches the motion-blocking rain heightmap at this
+// block's own height, i.e. precipitation can land on it. Also set on water fluid surfaces.
+public static const uint TERRAIN_PRIM_RAIN_EXPOSED = 8u;
+// Bit 4: an alpha-tested terrain surface (leaves, grass, …) that may still take the wet film.
+public static const uint TERRAIN_PRIM_CUTOUT = 16u;
+// Bit 5: a thin translucent surface (glass, ice); excluded from the wet-film overlay.
+public static const uint TERRAIN_PRIM_TRANSLUCENT = 32u;
+// Prim.flags (entity prims): a vanilla rain/snow sheet captured by RtWeatherCapture, or one of
+// vanilla's little rain-impact/splash billboards. Shares the flags lane the portal tags use on terrain —
+// particles never carry portal tags, so the bit is unambiguous. Raygen shades accepted samples as thin
+// refractive droplets (see PAYLOAD_WEATHER): neutral near-white albedo, stochastic alpha coverage in
+// any-hit, and the continuation ray bent through the sheet, so rain reads as clear water instead of
+// opaque blue bars. The sheets stay real BLAS geometry, so terrain still occludes them and the
+// heightmap clip still works.
 public static const uint PRIM_WEATHER = 16u;
 // Prim.flags (entity prims): an enchantment/foil glint overlay captured by RtEntityCollector. Tagging
 // lets world.rchit shade it with a dedicated branch — an animated, self-lit shimmer (the same special
@@ -329,7 +359,7 @@ public struct Payload {
     public float  hitT;        // >= 0 on hit, < 0 on miss.
     public half3  motionPrev;  // per-vertex world displacement since last frame.
     public half3  f0;          // specular F0.
-    public uint  flags;       // bits 0..1 material, bit 2 celestial, bit 3 water-entering, bits 4..6 emission source, bit 7 emitter-in-list, bit 8 dynamic entity, bit 9 weather, bit 10 end-portal unlit.
+    public uint  flags;       // bits 0..1 material, bit 2 celestial, bit 3 water-entering, bits 4..6 emission source, bit 7 emitter-in-list, bit 8 dynamic entity, bit 9 weather, bit 10 end-portal unlit, bit 11 ray still in water (miss), bit 12 rain-exposed water (hit).
     public uint   roughMetal;  // packHalf2x16(roughness, metalness)
     public uint   emissionSss; // packHalf2x16(emission, sss)
     public uint   iorTransmission; // packHalf2x16(IOR, transmission factor)
@@ -337,9 +367,16 @@ public struct Payload {
 };
 
 public static const uint PAYLOAD_SHOW_CELESTIAL = 4u;
-// Rain/snow sheet (Prim.flags carried through by world.rchit): raygen shades it unlit and ends the
-// path there — no NEE, no shadow ray, no RIS, no diffuse continuation — because the path tracer's
-// light response was visibly breaking the weather streaks. See PRIM_WEATHER.
+// Set by raygen on every trace taken while the current medium stack is still water. world.rmiss uses
+// it to skip the above-water cloud deck and the lightning bolt, so a horizon miss cannot leak a hard
+// cloud/bolt tile through the water column; raygen clears it once refraction has left the medium.
+public static const uint PAYLOAD_RAY_IN_WATER = 2048u;
+// Set by world.rchit on water hits whose surface is open to precipitation (the mesher's rain-exposed
+// bit): cave/roof water gets no rain-impact rings.
+public static const uint PAYLOAD_WATER_RAIN_EXPOSED = 4096u;
+// Rain/snow sheet (Prim.flags carried through by world.rchit): raygen treats an accepted sample as a
+// thin refractive droplet — a faint near-white glint plus a Snell-bent continuation — instead of
+// lighting the sheet like a diffuse surface. See PRIM_WEATHER.
 public static const uint PAYLOAD_WEATHER = 512u;
 // End portal night-sky surface (set by world.rchit on both the terrain and the entity/block-entity
 // portal branches): raygen shades it fully UNLIT — only its own emission is added, then the path
@@ -419,6 +456,12 @@ public struct TerrainPrim {
     public float4 tint;
     public uint materialId;
     public uint flags;
+    // asfloat(aux0) = wetness shelter distance in blocks: how far this face is from the nearest
+    // column where precipitation reaches the same height. 0 = directly rain-exposed. Written by
+    // RtTerrainMesher from RtSectionSnapshots' per-section chamfer field; read only by the wet-film
+    // term in world.rchit. Terrain meshed without a section snapshot (Distant Horizons LODs) writes
+    // RtSectionSnapshots.RAIN_SHELTER_FALLBACK (one block past the largest radius) instead, so it
+    // stays dry rather than guessing an unsheltered surface.
     public uint aux0;
     public uint aux1;
 };

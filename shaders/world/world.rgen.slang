@@ -89,10 +89,10 @@ public float3 tracePath(PathSegment seg, uint2 pix, uint sampleIndex,
             // The medium gate is the CAMERA's own medium, not the continuation's stack: seg.medium
             // already contains the dielectric Pass A consumed at the far end of this prefix (a water
             // or glass entry queues its continuation with the new medium pushed), but the stretch
-            // being recovered here was travelled in the medium BEFORE that interface. Gating on the
-            // pushed stack skipped camera->surface fog for every dielectric the player looks "into"
-            // — the reported water/glass-unfogged bug. fogAppliesHere stays right where the segment
-            // really does lie inside the medium it samples: the pass-B hit/miss blocks.
+            // being recovered here was travelled in the medium BEFORE that interface. Atmospheric fog
+            // is skipped for a submerged camera; water's extinction and source-lit in-scatter are
+            // integrated separately below. fogAppliesHere stays right where the segment really does
+            // lie inside the medium it samples: the pass-B hit/miss blocks.
             if (fogEnabled(worldPush) && !cameraSubmerged()) {
                 FogVolume preFog = fogSegment(worldPush, worldPush.camOffset, toStart / prefixDist,
                                               prefixDist, seed, seg.showCelestial);
@@ -100,13 +100,29 @@ public float3 tracePath(PathSegment seg, uint2 pix, uint sampleIndex,
                 Lspec += throughput * preFog.scatter;
                 throughput *= preFog.transmittance;
             }
-            // The cloud crossing belongs to the camera->surface prefix, so it is recovered here in
-            // full rather than applied per split branch.
-            CloudVolume pre = cloudSegment(worldPush, float3(0.0, 0.0, 0.0), toStart / prefixDist,
-                                           prefixDist, cloudSkyAmbient(worldPush), seg.showCelestial);
-            L += throughput * pre.scatter;
-            Lspec += throughput * pre.scatter;
-            throughput *= pre.transmittance;
+            // Pass A has already attenuated the camera-to-interface prefix before it queued this
+            // branch, but it has no radiance accumulator. Add the missing in-scatter here. Fresnel
+            // branches share the same prefix, so the branch weight is carried explicitly in
+            // PackedPathSegment rather than inferred by dividing throughput by the water
+            // transmittance (that ratio collapses once T underflows, which painted moving black
+            // circles / concentric contours at a camera-dependent path length).
+            if (cameraSubmerged()) {
+                float branchWeight = saturate(seg.prefixScatterWeight);
+                float3 prefixWaterScatter = waterHazeScattering(toStart / prefixDist, prefixDist)
+                        * branchWeight;
+                L += prefixWaterScatter;
+                Lspec += prefixWaterScatter;
+            }
+            // Atmospheric clouds are not part of an underwater camera prefix: integrating the deck
+            // through water produced a hard horizon seam / dark tile when rays split at the surface.
+            // The resumed air segment still evaluates clouds normally after the interface.
+            if (!cameraSubmerged()) {
+                CloudVolume pre = cloudSegment(worldPush, float3(0.0, 0.0, 0.0), toStart / prefixDist,
+                                               prefixDist, cloudSkyAmbient(worldPush), seg.showCelestial);
+                L += throughput * pre.scatter;
+                Lspec += throughput * pre.scatter;
+                throughput *= pre.transmittance;
+            }
         }
     }
     float rayConeWidth = seg.rayConeWidth;
@@ -165,10 +181,11 @@ public float3 tracePath(PathSegment seg, uint2 pix, uint sampleIndex,
         // roulette, and paths guaranteed to end at the bounce cap in separate coherence groups.
         uint pathPhaseHint = bounce >= maxBounces ? 2u : (bounce >= rrStart ? 1u : 0u);
         traceRadianceReordered(bounce == 0 ? CULL_PRIMARY : CULL_SECONDARY, ro, 0.0, rd, 10000.0,
-                               showCelestial, rayConeWidth, rayConeSpread, pathPhaseHint);
+                               showCelestial, medium.current.water, rayConeWidth, rayConeSpread,
+                               pathPhaseHint);
 #else
         traceRadiance(bounce == 0 ? CULL_PRIMARY : CULL_SECONDARY, ro, 0.0, rd, 10000.0,
-                      showCelestial, rayConeWidth, rayConeSpread);
+                      showCelestial, medium.current.water, rayConeWidth, rayConeSpread);
 #endif
 
         // First-bounce hit distance capture: the trace we just ran is the continuation hop whose
@@ -187,6 +204,25 @@ public float3 tracePath(PathSegment seg, uint2 pix, uint sampleIndex,
             // world.rmiss writes sky radiance (gradient + sun/moon disc + stars) into payload.albedo. The
             // packed show-celestial flag decides whether this path segment may see the bright disc.
             float3 sky = payload.albedo;
+            // A TLAS miss while still marked underwater did NOT hit the water interface (that is the
+            // dielectric hit path above). Treat it as an underwater environment miss instead of
+            // intersecting a horizontal plane with rd.y — which produced camera-centred equal-distance
+            // rings. The long water column is integrated, then converges to a dark blue far-water
+            // environment; the haze's source attenuation uses a fixed reference column, so an overhead
+            // block cannot alter its density.
+            float skyWaterDistance = clamp(worldPush.underwaterEffects.w, 0.0, 128.0);
+            if (medium.current.water && cameraSubmerged() && skyWaterDistance > 0.0) {
+                float waterColumnDistance = skyWaterDistance;
+                float3 waterColumnScatter = waterHazeScattering(float3(0.0, 1.0, 0.0),
+                        waterColumnDistance);
+                float hazeStrength = clamp(worldPush.underwaterEffects.x, 0.0, 2.0);
+                float fallbackOpticalDepth = waterColumnDistance * 0.075 * hazeStrength;
+                float fallbackOpacity = 1.0 - exp(-max(fallbackOpticalDepth, 0.0));
+                float blueBias = saturate(worldPush.underwaterEffects.y);
+                float3 farWaterBlue = lerp(float3(0.010, 0.035, 0.095),
+                                           float3(0.008, 0.045, 0.145), blueBias);
+                sky = waterColumnScatter + farWaterBlue * fallbackOpacity;
+            }
             // Fog between here and the sky: a ray that misses runs through the whole air column,
             // so the sky it carries — sun and moon discs included, which is half of what makes
             // god rays read — arrives dimmed by the column's transmittance and lifted by its
@@ -219,7 +255,21 @@ public float3 tracePath(PathSegment seg, uint2 pix, uint sampleIndex,
         // lies within it), shifting the transmitted radiance with distance. Air's extinction is zero, so
         // the ordinary case costs one comparison.
         if (any(medium.current.extinction > 0.0)) {
-            throughput *= exp(-medium.current.extinction * payload.hitT);
+            float3 mediumTransmittance = exp(-max(medium.current.extinction * max(payload.hitT, 0.0),
+                    float3(0.0, 0.0, 0.0)));
+            // Add only light that the current celestial source can actually provide. The factor is
+            // bounded and blue-biased; because it is proportional to lightRadiance, this term fades
+            // into darkness at night instead of creating the old glowing blue water.
+            if (medium.current.water && cameraSubmerged()) {
+                float3 waterFogContribution = waterHazeScattering(rd, payload.hitT);
+                L += throughput * waterFogContribution;
+                if (channel == 2) {
+                    Lspec += throughput * waterFogContribution;
+                } else {
+                    Ldiff += throughput * waterFogContribution;
+                }
+            }
+            throughput *= mediumTransmittance;
         }
 
         // ---- Volumetric fog crossed on the way to this hit (see fog.slang).
@@ -308,7 +358,8 @@ public float3 tracePath(PathSegment seg, uint2 pix, uint sampleIndex,
             if (isWater && waterWaves) {
                 float waterFootprint = rayConeWidth / max(abs(dot(-rd, geometricNormal)), 0.2);
                 waterSurf = evaluateWaterWaves(ro, rd, payload.hitT, geometricNormal,
-                        worldPush.waterParams.w, worldPush.waterParams.w, waterFootprint);
+                        worldPush.waterParams.w, worldPush.waterParams.w, waterFootprint,
+                        payloadWaterRainExposed());
                 n = waterSurf.normal;
                 hitPos = waterSurf.position;
             }
@@ -377,28 +428,68 @@ public float3 tracePath(PathSegment seg, uint2 pix, uint sampleIndex,
             }
             float3 albedo = payload.albedo;
 
-            // Rain/snow sheets: deliberately UNLIT. The full particle light path below (sun NEE with a
-            // shadow ray, RIS block lights, a diffuse bounce off the sheet) read as blotchy, blown-out
-            // streaks on something the eye expects to be a soft translucent veil — vanilla's own weather
-            // pass is effectively unlit too (a lightmap-brightened blend, no per-drop lighting). So the
-            // sheet contributes its texel colour scaled only by the day/night curve, and the path ENDS
-            // here: rays that passed the stochastic cutout already carried the see-through share, and
-            // bouncing off rain would add the scene's light right back into it — the exact thing being
-            // removed. The sheets stay real geometry in the BLAS: terrain still occludes them, the
-            // heightmap clip still holds, they just stop participating in lighting.
+            // Rain/snow sheets are not opaque blue panels: alpha is stochastic coverage in any-hit,
+            // and the accepted sample behaves like a thin refractive droplet. Add only a very faint,
+            // mostly-neutral glint, bend the continuation ray slightly, and keep tracing the
+            // background. The next iteration uses CULL_SECONDARY so the same camera-facing sheet
+            // cannot be hit again.
             if ((payload.flags & PAYLOAD_WEATHER) != 0u) {
-                // Calibrated against feedback from in-game: the first pass (0.35..1.0) read inverted —
-                // far too bright against the near-black night sky and too dark against daylight. The
-                // sheet now nearly vanishes at night and sits well above the texture's own mid-grey in
-                // the day, so streaks read as a light veil over the bright sky.
-                float weatherSheet = lerp(0.12, 1.9, worldPush.sunDir.w);
-                L += throughput * albedo * weatherSheet;
+                float coverage = saturate(payloadRoughness());
+                // Ignore vanilla's blue weather tint: the sprite texture supplies coverage, not a
+                // coloured material. Keep only a restrained near-white reflection so drops read as
+                // clear water rather than opaque blue pixels; background transport stays refracted.
+                float3 dropTint = float3(0.92, 0.96, 0.98);
+                float weatherSheet = lerp(0.0025, 0.018, saturate(worldPush.sunDir.w));
+                float3 glint = throughput * dropTint * weatherSheet * coverage;
+                L += glint;
                 if (channel == 2) {
-                    Lspec += throughput * albedo * weatherSheet;
+                    Lspec += glint;
                 } else {
-                    Ldiff += throughput * albedo * weatherSheet;
+                    Ldiff += glint;
                 }
-                break;
+
+                // Procedural micro-lens displacement; the irregular phase moves with world position
+                // and the shared animation clock, avoiding the fixed blue streak look of vanilla
+                // sheets. A thin-lens approximation of a water/glass droplet: surface curvature varies
+                // across the streak, so the continuation ray bends and displaces the background.
+                float3 dropPos = hitPos + worldPush.camOffset;
+                float phaseX = dot(dropPos, float3(12.9898, 78.233, 37.719))
+                        + worldPush.waterParams.w * 5.7;
+                float phaseZ = dot(dropPos, float3(39.346, 11.135, 83.155))
+                        - worldPush.waterParams.w * 4.3;
+                float refractStrength = clamp(worldPush.rainEffects.z, 0.0, 2.0);
+                float3 sheetNormal = normalize(n);
+                float3 tangent = normalize(abs(sheetNormal.y) < 0.92
+                        ? cross(sheetNormal, float3(0.0, 1.0, 0.0))
+                        : cross(sheetNormal, float3(1.0, 0.0, 0.0)));
+                float3 bitangent = normalize(cross(sheetNormal, tangent));
+                float2 lensSlope = float2(sin(phaseX), cos(phaseZ))
+                        * (0.16 * refractStrength * (0.45 + 0.55 * coverage));
+                // Enter water (IOR 1.333), then leave through a slightly different curved normal. Two
+                // Snell refractions create genuine direction-dependent lensing rather than just alpha.
+                float3 entryNormal = normalize(sheetNormal + tangent * lensSlope.x + bitangent * lensSlope.y);
+                if (dot(rd, entryNormal) > 0.0) entryNormal = -entryNormal;
+                float3 insideDirection = refract(normalize(rd), entryNormal, 1.0 / 1.333);
+                if (dot(insideDirection, insideDirection) < 1.0e-6) {
+                    insideDirection = reflect(normalize(rd), entryNormal);
+                }
+                float3 exitNormal = normalize(-entryNormal + tangent * lensSlope.y * 0.35
+                        - bitangent * lensSlope.x * 0.35);
+                if (dot(insideDirection, exitNormal) > 0.0) exitNormal = -exitNormal;
+                float3 refractedDirection = refract(insideDirection, exitNormal, 1.333);
+                if (dot(refractedDirection, refractedDirection) < 1.0e-6) {
+                    refractedDirection = reflect(insideDirection, exitNormal);
+                }
+                // A small macro displacement supplements Snell's law because the source is a thin
+                // camera-facing vanilla billboard, not a closed spherical droplet.
+                float bendX = sin(phaseX) * 0.026 * refractStrength * (0.45 + 0.55 * coverage);
+                float bendZ = cos(phaseZ) * 0.026 * refractStrength * (0.45 + 0.55 * coverage);
+                rd = normalize(refractedDirection + float3(bendX,
+                        0.009 * refractStrength * sin(phaseX + phaseZ), bendZ));
+                throughput *= 1.0 - 0.035 * coverage * saturate(refractStrength);
+                ro = hitPos + rd * 0.035;
+                showCelestial = false;
+                continue;
             }
 
             float3 lightDir = worldPush.lightDir.xyz;
@@ -438,17 +529,18 @@ public float3 tracePath(PathSegment seg, uint2 pix, uint sampleIndex,
 
             // Same analytic held-item light as surfaces. Billboards are two-sided receivers; bias
             // the shadow origin toward the light's side, exactly like the celestial NEE above does.
-            if (worldPush.handLight.w > 0.0) {
+            if (worldPush.handLight.w > 0.0 || worldPush.lightning.w > 0.0) {
                 float3 toHand = worldPush.handLight.xyz - hitPos;
                 float3 handOrigin = hitPos + (dot(n, toHand) >= 0.0 ? n : -n) * SURF_BIAS;
-                float3 particleHandIrr = handLightIrradiance(handOrigin, hitPos, n, true);
-                if (max(particleHandIrr.x, max(particleHandIrr.y, particleHandIrr.z)) > 0.0) {
-                    float3 particleHand = throughput * albedo * INV_PI * particleHandIrr;
-                    L += particleHand;
+                float3 particleSpecialIrr = handLightIrradiance(handOrigin, hitPos, n, true)
+                        + lightningIrradiance(handOrigin, hitPos, n, true);
+                if (max(particleSpecialIrr.x, max(particleSpecialIrr.y, particleSpecialIrr.z)) > 0.0) {
+                    float3 particleSpecial = throughput * albedo * INV_PI * particleSpecialIrr;
+                    L += particleSpecial;
                     if (channel == 2) {
-                        Lspec += particleHand;
+                        Lspec += particleSpecial;
                     } else {
-                        Ldiff += particleHand;
+                        Ldiff += particleSpecial;
                     }
                 }
             }
@@ -705,14 +797,15 @@ public float3 tracePath(PathSegment seg, uint2 pix, uint sampleIndex,
         // a torch in hand would barely brighten the blocks in front of it. Lambertian only; the
         // flame itself still gathers as ordinary emissive geometry on direct hit. Two-sided for
         // dynamic entities, mirroring the celestial NDL convention above.
-        float3 handIrr = handLightIrradiance(p, hitPos, n, isDynamicEntityEarly);
-        if (max(handIrr.x, max(handIrr.y, handIrr.z)) > 0.0) {
-            float3 handNee = throughput * diffAlb * INV_PI * handIrr;
-            L += handNee;
+        float3 specialIrr = handLightIrradiance(p, hitPos, n, isDynamicEntityEarly)
+                + lightningIrradiance(p, hitPos, n, isDynamicEntityEarly);
+        if (max(specialIrr.x, max(specialIrr.y, specialIrr.z)) > 0.0) {
+            float3 specialNee = throughput * diffAlb * INV_PI * specialIrr;
+            L += specialNee;
             if (channel == 2) {
-                Lspec += handNee;
+                Lspec += specialNee;
             } else {
-                Ldiff += handNee;
+                Ldiff += specialNee;
             }
         }
 

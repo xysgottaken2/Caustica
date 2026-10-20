@@ -45,6 +45,54 @@ uint materialEmissionSource(MaterialHeader header, float emission) {
 // tracer already computes its own AO from sky-visibility rays (avoid double-darkening).
 static const float NORMAL_AO_STRENGTH = 0.5;
 
+// World-anchored raindrop rings for wet solid terrain. These are much smaller than the water-body
+// ripples: each impact only perturbs the shading normal, so the ground reads as scattered little
+// splashes catching the sky rather than as a displaced, wobbly block mesh.
+float groundRippleHash(float2 p) {
+    float3 q = frac(float3(p.x, 19.19, p.y) * 0.1031);
+    q += dot(q, q.yzx + 33.33);
+    return frac((q.x + q.y) * q.z);
+}
+
+float2 groundRainRippleGrad(float2 worldXZ, float timeSeconds, float rain, float footprint) {
+    float strength = smoothstep(0.01, 0.24, saturate(rain))
+            * (1.0 - smoothstep(0.16, 1.10, max(footprint, 0.0)));
+    if (strength <= 1.0e-4) return float2(0.0, 0.0);
+
+    static const float CELL = 0.55;
+    static const float LIFE = 0.60;
+    static const float SPEED = 0.46;
+    static const float WIDTH = 0.038;
+    static const float WAVE = 64.0;
+    static const float AMPLITUDE = 0.0022;
+    float2 baseCell = floor(worldXZ / CELL);
+    float2 gradient = float2(0.0, 0.0);
+    [unroll]
+    for (int z = -1; z <= 1; ++z) {
+        [unroll]
+        for (int x = -1; x <= 1; ++x) {
+            float2 cell = baseCell + float2(float(x), float(z));
+            float h0 = groundRippleHash(cell + float2(11.7, 3.1));
+            float h1 = groundRippleHash(cell + float2(37.2, 9.2));
+            float h2 = groundRippleHash(cell + float2(73.4, 2.7));
+            float2 impact = (cell + float2(0.15 + 0.70 * h0, 0.15 + 0.70 * h1)) * CELL;
+            float age = frac(timeSeconds / LIFE + h2) * LIFE;
+            float2 delta = worldXZ - impact;
+            float radius = length(delta);
+            if (radius < 1.0e-3) continue;
+            float ringDistance = radius - age * SPEED;
+            float ringUnit = ringDistance / WIDTH;
+            if (abs(ringUnit) > 2.5) continue;
+            float envelope = exp(-0.5 * ringUnit * ringUnit) * exp(-1.25 * age);
+            float phase = ringDistance * WAVE;
+            float slope = AMPLITUDE * envelope
+                    * (-sin(phase) * WAVE - cos(phase) * ringDistance / (WIDTH * WIDTH));
+            gradient += slope * (delta / radius);
+        }
+    }
+    return gradient * strength;
+}
+
 static const float RAY_CONE_MIN_WIDTH = 1.0e-5;
 static const float RAY_CONE_MIN_TEXEL_FOOTPRINT = 1.0e-4;
 static const float RAY_CONE_MAX_LOD = 12.0;
@@ -600,7 +648,14 @@ void main(inout Payload payload, in BuiltInTriangleIntersectionAttributes attr) 
         if (dot(pn, WorldRayDirection()) > 0.0) {
             pn = -pn;
         }
-        payload.albedo = half3(srgbToLinear(entityAlbedoTex[NonUniformResourceIndex(pslot)].SampleLevel(puv, particleLod).rgb) * pr.tint.rgb);
+        float4 particleTexel = entityAlbedoTex[NonUniformResourceIndex(pslot)].SampleLevel(puv, particleLod);
+        bool weatherSheet = (pr.flags & PRIM_WEATHER) != 0u;
+        // Rain/snow columns and splash billboards are clear-water droplets, not blue paint: neutral
+        // near-white albedo, with the sprite's alpha (times the capture coverage) acting as coverage.
+        payload.albedo = weatherSheet
+                ? half3(0.90h, 0.94h, 0.97h)
+                : half3(srgbToLinear(particleTexel.rgb) * pr.tint.rgb);
+        float weatherCoverage = clamp(asfloat(pr.aux0) * particleTexel.a, 0.0, 1.0);
         payload.normal = half3(pn);
         payload.hitT = RayTCurrent();
         // Per-particle motion vector: interpolate the captured per-vertex displacement (uniform across
@@ -613,11 +668,14 @@ void main(inout Payload payload, in BuiltInTriangleIntersectionAttributes attr) 
             payload.motionPrev = half3(g.rigidDisp.xyz);
         }
         payload.f0 = half3(0.0h, 0.0h, 0.0h);
-        payloadSetPacked(payload, MATERIAL_PARTICLE, 1.0, 0.0, 0.0, 0.0,
+        // The particle roughness lane is otherwise unused. Weather carries the same alpha coverage the
+        // any-hit gate applied, so raygen can make accepted hits faint and transmit the scene behind.
+        float particleCoverage = weatherSheet ? weatherCoverage : 1.0;
+        payloadSetPacked(payload, MATERIAL_PARTICLE, particleCoverage, 0.0, 0.0, 0.0,
                 1.0, 0.0, EMISSION_SOURCE_NONE);
-        // Rain/snow sheets are tagged at capture (RtWeatherCapture) and shaded unlit in raygen — the
-        // path tracer's light response was visibly breaking them (see PRIM_WEATHER).
-        if ((pr.flags & PRIM_WEATHER) != 0u) {
+        // Rain/snow sheets are tagged at capture (RtWeatherCapture) and shaded as translucent refractive
+        // droplets in raygen — the path tracer's light response was visibly breaking them.
+        if (weatherSheet) {
             payload.flags |= PAYLOAD_WEATHER;
         }
         return;
@@ -812,6 +870,10 @@ void main(inout Payload payload, in BuiltInTriangleIntersectionAttributes attr) 
         payloadSetPacked(payload, MATERIAL_WATER, materialHeader.params.x, 0.0, 0.0, 0.0,
                 materialHeader.params.z, materialHeader.params.w, EMISSION_SOURCE_NONE);
         payloadSetDielectric(payload, MATERIAL_WATER, entering);
+        // Only water whose column is open to the sky gets rain-impact rings (see the mesher's bit).
+        if ((pr.flags & TERRAIN_PRIM_RAIN_EXPOSED) != 0u) {
+            payload.flags |= PAYLOAD_WATER_RAIN_EXPOSED;
+        }
         return;
     }
 
@@ -943,9 +1005,59 @@ void main(inout Payload payload, in BuiltInTriangleIntersectionAttributes attr) 
     float ew = pr.normal.w;
     bool nonSolid = ew >= 1.5;
     float emission = nonSolid ? ew - 2.0 : ew; // heuristic emission source (block light level)
+    // Keep the wetness mask tied to the geometric face, not the LabPBR normal map: a flat top face
+    // should get wet even when its texture has a strongly perturbed normal. The per-primitive distance
+    // in aux0 measures how far this block is from the nearest column where rain reaches the same
+    // height; a live radius turns that distance into a smooth sheltered-to-exposed transition. SOLID
+    // terrain and alpha-tested foliage can be wet, while thin/translucent glass and ice stay out.
+    WorldPush framePush = ConstPtr<WorldPush>(pc.worldPushAddr)[0];
+    float wetFaceUp = smoothstep(0.45, 0.85, n.y);
+    float wetness = 0.0;
+    float rainAmount = saturate(framePush.weather.x);
+    float2 groundRippleGrad = float2(0.0, 0.0);
+    bool rainExposed = (terrainFlags & TERRAIN_PRIM_RAIN_EXPOSED) != 0u;
+    bool cutoutSurface = (terrainFlags & TERRAIN_PRIM_CUTOUT) != 0u;
+    bool translucentSurface = (terrainFlags & TERRAIN_PRIM_TRANSLUCENT) != 0u;
+    bool rainWettable = (!nonSolid || cutoutSurface) && !translucentSurface;
+    float transitionDistance = clamp(framePush.surfaceWetness.w, 0.0, 12.0);
+    float shelterDistance = max(asfloat(pr.aux0), 0.0);
+    float rainReach = transitionDistance > 0.001
+            ? 1.0 - smoothstep(0.0, transitionDistance, shelterDistance)
+            : (rainExposed ? 1.0 : 0.0);
+    if (rainWettable && wetFaceUp > 0.0 && rainReach > 0.0) {
+        wetness = saturate(framePush.surfaceWetness.x) * wetFaceUp * rainReach;
+        // Ground ripple amplitude inherits the same smooth shelter mask through `wetness` below. It
+        // evaluates just inside the shelter boundary too, so there is no second hard ripple cutoff.
+        if (!nonSolid && rainAmount > 0.01 && framePush.surfaceWetness.z > 0.001) {
+            float3 surfacePos = WorldRayOrigin() + WorldRayDirection() * RayTCurrent();
+            // Add the rebased terrain origin modulo the same period used by water waves so the impact
+            // pattern remains pinned when the terrain origin is re-based as the player moves.
+            float2 worldXZ = surfacePos.xz + framePush.waterAnchor.xy;
+            groundRippleGrad = groundRainRippleGrad(worldXZ, framePush.waterParams.w, rainAmount,
+                    rayConeHitWidth(rayCone)) * clamp(framePush.surfaceWetness.z, 0.0, 2.0);
+        }
+    }
     Surface surface = evaluateMaterial(materialHeader, uv, blockLod, float3(payload.albedo), n,
             tp0, tp1, tp2, uv0, uv1, uv2, vdir,
             materialHeader.params.x, materialHeader.params.y, emission, nonSolid);
+    // Rain creates a continuous water film. The much lower GGX alpha gives wet terrain sharp, clearly
+    // visible sky/sun reflections; blending the mapped normal back toward the geometric face keeps dry
+    // texture relief from making the wet highlight look chalky. This is a stylized single-layer
+    // approximation (not a separate water volume), limited to upward-facing solid faces.
+    if (wetness > 0.0) {
+        float gloss = saturate(framePush.surfaceWetness.y);
+        float roughnessScale = lerp(0.30, 0.035, gloss);
+        float wetRoughness = clamp(surface.roughness * roughnessScale,
+                lerp(0.045, 0.006, gloss), lerp(0.10, 0.012, gloss));
+        surface.roughness = lerp(surface.roughness, wetRoughness, wetness);
+        surface.normal = normalize(lerp(surface.normal, n, wetness * lerp(0.25, 0.90, gloss))
+                + float3(-groundRippleGrad.x, 0.0, -groundRippleGrad.y) * (wetness * 4.0));
+        // The base material still contributes its colour, but a rain-darkened surface makes the gloss
+        // easier to read. A slightly stronger dielectric response helps the thin-film sheen remain
+        // visible across earthy Minecraft materials.
+        surface.f0 = lerp(surface.f0, float3(0.055, 0.055, 0.055), wetness);
+        payload.albedo *= half(lerp(1.0, 0.76, wetness));
+    }
     n = surface.normal;
     payload.albedo *= half(surface.ao);
     payload.albedo = half3(applyBreaking(float3(payload.albedo), rayCone, WorldRayOrigin(), WorldRayDirection(), RayTCurrent(), n));

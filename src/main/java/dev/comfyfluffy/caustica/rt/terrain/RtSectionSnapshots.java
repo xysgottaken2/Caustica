@@ -17,6 +17,7 @@ import net.minecraft.world.level.chunk.LevelChunk;
 import net.minecraft.world.level.chunk.LevelChunkSection;
 import net.minecraft.world.level.chunk.PalettedContainer;
 import net.minecraft.world.level.levelgen.DebugLevelSource;
+import net.minecraft.world.level.levelgen.Heightmap;
 import net.minecraft.world.level.lighting.LevelLightEngine;
 import net.minecraft.world.level.material.FluidState;
 import net.minecraft.world.level.biome.Biome;
@@ -42,10 +43,25 @@ final class RtSectionSnapshots {
     // Bounds worst-case cache memory to ~16 MB (palette copies run ~2-4 KB). Dispatch is column-coherent
     // nearest-first, so the live working set (in-flight neighbourhoods) is far smaller than this.
     private static final int MAX_ENTRIES = 4096;
+    // Radius of the heightmap apron around a chunk. It matches the largest live wetness-transition
+    // setting, so a sheltered surface can blend toward a rain-exposed column across a chunk border.
+    private static final int RAIN_TRANSITION_RADIUS = 12;
+    /**
+     * Shelter distance for geometry that has no snapshot (Distant Horizons LODs, non-Region meshers).
+     * One block past the largest selectable transition radius, so the shader's smoothstep resolves it
+     * to exactly zero and such terrain never picks up a wet film it cannot justify.
+     */
+    static final float RAIN_SHELTER_FALLBACK = RAIN_TRANSITION_RADIUS + 1.0f;
+    private static final int RAIN_MAP_SIZE = 16 + 2 * RAIN_TRANSITION_RADIUS;
+    private static final int MAX_RAIN_HEIGHTMAPS = 256;
     /** Cache/region marker for a section with no copyable states (all air, unloaded, or out of range). */
     private static final Object AIR = new Object();
 
     private final Long2ObjectLinkedOpenHashMap<Object> cache = new Long2ObjectLinkedOpenHashMap<>();
+    // One immutable heightmap snapshot per center chunk, shared by every vertical section build. This
+    // avoids repeating the neighbour-height queries for each of a chunk's up to 24 sections.
+    private final Long2ObjectLinkedOpenHashMap<int[]> rainHeightmapCache =
+            new Long2ObjectLinkedOpenHashMap<>();
 
     /** Snapshot the 3×3×3 neighbourhood of a section, reusing cached palette copies (render thread). */
     Region createRegion(ClientLevel level, int scx, int scy, int scz) {
@@ -57,16 +73,48 @@ final class RtSectionSnapshots {
                 }
             }
         }
-        return new Region(level, scx - 1, scy - 1, scz - 1, sections);
+        return new Region(level, scx - 1, scy - 1, scz - 1, scx, scz, sections,
+                rainHeightmap(level, scx, scz));
     }
 
     /** Drop a stale entry (edited section, or its column unloaded / left the window). Render thread. */
     void invalidate(long sectionKey) {
         cache.remove(sectionKey);
+        int centerX = (int) (sectionKey << 38 >> 38);
+        int centerZ = (int) (sectionKey << 12 >> 38);
+        // Heightmap snapshots include a 12-block apron, so a changed column can affect shelter
+        // distances in its own chunk and the eight neighbouring center chunks.
+        for (int dz = -1; dz <= 1; dz++) {
+            for (int dx = -1; dx <= 1; dx++) {
+                rainHeightmapCache.remove(RtTerrain.sectionKey(centerX + dx, 0, centerZ + dz));
+            }
+        }
     }
 
     void clear() {
         cache.clear();
+        rainHeightmapCache.clear();
+    }
+
+    private int[] rainHeightmap(ClientLevel level, int centerSectionX, int centerSectionZ) {
+        long key = RtTerrain.sectionKey(centerSectionX, 0, centerSectionZ);
+        int[] cached = rainHeightmapCache.getAndMoveToLast(key);
+        if (cached != null) {
+            return cached;
+        }
+        int[] snapshot = new int[RAIN_MAP_SIZE * RAIN_MAP_SIZE];
+        for (int z = -RAIN_TRANSITION_RADIUS; z < 16 + RAIN_TRANSITION_RADIUS; z++) {
+            for (int x = -RAIN_TRANSITION_RADIUS; x < 16 + RAIN_TRANSITION_RADIUS; x++) {
+                snapshot[(z + RAIN_TRANSITION_RADIUS) * RAIN_MAP_SIZE
+                        + x + RAIN_TRANSITION_RADIUS] = level.getHeight(Heightmap.Types.MOTION_BLOCKING,
+                        (centerSectionX << 4) + x, (centerSectionZ << 4) + z);
+            }
+        }
+        rainHeightmapCache.putAndMoveToLast(key, snapshot);
+        while (rainHeightmapCache.size() > MAX_RAIN_HEIGHTMAPS) {
+            rainHeightmapCache.removeFirst();
+        }
+        return snapshot;
     }
 
     private Object section(ClientLevel level, int scx, int scy, int scz) {
@@ -116,16 +164,134 @@ final class RtSectionSnapshots {
         private final CardinalLighting cardinalLighting;
         private final LevelLightEngine lightEngine;
         private final boolean debug;
+        private final int centerMinBlockX;
+        private final int centerMinBlockY;
+        private final int centerMinBlockZ;
+        // Heightmap top per column, including a 12-block apron so sheltered surfaces can blend from the
+        // nearest rain-exposed column even when that column sits across a chunk boundary.
+        private static final float RAIN_DISTANCE_INFINITY = 1.0e4f;
+        private static final float RAIN_DISTANCE_DIAGONAL = 1.41421356f;
+        private static final float RAIN_DISTANCE_CUTOFF = RAIN_TRANSITION_RADIUS + 1.0f;
+        private final int[] motionBlockingTopY;
+        // One baked shelter-distance value per block in the target section. The shader applies the live
+        // transition-distance slider to these values, so dragging the setting needs no mesh rebuild.
+        private final float[] rainShelterDistances = new float[16 * 16 * 16];
 
-        Region(ClientLevel level, int minSectionX, int minSectionY, int minSectionZ, Object[] sections) {
+        Region(ClientLevel level, int minSectionX, int minSectionY, int minSectionZ,
+               int centerSectionX, int centerSectionZ, Object[] sections, int[] motionBlockingTopY) {
             this.level = level;
             this.minSectionX = minSectionX;
             this.minSectionY = minSectionY;
             this.minSectionZ = minSectionZ;
             this.sections = sections;
+            this.motionBlockingTopY = motionBlockingTopY;
             this.cardinalLighting = level.cardinalLighting();
             this.lightEngine = level.getLightEngine();
             this.debug = level.isDebug();
+            this.centerMinBlockX = centerSectionX << 4;
+            this.centerMinBlockY = (minSectionY + 1) << 4;
+            this.centerMinBlockZ = centerSectionZ << 4;
+            bakeRainShelterDistances();
+        }
+
+        /** True for the topmost motion-blocking block in this column, which vanilla rain reaches. */
+        boolean isRainExposed(BlockPos pos) {
+            if (debug) {
+                return false;
+            }
+            int x = pos.getX() - centerMinBlockX;
+            int z = pos.getZ() - centerMinBlockZ;
+            if (x < 0 || x >= 16 || z < 0 || z >= 16) {
+                return false;
+            }
+            int mapIndex = (z + RAIN_TRANSITION_RADIUS) * RAIN_MAP_SIZE + x + RAIN_TRANSITION_RADIUS;
+            return pos.getY() >= motionBlockingTopY[mapIndex] - 1;
+        }
+
+        /**
+         * Horizontal distance to the nearest column where rain reaches this surface height. This is
+         * independent of the slider: the shader turns distance into a smooth wet-to-dry transition
+         * using the live radius configured by the user. A value beyond the largest radius means dry.
+         */
+        float rainShelterDistance(BlockPos pos) {
+            if (debug) {
+                return RAIN_DISTANCE_CUTOFF;
+            }
+            int x = pos.getX() - centerMinBlockX;
+            int y = pos.getY() - centerMinBlockY;
+            int z = pos.getZ() - centerMinBlockZ;
+            if (x < 0 || x >= 16 || y < 0 || y >= 16 || z < 0 || z >= 16) {
+                return RAIN_DISTANCE_CUTOFF;
+            }
+            return rainShelterDistances[y * 16 * 16 + z * 16 + x];
+        }
+
+        /** Builds a chamfer-distance field for each Y slice of the section on the render thread. */
+        private void bakeRainShelterDistances() {
+            if (debug) {
+                java.util.Arrays.fill(rainShelterDistances, RAIN_DISTANCE_CUTOFF);
+                return;
+            }
+            float[] distance = new float[RAIN_MAP_SIZE * RAIN_MAP_SIZE];
+            for (int localY = 0; localY < 16; localY++) {
+                int surfaceY = centerMinBlockY + localY;
+                for (int i = 0; i < distance.length; i++) {
+                    // Heightmap values point just above the highest motion-blocking block. This is
+                    // equivalent to the direct-exposure test blockY >= height - 1.
+                    distance[i] = surfaceY >= motionBlockingTopY[i] - 1
+                            ? 0.0f : RAIN_DISTANCE_INFINITY;
+                }
+
+                // Two-pass 8-neighbour chamfer transform approximates Euclidean distance without a
+                // per-block scan. The 12-block border captures neighbouring chunks for all slider values.
+                for (int z = 0; z < RAIN_MAP_SIZE; z++) {
+                    for (int x = 0; x < RAIN_MAP_SIZE; x++) {
+                        int i = z * RAIN_MAP_SIZE + x;
+                        float d = distance[i];
+                        if (x > 0) {
+                            d = Math.min(d, distance[i - 1] + 1.0f);
+                        }
+                        if (z > 0) {
+                            d = Math.min(d, distance[i - RAIN_MAP_SIZE] + 1.0f);
+                            if (x > 0) {
+                                d = Math.min(d, distance[i - RAIN_MAP_SIZE - 1] + RAIN_DISTANCE_DIAGONAL);
+                            }
+                            if (x + 1 < RAIN_MAP_SIZE) {
+                                d = Math.min(d, distance[i - RAIN_MAP_SIZE + 1] + RAIN_DISTANCE_DIAGONAL);
+                            }
+                        }
+                        distance[i] = d;
+                    }
+                }
+                for (int z = RAIN_MAP_SIZE - 1; z >= 0; z--) {
+                    for (int x = RAIN_MAP_SIZE - 1; x >= 0; x--) {
+                        int i = z * RAIN_MAP_SIZE + x;
+                        float d = distance[i];
+                        if (x + 1 < RAIN_MAP_SIZE) {
+                            d = Math.min(d, distance[i + 1] + 1.0f);
+                        }
+                        if (z + 1 < RAIN_MAP_SIZE) {
+                            d = Math.min(d, distance[i + RAIN_MAP_SIZE] + 1.0f);
+                            if (x + 1 < RAIN_MAP_SIZE) {
+                                d = Math.min(d, distance[i + RAIN_MAP_SIZE + 1] + RAIN_DISTANCE_DIAGONAL);
+                            }
+                            if (x > 0) {
+                                d = Math.min(d, distance[i + RAIN_MAP_SIZE - 1] + RAIN_DISTANCE_DIAGONAL);
+                            }
+                        }
+                        distance[i] = d;
+                    }
+                }
+
+                for (int z = 0; z < 16; z++) {
+                    for (int x = 0; x < 16; x++) {
+                        float d = distance[(z + RAIN_TRANSITION_RADIUS) * RAIN_MAP_SIZE
+                                + x + RAIN_TRANSITION_RADIUS];
+                        rainShelterDistances[localY * 16 * 16 + z * 16 + x] =
+                                d <= RAIN_TRANSITION_RADIUS ? d : RAIN_DISTANCE_CUTOFF;
+                    }
+                }
+            }
         }
 
         @Override

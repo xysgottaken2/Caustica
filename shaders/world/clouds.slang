@@ -122,6 +122,10 @@ public static const float CLOUD_LOBE_Y_STRETCH = 1.5;
 // configured thickness on top of its own base.
 public static const float CLOUD_BASE_JITTER_BLOCKS = 4.0;
 
+// Extra formation height a full thunderstorm adds, in blocks. Must stay in lock-step with
+// RtComposite.CLOUD_STORM_GROWTH_BLOCKS, which grows the marched slab by the same amount.
+public static const float CLOUD_STORM_GROWTH_BLOCKS = 18.0;
+
 // Shape isosurface. CLOUD_ISO_BASE is the noise value that becomes cloud at 50% coverage; coverage and
 // the cloud region's own core/edge gradient lower it (so a dense core is fat and its outskirts thin),
 // the belly term lowers it around the lower-middle of a formation so each mass swells outward there,
@@ -428,6 +432,22 @@ bool cloudCellOccupied(WorldPush push, int2 cell) {
 }
 
 /**
+ * Effective weather fill: the CPU-resolved overcast amount (cloudColor.w) capped by the rain-cloud
+ * response multiplier (rainEffects.w). A disabled response pushes 0, so rain leaves the deck exactly
+ * as the player authored it. Both cloud styles and the shadow query read this one function, so the
+ * visible deck and the shadow it casts can never disagree about how overcast the sky is.
+ */
+public float cloudWeatherFill(WorldPush push) {
+    return clamp(push.cloudColor.w, 0.0, 1.0) * clamp(push.rainEffects.w, 0.0, 1.0);
+}
+
+/** 0..1 storm severity: a smoothstep of the effective fill, used for extra thickening and darkening. */
+public float cloudStormAmount(WorldPush push) {
+    float fill = cloudWeatherFill(push);
+    return fill * fill * (3.0 - 2.0 * fill);
+}
+
+/**
  * Coverage resolved into a 0..1 "how much cloud is here" for the current style.
  *
  * The two lanes it reads: push.clouds.x is the PLAYER coverage (the slider: the fraction of sky the
@@ -459,7 +479,7 @@ bool cloudCellOccupied(WorldPush push, int2 cell) {
  */
 public float cloudCoverage(WorldPush push, float2 samplePos) {
     float retain = clamp(push.clouds.x, 0.0, 1.0);
-    float fill = clamp(push.cloudColor.w, 0.0, 1.0);
+    float fill = cloudWeatherFill(push);
     if (cloudStyle(push) == CLOUD_STYLE_CLASSIC) {
         if (push.cloudCellsAddr == 0u) {
             float merged = retain + (1.0 - retain) * fill;
@@ -612,6 +632,13 @@ public float cloudSunShadow(WorldPush push, float3 pointRel, float3 lightDir) {
  * transmittance, dim under the weather attenuation, and go to a dark sky-lit grey at night when the
  * moon takes over. Hand-picking a cloud colour is what makes cloud layers look pasted on.
  */
+// A storm deck is darker as well as denser: the base albedo loses up to ~38% of its value at full
+// storm. Vanilla's CLOUD_COLOR already carries part of the greying; this adds the contrast the cloud
+// body itself needs so a storm reads as a heavy lid instead of a bright white deck.
+public float3 cloudWeatherAlbedo(WorldPush push, float3 albedo) {
+    return albedo * (1.0 - 0.38 * cloudStormAmount(push));
+}
+
 float3 cloudRadianceClassic(WorldPush push, float faceLight, float3 albedo, float3 skyBehind) {
     float3 sunRadiance = push.lightRadiance.xyz;
     float3 lit = albedo * CLOUD_INV_PI * sunRadiance * faceLight;
@@ -786,8 +813,8 @@ CloudVolume cloudClassicBoxes(WorldPush push, float3 originRel, float3 dir, floa
     }
     // Authored colour: vanilla's own CLOUD_COLOR, already greyed by the game's weather resolve — this
     // is what fixes the white-in-rain deck without a hand-tuned ramp.
-    float3 radiance = cloudRadianceClassic(push, cloudClassicFaceTone(normal), push.cloudColor.xyz,
-                                           skyBehind);
+    float3 radiance = cloudRadianceClassic(push, cloudClassicFaceTone(normal),
+            cloudWeatherAlbedo(push, push.cloudColor.xyz), skyBehind);
     result.scatter = radiance * alpha;
     result.transmittance = 1.0 - alpha;
     return result;
@@ -849,7 +876,10 @@ float cloudFormationThickness(WorldPush push, float2 samplePos) {
     // thickness histogram is not bunched around the mean: a mix of shallow puffs and tall towers.
     float t = clamp((n - 0.28) * 2.5, 0.0, 1.0);
     t = t * t * (3.0 - 2.0 * t);
-    return lerp(minThickness, maxThickness, t);
+    // A storm grows every formation vertically as well as horizontally. This is the shader half of the
+    // pair: RtComposite.cloudState grows the bounding slab by the same amount (CLOUD_STORM_GROWTH_BLOCKS),
+    // so a taller formation still fits inside the marched volume.
+    return lerp(minThickness, maxThickness, t) + CLOUD_STORM_GROWTH_BLOCKS * cloudStormAmount(push);
 }
 
 float cloudFormationBase(float2 samplePos) {
@@ -916,7 +946,7 @@ float cloudVolumeDensity(WorldPush push, float2 samplePos, float yInDeck, float 
     // ---- 1. Weather region + the player's coverage and the weather fill, merged exactly like the flat
     // path and the shadow query so the visible deck and the shadow under it can never disagree.
     float retain = clamp(push.clouds.x, 0.0, 1.0);
-    float fill = clamp(push.cloudColor.w, 0.0, 1.0);
+    float fill = cloudWeatherFill(push);
     float coverage = retain + (1.0 - retain) * fill;
     if (coverage <= 0.0) {
         return 0.0;
@@ -996,6 +1026,9 @@ float cloudVolumeDensity(WorldPush push, float2 samplePos, float yInDeck, float 
         float erosion = carve * CLOUD_EROSION * detail * (1.0 - density);
         density = clamp((density - erosion) / max(1.0 - erosion, 1.0e-4), 0.0, 1.0);
     }
+    // Storm clouds are denser, not merely bigger: the same volume holds more water, so extinction per
+    // block rises with the storm lane. Bounded so a full storm still reads as cloud, never as rock.
+    density = clamp(density * (1.0 + 0.35 * cloudStormAmount(push)), 0.0, 1.0);
     return density;
 }
 
@@ -1188,7 +1221,7 @@ public CloudVolume cloudMarch(WorldPush push, float3 originRel, float3 dir, floa
             // Flat, vanilla-style face tone. Self-shadowing is deliberately damped (mixed only 40% in)
             // so cloud boxes keep the poster-flat look instead of developing soft volumetric gradients.
             float shade = lerp(1.0, exp(-opticalDepth * sigmaLight), 0.4);
-            inScatter = push.cloudColor.xyz * CLOUD_INV_PI
+            inScatter = cloudWeatherAlbedo(push, push.cloudColor.xyz) * CLOUD_INV_PI
                     * (sunRadiance * classicFace * shade * 3.0 + skyBehind * 1.4);
         } else {
             // ---- Volumetric lighting.
@@ -1205,7 +1238,7 @@ public CloudVolume cloudMarch(WorldPush push, float3 originRel, float3 dir, floa
             float powder = lerp(1.0, cloudPowder(density), CLOUD_POWDER_STRENGTH);
             float heightFraction = clamp(yInDeck / max(thickness, 1.0), 0.0, 1.0);
             float3 ambient = skyBehind * lerp(0.20, 0.55, smoothstep(0.0, 0.85, heightFraction));
-            inScatter = CLOUD_ALBEDO
+            inScatter = cloudWeatherAlbedo(push, CLOUD_ALBEDO)
                     * (sunRadiance * lightT * phase * powder * 4.0 + ambient);
         }
         // Energy-conserving accumulation: integrate in-scatter over the step's absorbed fraction.
@@ -1292,7 +1325,7 @@ public CloudVolume cloudSegment(WorldPush push, float3 originRel, float3 dir, fl
     }
     // The flat sheet keeps each style's look: the authored colour for classic, the volumetric albedo
     // for the volumetric style (whose field and shading are otherwise untouched).
-    float3 albedo = classic ? push.cloudColor.xyz : CLOUD_ALBEDO;
+    float3 albedo = cloudWeatherAlbedo(push, classic ? push.cloudColor.xyz : CLOUD_ALBEDO);
     float grazing = 1.0 - abs(dir.y);
     float faceLight = h.fromBelow ? 0.52 : 1.0;
     faceLight = lerp(faceLight, 0.78, grazing);

@@ -1,5 +1,7 @@
-// Participating media: the tint-to-extinction mappings and the depth-2 medium stack the dielectric
-// interface pushes and pops. Depends on core only.
+// Participating media: dielectric absorption and the depth-2 medium stack.
+// Underwater visibility combines Beer-Lambert extinction with blue-biased scattering. Ordinary
+// water-path scattering is sourced by the frame's actual sun/moon energy; a separate dark-blue
+// far-water environment is used only for unresolved underwater TLAS misses at chunk boundaries.
 
 // Per-channel Beer–Lambert extinction from a water body's biome tint (carried in payload.albedo for
 // water hits, or worldPush.waterParams.xyz for the camera's own biome when starting submerged). A blue ocean
@@ -16,7 +18,70 @@ public static const float3 WATER_ABSORB_FLOOR = float3(0.015, 0.010, 0.008);
 // slider gives gentle per-block dimming (exp(-0.4) ~= 67% at 0.1).
 public static const float WATER_OPACITY_EXTINCTION_MAX = 4.0;
 public float3 waterExtinctionBase(float3 tint) {
-    return WATER_ABSORB_FLOOR + WATER_DENSITY * (float3(1.0, 1.0, 1.0) - clamp(tint, 0.0, 1.0));
+    float3 biomeAbsorption = WATER_ABSORB_FLOOR
+            + WATER_DENSITY * (float3(1.0, 1.0, 1.0) - clamp(tint, 0.0, 1.0));
+    // The camera-submerged haze control targets short underwater visibility (a few blocks): red is
+    // removed fastest, then green, while blue survives longest. A separate, small source-coupled
+    // in-scatter term below lifts distant silhouettes toward the water colour in daylight, which reads
+    // as true fog instead of merely making distant objects black.
+    float submergedHaze = cameraSubmerged() ? clamp(worldPush.underwaterEffects.x, 0.0, 2.0) : 0.0;
+    float hazeTint = saturate(worldPush.underwaterEffects.y);
+    float3 hazeExtinction = lerp(float3(0.06, 0.06, 0.06),
+                                  float3(0.20, 0.15, 0.075), hazeTint);
+    return biomeAbsorption + hazeExtinction * submergedHaze;
+}
+
+// Scattered radiance accumulated along a submerged camera ray. The source brightness is taken from
+// the real celestial light, but it is reduced to a scalar before tinting so sunsets, biome water
+// colours, depth-dependent channel absorption, or nearby blocks cannot turn the haze yellow/brown.
+// The haze itself has a stable blue chromaticity at every underwater depth.
+public float3 waterHazeScattering(float3 rayDir, float segmentDistance) {
+    if (!cameraSubmerged() || worldPush.underwaterEffects.x <= 0.0 || segmentDistance <= 0.0)
+        return float3(0.0, 0.0, 0.0);
+
+    float3 rawLightDir = worldPush.lightDir.xyz;
+    float lightLengthSq = dot(rawLightDir, rawLightDir);
+    if (lightLengthSq <= 1.0e-6) return float3(0.0, 0.0, 0.0);
+    float3 lightDir = rawLightDir * rsqrt(lightLengthSq);
+    if (lightDir.y <= 0.005) return float3(0.0, 0.0, 0.0);
+
+    float3 lightRadiance = max(worldPush.lightRadiance.xyz, float3(0.0, 0.0, 0.0));
+    float lightEnergy = dot(lightRadiance, float3(0.2126, 0.7152, 0.0722));
+    if (lightEnergy <= 1.0e-5) return float3(0.0, 0.0, 0.0);
+
+    float hazeStrength = clamp(worldPush.underwaterEffects.x, 0.0, 2.0);
+    float blueTint = saturate(worldPush.underwaterEffects.y);
+    float3 mediumSigma = max(waterExtinctionBase(worldPush.waterParams.xyz),
+            float3(1.0e-5, 1.0e-5, 1.0e-5));
+    // A scalar mean extinction is intentional: per-channel extinction in the scattering colour made
+    // the visible fog change hue with depth and biome while passing beneath blocks.
+    float sigmaT = dot(mediumSigma, float3(0.3333333, 0.3333333, 0.3333333));
+    float hazeSigmaS = min(lerp(0.075, 0.135, blueTint) * hazeStrength, sigmaT);
+
+    float rayLengthSq = dot(rayDir, rayDir);
+    float3 viewRay = rayLengthSq > 1.0e-6 ? rayDir * rsqrt(rayLengthSq) : float3(0.0, 0.0, 1.0);
+    float distance = max(segmentDistance, 0.0);
+    float viewOpticalDepth = sigmaT * distance;
+    float viewTransmittance = exp(-max(viewOpticalDepth, 0.0));
+    float viewIntegralDirect = (1.0 - viewTransmittance) / max(sigmaT, 1.0e-5);
+    float viewIntegralSeries = distance * (1.0 - 0.5 * viewOpticalDepth
+            + (viewOpticalDepth * viewOpticalDepth) / 6.0);
+    float viewIntegral = viewOpticalDepth < 1.0e-3 ? viewIntegralSeries : viewIntegralDirect;
+
+    // Keep the incident-light attenuation spatially invariant. Estimating the light's water path from
+    // the nearest non-water block above the camera made an underwater overhang look like the surface,
+    // which thickened the haze at every roof edge. A fixed reference column keeps the configured haze
+    // density identical under open water, caves and overhangs; the sun angle still lengthens the path.
+    float lightPathY = max(lightDir.y, 0.04);
+    float sourceOpticalDepth = sigmaT * (4.0 / lightPathY);
+    float sourceAverage = exp(-max(sourceOpticalDepth, 0.0));
+
+    // Both endpoints are blue; the slider changes blueness, not the dependence on scene lighting.
+    float3 hazeColor = lerp(float3(0.035, 0.095, 0.22),
+                            float3(0.012, 0.085, 0.34), blueTint);
+    float cosScatter = clamp(dot(lightDir, viewRay), -1.0, 1.0);
+    float phase = 0.075 + 0.015 * (0.5 + 0.5 * cosScatter);
+    return hazeColor * lightEnergy * sourceAverage * hazeSigmaS * phase * viewIntegral;
 }
 
 public float3 waterExtinction(float3 tint) {
@@ -60,7 +125,7 @@ public float3 volumeExtinction(float3 tint, float transmission) {
 public struct Medium {
     public float ior;
     public float3 extinction;
-    public bool water; // drives the wave-refraction caustic on submerged receivers; nothing else is water-specific
+    public bool water; // drives water caustics and extinction
 };
 
 public struct MediumStack {

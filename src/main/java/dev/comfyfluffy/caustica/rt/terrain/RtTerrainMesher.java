@@ -65,6 +65,12 @@ final class RtTerrainMesher {
      *  {@code world_common.slang} (TERRAIN_PRIM_PORTAL_*) and consumed by {@code world.rchit}. */
     static final int TERRAIN_PRIM_PORTAL_NETHER = 2;
     static final int TERRAIN_PRIM_PORTAL_END = 4;
+    /** Terrain face belongs to a block exposed at the motion-blocking top of its column. */
+    static final int TERRAIN_PRIM_RAIN_EXPOSED = 8;
+    /** Rain-wettable alpha-tested surface (e.g. leaves); translucent glass remains excluded. */
+    static final int TERRAIN_PRIM_CUTOUT = 16;
+    /** Thin/translucent surface (glass, ice, etc.); not treated as a wet film. */
+    static final int TERRAIN_PRIM_TRANSLUCENT = 32;
 
     /** Sprite classification for the two portal blocks. */
     private static final int PORTAL_NONE = 0;
@@ -227,6 +233,13 @@ final class RtTerrainMesher {
                         // Water is the dielectric fluid; lava stays an opaque emitter. Tagged per-prim
                         // so the path tracer can branch (see emitQuad).
                         fluidCapture.water = fluid.is(FluidTags.WATER);
+                        if (fluidCapture.water && region instanceof RtSectionSnapshots.Region snapshot) {
+                            // The heightmap includes the fluid surface: open rivers/oceans get rain
+                            // impacts, while water beneath a cave ceiling/roof is not rain-exposed.
+                            fluidCapture.rainExposed = snapshot.isRainExposed(m);
+                        } else {
+                            fluidCapture.rainExposed = false;
+                        }
                         RtFluidMesher.tesselate(region, m, fluidCapture, fluidModels, state, fluid);
                     }
                     if (state.getRenderShape() != RenderShape.MODEL) {
@@ -245,6 +258,13 @@ final class RtTerrainMesher {
                     }
                     capture.state = state;
                     capture.pos = m;
+                    if (region instanceof RtSectionSnapshots.Region snapshot) {
+                        capture.rainExposed = snapshot.isRainExposed(m);
+                        capture.rainShelterDistance = snapshot.rainShelterDistance(m);
+                    } else {
+                        capture.rainExposed = false;
+                        capture.rainShelterDistance = RtSectionSnapshots.RAIN_SHELTER_FALLBACK;
+                    }
                     Vec3 offset = state.getOffset(m);
                     capture.originX = lx + (float) offset.x;
                     capture.originY = ly + (float) offset.y;
@@ -430,6 +450,8 @@ final class RtTerrainMesher {
         BlockAndTintGetter view;
         BlockState state;
         BlockPos pos;
+        boolean rainExposed;
+        float rainShelterDistance;
         float originX, originY, originZ;
         private final BlockPos.MutableBlockPos cullPos = new BlockPos.MutableBlockPos();
         private final java.util.function.Predicate<Direction> cullTest = this::isCulled;
@@ -464,6 +486,8 @@ final class RtTerrainMesher {
             float len = (float) Math.sqrt(nx * nx + ny * ny + nz * nz);
             if (len > 1.0e-6f) { nx /= len; ny /= len; nz /= len; }
             q.nx = nx; q.ny = ny; q.nz = nz;
+            q.rainExposed = rainExposed;
+            q.rainShelterDistance = rainShelterDistance;
 
             ChunkSectionLayer layer = quad.chunkLayer();
             q.cutout = layer != ChunkSectionLayer.SOLID;
@@ -695,9 +719,19 @@ final class RtTerrainMesher {
                 prim.add(q.tb);
                 prim.add(0f);
                 prim.add(Float.intBitsToFloat(q.materialId)); // TerrainPrim.materialId uint bits
-                prim.add(Float.intBitsToFloat(q.portal == PORTAL_NETHER ? TERRAIN_PRIM_PORTAL_NETHER
-                        : q.portal == PORTAL_END ? TERRAIN_PRIM_PORTAL_END : 0)); // flags
-                prim.add(0f); // aux0
+                int flags = q.portal == PORTAL_NETHER ? TERRAIN_PRIM_PORTAL_NETHER
+                        : q.portal == PORTAL_END ? TERRAIN_PRIM_PORTAL_END : 0;
+                if (q.rainExposed) {
+                    flags |= TERRAIN_PRIM_RAIN_EXPOSED;
+                }
+                if (q.cutout && !q.translucent) {
+                    flags |= TERRAIN_PRIM_CUTOUT;
+                }
+                if (q.translucent) {
+                    flags |= TERRAIN_PRIM_TRANSLUCENT;
+                }
+                prim.add(Float.intBitsToFloat(flags)); // flags: portals, rain exposure, and surface class
+                prim.add(q.rainShelterDistance); // aux0: block-space distance to a rain-exposed surface
                 prim.add(0f); // aux1
                 g.ommSprites.add(q.sprite);
             }
@@ -758,6 +792,8 @@ final class RtTerrainMesher {
         boolean translucent; // TRANSLUCENT layer (stained glass / ice): colored-transmission dielectric
         boolean tinted; // tintIndex >= 0 — the tinted member of a base+overlay pair
         int portal; // PORTAL_NONE / PORTAL_NETHER / PORTAL_END — tagged by putFabric, stamped into flags
+        boolean rainExposed;
+        float rainShelterDistance;
         float tr, tg, tb, emission;
         int materialId;
         TextureAtlasSprite sprite;
@@ -804,6 +840,7 @@ final class RtTerrainMesher {
         RtMaterialRegistry.Snapshot materials;
         float emission;      // set per fluid block (lava = 1, water = 0)
         boolean water;       // set per fluid block: true for water (dielectric), false for lava
+        boolean rainExposed; // top surface can receive real rain from the sky
         private int n;
         private final float[] qx = new float[4], qy = new float[4], qz = new float[4], qu = new float[4], qv = new float[4];
         private final int[] qc = new int[4]; // per-vertex packed ARGB (vanilla bakes the biome water tint here)
@@ -890,7 +927,9 @@ final class RtTerrainMesher {
                 prim.add(tb);
                 prim.add(0f);
                 prim.add(Float.intBitsToFloat(materialId));
-                prim.add(0f);
+                // The only terrain-prim bit water carries: rain exposure, for rain-impact ripple gating.
+                prim.add(Float.intBitsToFloat(
+                        water && rainExposed ? TERRAIN_PRIM_RAIN_EXPOSED : 0));
                 prim.add(0f);
                 prim.add(0f);
                 g.ommSprites.add(null);

@@ -25,6 +25,10 @@ public struct PathSegment {
     public uint seed;
     public int bounce;          // interfaces already consumed, so RR start and the bounce cap stay global
     public bool showCelestial;
+    // Fresnel probability of the camera-to-first-interface prefix. Pass A's throughput already contains
+    // water transmittance, which can underflow on long grazing rays; keeping the branch weight in its own
+    // lane lets Pass B restore the missing prefix in-scatter without dividing by a clamped transmittance.
+    public float prefixScatterWeight;
 };
 
 public PathSegment makePathSegment(float3 ro, float3 rd, float3 throughput, MediumStack medium,
@@ -40,6 +44,7 @@ public PathSegment makePathSegment(float3 ro, float3 rd, float3 throughput, Medi
     s.seed = seed;
     s.bounce = bounce;
     s.showCelestial = showCelestial;
+    s.prefixScatterWeight = 0.0;
     return s;
 }
 // field is a uint, so Std430DataLayout gives this an exact 48-byte stride.
@@ -119,7 +124,9 @@ public PackedPathSegment packPathSegment(PathSegment seg, uint nextRecord) {
     p.pathFlags = (uint(seg.bounce) & 15u)
             | (seg.showCelestial ? 1u << 8u : 0u)
             | (seg.medium.current.water ? 1u << 9u : 0u)
-            | (seg.medium.outer.water ? 1u << 10u : 0u);
+            | (seg.medium.outer.water ? 1u << 10u : 0u)
+            // Bits 11..26 carry the 16-bit UNORM prefix-scatter Fresnel weight.
+            | ((uint(round(saturate(seg.prefixScatterWeight) * 65535.0)) & 0xffffu) << 11u);
     p.nextRecord = nextRecord;
     return p;
 }
@@ -138,9 +145,11 @@ public PathSegment unpackPathSegment(PackedPathSegment p) {
     medium.current = current;
     medium.outer = outer;
     float2 cone = unpackHalf2(p.rayCone);
-    return makePathSegment(p.ro, octDecode(unpackUnorm16x2(p.rd)),
+    PathSegment seg = makePathSegment(p.ro, octDecode(unpackUnorm16x2(p.rd)),
             unpackRgb9e5(p.throughput), medium, cone.x, cone.y, p.seed,
             int(p.pathFlags & 15u), (p.pathFlags & (1u << 8u)) != 0u);
+    seg.prefixScatterWeight = float((p.pathFlags >> 11u) & 0xffffu) / 65535.0;
+    return seg;
 }
 
 // Walk only the visually-primary dielectric chain. The terminal non-dielectric/miss trace is repeated

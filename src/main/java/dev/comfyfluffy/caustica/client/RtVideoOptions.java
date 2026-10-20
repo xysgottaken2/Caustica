@@ -162,6 +162,52 @@ public final class RtVideoOptions {
         };
     }
 
+    /** Ground wetting timings, wet-film gloss, and small rain-impact ripples. */
+    public static OptionInstance<?>[] groundWetnessOptions() {
+        return new OptionInstance<?>[] {
+            wetnessEnabled(),
+            wetnessWetSeconds(),
+            wetnessDrySeconds(),
+            wetnessGloss(),
+            wetnessTransitionDistance(),
+            groundRainRipples(),
+            groundRippleStrength(),
+        };
+    }
+
+    /** Water rain-ripple shape/amplitude and the refractive rain-sheet look. */
+    public static OptionInstance<?>[] rainOpticsOptions() {
+        return new OptionInstance<?>[] {
+            waterRainRipples(),
+            waterRippleScale(),
+            waterRippleStrength(),
+            rainRefractionEnabled(),
+            rainRefractionStrength(),
+        };
+    }
+
+    /** Underwater haze, absorption tint and the sky-miss fallback. */
+    public static OptionInstance<?>[] underwaterOptions() {
+        return new OptionInstance<?>[] {
+            underwaterHazeEnabled(),
+            underwaterHazeStrength(),
+            underwaterBlueTint(),
+            underwaterSkyEnabled(),
+            underwaterSkyDistance(),
+        };
+    }
+
+    /** Random lightning bolts, strike frequency, brightness and positional thunder. */
+    public static OptionInstance<?>[] lightningOptions() {
+        return new OptionInstance<?>[] {
+            lightningEnabled(),
+            lightningStrikesPerMinute(),
+            lightningIntensity(),
+            lightningSoundEnabled(),
+            lightningSoundVolume(),
+        };
+    }
+
     /**
      * Terrain streaming + BLAS rows. The three per-pass budgets are read by RtTerrain's scheduler
      * every pass, so a slider drag takes effect immediately; the BLAS flags are read at section
@@ -229,6 +275,10 @@ public final class RtVideoOptions {
         }
         options.add(cloudShadowStrength());
         options.add(cloudOpacity());
+        // Storm response: rain may thicken, darken and close the deck. These live on the clouds page
+        // because they change how the cloud layer is generated, not the weather system itself.
+        options.add(rainCloudResponse());
+        options.add(rainCloudDensity());
         return options.toArray(OptionInstance<?>[]::new);
     }
 
@@ -817,6 +867,119 @@ public final class RtVideoOptions {
      * control: DLSS Ray Reconstruction can draw a halo around translucent water in dark scenes,
      * and dimming the transmitted light through the water is what removes it.
      */
+    private static OptionInstance<Boolean> wetnessEnabled() {
+        return bool("caustica.options.rt.wetnessEnabled", CausticaConfig.Rt.Composite.WETNESS_ENABLED);
+    }
+
+    private static OptionInstance<Integer> wetnessWetSeconds() {
+        return secondsOption("caustica.options.rt.wetnessWetSeconds",
+                CausticaConfig.Rt.Composite.WETNESS_WET_SECONDS, 1, 30);
+    }
+
+    private static OptionInstance<Integer> wetnessDrySeconds() {
+        return secondsOption("caustica.options.rt.wetnessDrySeconds",
+                CausticaConfig.Rt.Composite.WETNESS_DRY_SECONDS, 5, 120);
+    }
+
+    private static OptionInstance<Integer> wetnessGloss() {
+        return percent("caustica.options.rt.wetnessGloss", CausticaConfig.Rt.Composite.WETNESS_GLOSS);
+    }
+
+    private static OptionInstance<Integer> wetnessTransitionDistance() {
+        return blocksOption("caustica.options.rt.wetnessTransitionDistance",
+                CausticaConfig.Rt.Composite.WETNESS_TRANSITION_DISTANCE, 0, 12);
+    }
+
+    private static OptionInstance<Boolean> groundRainRipples() {
+        return bool("caustica.options.rt.groundRainRipples", CausticaConfig.Rt.Composite.GROUND_RAIN_RIPPLES);
+    }
+
+    private static OptionInstance<Integer> groundRippleStrength() {
+        return multiplier("caustica.options.rt.groundRippleStrength",
+                CausticaConfig.Rt.Composite.GROUND_RIPPLE_STRENGTH, 0, 20);
+    }
+
+    private static OptionInstance<Boolean> waterRainRipples() {
+        return bool("caustica.options.rt.waterRainRipples", CausticaConfig.Rt.Composite.WATER_RAIN_RIPPLES);
+    }
+
+    private static OptionInstance<Integer> waterRippleScale() {
+        return scaleOption("caustica.options.rt.waterRippleScale",
+                CausticaConfig.Rt.Composite.WATER_RIPPLE_SCALE);
+    }
+
+    private static OptionInstance<Integer> waterRippleStrength() {
+        return multiplier("caustica.options.rt.waterRippleStrength",
+                CausticaConfig.Rt.Composite.WATER_RIPPLE_STRENGTH, 0, 20);
+    }
+
+    private static OptionInstance<Boolean> rainRefractionEnabled() {
+        return bool("caustica.options.rt.rainRefractionEnabled",
+                CausticaConfig.Rt.Composite.RAIN_REFRACTION_ENABLED);
+    }
+
+    private static OptionInstance<Integer> rainRefractionStrength() {
+        return multiplier("caustica.options.rt.rainRefractionStrength",
+                CausticaConfig.Rt.Composite.RAIN_REFRACTION_STRENGTH, 0, 20);
+    }
+
+    private static OptionInstance<Boolean> underwaterHazeEnabled() {
+        return bool("caustica.options.rt.underwaterHazeEnabled",
+                CausticaConfig.Rt.Composite.UNDERWATER_HAZE_ENABLED);
+    }
+
+    private static OptionInstance<Integer> underwaterHazeStrength() {
+        return multiplier("caustica.options.rt.underwaterHazeStrength",
+                CausticaConfig.Rt.Composite.UNDERWATER_HAZE_STRENGTH, 0, 20);
+    }
+
+    private static OptionInstance<Integer> underwaterBlueTint() {
+        return percent("caustica.options.rt.underwaterBlueTint",
+                CausticaConfig.Rt.Composite.UNDERWATER_BLUE_TINT);
+    }
+
+    private static OptionInstance<Boolean> underwaterSkyEnabled() {
+        return bool("caustica.options.rt.underwaterSkyEnabled",
+                CausticaConfig.Rt.Composite.UNDERWATER_SKY_ENABLED);
+    }
+
+    private static OptionInstance<Integer> underwaterSkyDistance() {
+        return blocksOption("caustica.options.rt.underwaterSkyDistance",
+                CausticaConfig.Rt.Composite.UNDERWATER_SKY_DISTANCE, 8, 128);
+    }
+
+    private static OptionInstance<Boolean> rainCloudResponse() {
+        return bool("caustica.options.rt.rainCloudResponse", CausticaConfig.Rt.Composite.RAIN_CLOUD_RESPONSE);
+    }
+
+    private static OptionInstance<Integer> rainCloudDensity() {
+        return percent("caustica.options.rt.rainCloudDensity", CausticaConfig.Rt.Composite.RAIN_CLOUD_DENSITY);
+    }
+
+    private static OptionInstance<Boolean> lightningEnabled() {
+        return bool("caustica.options.rt.lightningEnabled", CausticaConfig.Rt.Composite.LIGHTNING_ENABLED);
+    }
+
+    private static OptionInstance<Integer> lightningStrikesPerMinute() {
+        return perMinuteOption("caustica.options.rt.lightningStrikesPerMinute",
+                CausticaConfig.Rt.Composite.LIGHTNING_STRIKES_PER_MINUTE, 1, 60);
+    }
+
+    private static OptionInstance<Integer> lightningIntensity() {
+        return multiplier("caustica.options.rt.lightningIntensity",
+                CausticaConfig.Rt.Composite.LIGHTNING_INTENSITY, 0, 50);
+    }
+
+    private static OptionInstance<Boolean> lightningSoundEnabled() {
+        return bool("caustica.options.rt.lightningSoundEnabled",
+                CausticaConfig.Rt.Composite.LIGHTNING_SOUND_ENABLED);
+    }
+
+    private static OptionInstance<Integer> lightningSoundVolume() {
+        return multiplier("caustica.options.rt.lightningSoundVolume",
+                CausticaConfig.Rt.Composite.LIGHTNING_SOUND_VOLUME, 0, 20);
+    }
+
     private static OptionInstance<Integer> waterOpacity() {
         return percent("caustica.options.rt.waterOpacity", CausticaConfig.Rt.Composite.WATER_OPACITY);
     }
@@ -1457,6 +1620,56 @@ public final class RtVideoOptions {
             new OptionInstance.Enum<>(List.of(0, 1, 2, 3, 4, 5, 6, 7, 10, 11, 12, 13), Codec.INT),
             Math.clamp(setting.value(), 0, 13),
             setting::set);
+    }
+
+    /**
+     * A whole-second slider over a float setting. The config stores seconds as floats so the TOML
+     * surface can express fractions, but the UI only offers whole seconds between {@code min} and
+     * {@code max} — matching the setting's own clamp.
+     */
+    private static OptionInstance<Integer> secondsOption(String captionKey, FloatSetting setting, int min, int max) {
+        return new OptionInstance<>(
+            captionKey,
+            OptionInstance.cachedConstantTooltip(Component.translatable(captionKey + ".tooltip")),
+            (caption, value) -> Options.genericValueLabel(caption, Component.literal(value + " s")),
+            new OptionInstance.IntRange(min, max),
+            Math.clamp(Math.round(setting.value()), min, max),
+            value -> setting.set(value.floatValue()));
+    }
+
+    /** A block-distance slider over a float setting (transition radii, haze fallback distance). */
+    private static OptionInstance<Integer> blocksOption(String captionKey, FloatSetting setting, int min, int max) {
+        return new OptionInstance<>(
+            captionKey,
+            OptionInstance.cachedConstantTooltip(Component.translatable(captionKey + ".tooltip")),
+            (caption, value) -> Options.genericValueLabel(caption, Component.literal(value + " blocks")),
+            new OptionInstance.IntRange(min, max),
+            Math.clamp(Math.round(setting.value()), min, max),
+            value -> setting.set(value.floatValue()));
+    }
+
+    /** Strike-rate slider over a float setting, labelled as an average per-minute count. */
+    private static OptionInstance<Integer> perMinuteOption(String captionKey, FloatSetting setting, int min, int max) {
+        return new OptionInstance<>(
+            captionKey,
+            OptionInstance.cachedConstantTooltip(Component.translatable(captionKey + ".tooltip")),
+            (caption, value) -> Options.genericValueLabel(caption,
+                    Component.literal(value + "/min")),
+            new OptionInstance.IntRange(min, max),
+            Math.clamp(Math.round(setting.value()), min, max),
+            value -> setting.set(value.floatValue()));
+    }
+
+    /** A 0.25..2.00x multiplier slider over a float setting (water ripple size). */
+    private static OptionInstance<Integer> scaleOption(String captionKey, FloatSetting setting) {
+        return new OptionInstance<>(
+            captionKey,
+            OptionInstance.cachedConstantTooltip(Component.translatable(captionKey + ".tooltip")),
+            (caption, hundredths) -> Options.genericValueLabel(caption,
+                    Component.literal(String.format(Locale.ROOT, "%.2fx", hundredths / 100.0f))),
+            new OptionInstance.IntRange(25, 200),
+            Math.clamp(Math.round(setting.value() * 100.0f), 25, 200),
+            hundredths -> setting.set(hundredths / 100.0f));
     }
 
     private static OptionInstance<Integer> multiplier(String captionKey, FloatSetting setting, int minTenths, int maxTenths) {

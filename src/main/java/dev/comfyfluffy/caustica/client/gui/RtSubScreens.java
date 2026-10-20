@@ -125,6 +125,41 @@ public final class RtSubScreens {
     }
 
     /**
+     * Ground wetness: the rain-driven wet-film timings, its gloss, the live shelter transition radius
+     * and the small rain-impact ripples on upward-facing solid terrain.
+     */
+    public static RtSettingsSubScreen wetness(Screen parent) {
+        return new RtSettingsSubScreen(parent, options(),
+                Component.translatable("caustica.options.rt.wetnessHeader"),
+                groundWetnessSettings(), RtSubScreens::wetness,
+                reopen -> List.of(RtSettingsSubScreen.Section.of(null, RtVideoOptions.groundWetnessOptions())));
+    }
+
+    /** Rain optics: procedural impact rings on water and refraction through the rain sheets. */
+    public static RtSettingsSubScreen rainOptics(Screen parent) {
+        return new RtSettingsSubScreen(parent, options(),
+                Component.translatable("caustica.options.rt.rainOpticsHeader"),
+                rainOpticsSettings(), RtSubScreens::rainOptics,
+                reopen -> List.of(RtSettingsSubScreen.Section.of(null, RtVideoOptions.rainOpticsOptions())));
+    }
+
+    /** Underwater: short-visibility haze, absorption tint and the sky-miss fallback. */
+    public static RtSettingsSubScreen underwater(Screen parent) {
+        return new RtSettingsSubScreen(parent, options(),
+                Component.translatable("caustica.options.rt.underwaterHeader"),
+                underwaterSettings(), RtSubScreens::underwater,
+                reopen -> List.of(RtSettingsSubScreen.Section.of(null, RtVideoOptions.underwaterOptions())));
+    }
+
+    /** Lightning: procedural bolts, their average frequency, brightness and positional thunder. */
+    public static RtSettingsSubScreen lightning(Screen parent) {
+        return new RtSettingsSubScreen(parent, options(),
+                Component.translatable("caustica.options.rt.lightningHeader"),
+                lightningSettings(), RtSubScreens::lightning,
+                reopen -> List.of(RtSettingsSubScreen.Section.of(null, RtVideoOptions.lightningOptions())));
+    }
+
+    /**
      * The cloud deck: style, coverage, altitude, thickness, shadow and opacity. Flipping the style
      * reopens the screen: the coverage slider only drives the volumetric deck, so in classic mode it
      * swaps to {@link RtVideoOptions#cloudCoverageDisabledHint()}'s disabled placeholder (null in
@@ -287,6 +322,44 @@ public final class RtSubScreens {
                 CausticaConfig.Rt.Composite.WATER_WAVE_DETAIL);
     }
 
+    private static List<CausticaConfig.RuntimeSetting<?>> groundWetnessSettings() {
+        return List.of(
+                CausticaConfig.Rt.Composite.WETNESS_ENABLED,
+                CausticaConfig.Rt.Composite.WETNESS_WET_SECONDS,
+                CausticaConfig.Rt.Composite.WETNESS_DRY_SECONDS,
+                CausticaConfig.Rt.Composite.WETNESS_GLOSS,
+                CausticaConfig.Rt.Composite.WETNESS_TRANSITION_DISTANCE,
+                CausticaConfig.Rt.Composite.GROUND_RAIN_RIPPLES,
+                CausticaConfig.Rt.Composite.GROUND_RIPPLE_STRENGTH);
+    }
+
+    private static List<CausticaConfig.RuntimeSetting<?>> rainOpticsSettings() {
+        return List.of(
+                CausticaConfig.Rt.Composite.WATER_RAIN_RIPPLES,
+                CausticaConfig.Rt.Composite.WATER_RIPPLE_SCALE,
+                CausticaConfig.Rt.Composite.WATER_RIPPLE_STRENGTH,
+                CausticaConfig.Rt.Composite.RAIN_REFRACTION_ENABLED,
+                CausticaConfig.Rt.Composite.RAIN_REFRACTION_STRENGTH);
+    }
+
+    private static List<CausticaConfig.RuntimeSetting<?>> underwaterSettings() {
+        return List.of(
+                CausticaConfig.Rt.Composite.UNDERWATER_HAZE_ENABLED,
+                CausticaConfig.Rt.Composite.UNDERWATER_HAZE_STRENGTH,
+                CausticaConfig.Rt.Composite.UNDERWATER_BLUE_TINT,
+                CausticaConfig.Rt.Composite.UNDERWATER_SKY_ENABLED,
+                CausticaConfig.Rt.Composite.UNDERWATER_SKY_DISTANCE);
+    }
+
+    private static List<CausticaConfig.RuntimeSetting<?>> lightningSettings() {
+        return List.of(
+                CausticaConfig.Rt.Composite.LIGHTNING_ENABLED,
+                CausticaConfig.Rt.Composite.LIGHTNING_STRIKES_PER_MINUTE,
+                CausticaConfig.Rt.Composite.LIGHTNING_INTENSITY,
+                CausticaConfig.Rt.Composite.LIGHTNING_SOUND_ENABLED,
+                CausticaConfig.Rt.Composite.LIGHTNING_SOUND_VOLUME);
+    }
+
     private static List<CausticaConfig.RuntimeSetting<?>> pomSettings() {
         return List.of(
                 CausticaConfig.Rt.Composite.PARALLAX_ENABLED,
@@ -311,7 +384,9 @@ public final class RtSubScreens {
                 CausticaConfig.Rt.Composite.CLOUD_MIN_THICKNESS,
                 CausticaConfig.Rt.Composite.CLOUD_MAX_THICKNESS,
                 CausticaConfig.Rt.Composite.CLOUD_SHADOW_STRENGTH,
-                CausticaConfig.Rt.Composite.CLOUD_OPACITY);
+                CausticaConfig.Rt.Composite.CLOUD_OPACITY,
+                CausticaConfig.Rt.Composite.RAIN_CLOUD_RESPONSE,
+                CausticaConfig.Rt.Composite.RAIN_CLOUD_DENSITY);
     }
 
     private static List<CausticaConfig.RuntimeSetting<?>> fogSettings() {
@@ -320,7 +395,8 @@ public final class RtSubScreens {
                 CausticaConfig.Rt.Composite.FOG_DENSITY,
                 CausticaConfig.Rt.Composite.FOG_DISTANCE,
                 CausticaConfig.Rt.Composite.FOG_ANISOTROPY,
-                CausticaConfig.Rt.Composite.FOG_HEIGHT_FALLOFF);
+                CausticaConfig.Rt.Composite.FOG_HEIGHT_FALLOFF,
+                CausticaConfig.Rt.Composite.FOG_BIOME_TINT);
     }
 
     private static List<CausticaConfig.RuntimeSetting<?>> exposureSettings() {
@@ -396,6 +472,11 @@ public final class RtSubScreens {
                 waterSettings(),
                 pomSettings(),
                 cloudsSettings(),
+                fogSettings(),
+                groundWetnessSettings(),
+                rainOpticsSettings(),
+                underwaterSettings(),
+                lightningSettings(),
                 exposureSettings(),
                 tonemapSettings(),
                 bloomSettings(),

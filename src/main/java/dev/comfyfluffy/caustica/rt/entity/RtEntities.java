@@ -598,14 +598,32 @@ public final class RtEntities {
         int logicalCount; // ordinary entities + block entities + individual particles
 
         final GraphicsUseWaiter graphicsUseWaiter;
+        final int logicalLimit;
+        final int reservedWeatherSlots;
 
         FrameBuild(List<RtAccel.Instance> base, RtGpuExecutor gpuExecutor) {
             this.base = base;
             this.graphicsUseWaiter = gpuExecutor.graphicsUseWaiter();
+            this.logicalLimit = maxEntities();
+            // Rain used to be appended after mobs, block entities and particles. Busy surface scenes
+            // could hit the shared logical cap before the weather mesh was reached, so ripples remained
+            // visible on the ground while their matching rain columns were absent. Reserve enough slots
+            // for vanilla's complete weather grid; ordinary geometry uses the soft cap below.
+            this.reservedWeatherSlots = RtWeatherCapture.willRenderWeather()
+                    ? Math.min(RtWeatherCapture.MAX_CAPTURE_COLUMNS, Math.max(0, logicalLimit - 16)) : 0;
         }
 
+        /** Soft limit for ordinary entities/particles; reserved weather slots remain available. */
         boolean full() {
-            return logicalCount >= maxEntities();
+            return logicalCount >= Math.max(0, logicalLimit - reservedWeatherSlots);
+        }
+
+        boolean hardFull() {
+            return logicalCount >= logicalLimit;
+        }
+
+        int remainingHardSlots() {
+            return Math.max(0, logicalLimit - logicalCount);
         }
     }
 
@@ -958,7 +976,9 @@ public final class RtEntities {
     private void captureParticles(RtContext ctx, FrameBuild build, Minecraft mc, float partial,
                                   int rbx, int rby, int rbz, Matrix4f projection, Matrix4f viewRotation) {
         int particleLimit = maxParticles();
-        if (!particlesEnabled() || particleLimit == 0 || build.full()) {
+        boolean ordinaryParticlesAllowed = particlesEnabled() && particleLimit > 0 && !build.full();
+        boolean weatherActive = RtWeatherCapture.willRenderWeather();
+        if (build.hardFull() || (!ordinaryParticlesAllowed && !weatherActive)) {
             particlePrev.clear();
             particleCur.clear();
             return;
@@ -967,15 +987,16 @@ public final class RtEntities {
         if (cam == null) {
             return;
         }
-        Map<ParticleRenderType, ParticleGroup<?>> groups =
-                ((ParticleEngineAccessor) mc.particleEngine).caustica$getParticleGroups();
-        boolean anyParticles = groups != null && !groups.isEmpty();
-        // Rain/snow are NOT ParticleEngine billboards — they are their own vanilla pass
-        // (WeatherEffectRenderer), which dies with the cancelled LevelRenderer.render. They ride this same
-        // combined particle mesh/BLAS, so an empty ParticleEngine must not short-circuit the capture, or
-        // weather would only appear while some unrelated particle happened to be alive.
-        boolean anyWeather = RtWeatherCapture.enabled();
-        if (!anyParticles && !anyWeather) {
+        Map<ParticleRenderType, ParticleGroup<?>> groups = ordinaryParticlesAllowed
+                ? ((ParticleEngineAccessor) mc.particleEngine).caustica$getParticleGroups() : Map.of();
+        boolean anyParticles = ordinaryParticlesAllowed && groups != null && !groups.isEmpty();
+        // Weather is an independent renderer feature: disabling ordinary ray-traced particles must not
+        // remove rain while the ground still responds to precipitation. Capture weather first, before
+        // ordinary billboard particles can consume the shared geometry/logical-instance budget.
+        int weatherReserve = weatherActive ? Math.min(RtWeatherCapture.MAX_CAPTURE_COLUMNS,
+                Math.max(0, particleLimit * 7 / 8)) : 0;
+        int ordinaryParticleLimit = ordinaryParticlesAllowed ? Math.max(0, particleLimit - weatherReserve) : 0;
+        if (!anyParticles && !weatherActive) {
             particlePrev.clear();
             particleCur.clear();
             return;
@@ -986,6 +1007,26 @@ public final class RtEntities {
         // extract() emits camera-relative positions; shift them into rebased space (identity instance).
         Vec3 camPos = cam.position();
         particleCapture.setOffset((float) (camPos.x - rbx), (float) (camPos.y - rby), (float) (camPos.z - rbz));
+        // Capture vanilla weather BEFORE ordinary particles. This guarantees the rain/snow columns
+        // are present over the full surface grid even in entity-heavy scenes, and it works when the
+        // generic ParticleEngine capture toggle is off. These are real vertical sheets, clipped by
+        // vanilla to each column's motion-blocking heightmap, so they stop at leaves and roofs.
+        int weatherVertBefore = capture.verts.size() / 3;
+        int weatherBudget = weatherActive
+                ? Math.min(RtWeatherCapture.MAX_CAPTURE_COLUMNS, build.remainingHardSlots()) : 0;
+        int weatherColumns = weatherBudget > 0
+                ? RtWeatherCapture.INSTANCE.capture(capture, particleCapture, camPos, weatherBudget) : 0;
+        int weatherVertAfter = capture.verts.size() / 3;
+        // Weather columns are pinned in world X/Z and animate only through their scrolling UVs.
+        // They therefore use zero motion vectors, then ordinary particle MVs append after them.
+        for (int i = weatherVertBefore; i < weatherVertAfter; i++) {
+            particleDisp.add(0f);
+            particleDisp.add(0f);
+            particleDisp.add(0f);
+            particleDisp.add(0f);
+        }
+        build.logicalCount += weatherColumns;
+        RtFrameStats.FRAME.count("weatherColumnsCaptured", weatherColumns);
         // Reject particles whose world-space bounds are wholly outside before paying extract/build-layer
         // cost. The center test after extraction retains the existing exact inclusion behavior for bounds
         // which intersect the frustum.
@@ -999,7 +1040,7 @@ public final class RtEntities {
             for (ParticleGroup<?> group : anyParticles ? groups.values() : NO_PARTICLE_GROUPS) {
                 Queue<? extends Particle> queue = ((ParticleGroupAccessor) group).caustica$getParticles();
                 for (Particle p : queue) {
-                    if (build.full() || particlesCaptured >= particleLimit) {
+                    if (build.full() || particlesCaptured >= ordinaryParticleLimit) {
                         break particleGroups;
                     }
                     if (!(p instanceof SingleQuadParticle sq)) {
@@ -1013,10 +1054,19 @@ public final class RtEntities {
                     int vertBefore = vb / 3;
                     particleScratch.clear();
                     sq.extract(particleScratch, cam, partial);
-                    for (SingleQuadParticle.Layer layer : particleScratch.layers()) {
-                        capture.currentTexSlot = RtEntityTextures.INSTANCE.slotForAtlas(layer.textureAtlasLocation());
-                        particleScratch.buildLayer(layer, particleCapture);
-                        particleCapture.flush();
+                    // Vanilla's little rain-impact/splash particles are ordinary ParticleEngine quads,
+                    // separate from WeatherEffectRenderer's large rain columns. Tag those too, so both
+                    // use the same neutral droplet tint, stochastic alpha and thin-lens refraction.
+                    capture.currentPrimFlags = isRainImpactParticle(p)
+                            ? RtEntityCapture.PRIM_FLAG_WEATHER : 0;
+                    try {
+                        for (SingleQuadParticle.Layer layer : particleScratch.layers()) {
+                            capture.currentTexSlot = RtEntityTextures.INSTANCE.slotForAtlas(layer.textureAtlasLocation());
+                            particleScratch.buildLayer(layer, particleCapture);
+                            particleCapture.flush();
+                        }
+                    } finally {
+                        capture.currentPrimFlags = 0;
                     }
                     int vertAfter = capture.verts.size() / 3;
                     if (vertAfter == vertBefore) {
@@ -1038,44 +1088,42 @@ public final class RtEntities {
                 }
             }
 
-            // Vanilla rain/snow columns, appended into the same capture so they share one mesh, one BLAS
-            // and one TLAS instance with the billboards above. They are not frustum-culled here: the
-            // columns already form a small camera-centred box (weatherRadius maxes at 10 blocks) and each
-            // is a two-sided vertical sheet, so a per-column test would cost more than it saves.
-            //
-            // Weather quads deliberately carry a ZERO motion vector. Their apparent motion is the sheet
-            // texture's V scroll, not geometry movement — the columns themselves are pinned to world
-            // (x, z), so handing the denoiser a velocity would reproject a surface that never actually
-            // moved and smear the drops into streaks. Zero tells DLSS-RR the truth: static geometry.
-            int weatherBudget = Math.max(0, particleLimit - particlesCaptured);
-            int weatherVertBefore = capture.verts.size() / 3;
-            int weatherColumns = anyWeather && !build.full()
-                    ? RtWeatherCapture.INSTANCE.capture(capture, particleCapture, camPos, weatherBudget)
-                    : 0;
-            int weatherVertAfter = capture.verts.size() / 3;
-            for (int i = weatherVertBefore; i < weatherVertAfter; i++) {
-                particleDisp.add(0f);
-                particleDisp.add(0f);
-                particleDisp.add(0f);
-                particleDisp.add(0f);
-            }
-            build.logicalCount += weatherColumns;
-            RtFrameStats.FRAME.count("weatherColumnsCaptured", weatherColumns);
         } catch (Throwable t) {
             capture.reset();
             particleDisp.clear();
             throw new RuntimeException("RT particle capture failed", t); // propagate to composite() (see entity path)
         }
         RtFrameStats.FRAME.count("particlesCaptured", particlesCaptured);
-        IdentityHashMap<Particle, ParticlePrev> oldPrev = particlePrev;
-        particlePrev = cur;
-        particleCur = oldPrev;
+        if (anyParticles) {
+            IdentityHashMap<Particle, ParticlePrev> oldPrev = particlePrev;
+            particlePrev = cur;
+            particleCur = oldPrev;
+        } else {
+            particlePrev.clear();
+            particleCur.clear();
+        }
         if (capture.isEmpty()) {
             return;
         }
         long dispAddr = uploadDisp(ctx, build, particleDisp);
         appendCapture(ctx, build, new Motion(dispAddr, 0f, 0f, 0f),
                 -1, PARTICLE_BIT, PARTICLE_MASK, IDENTITY); // one combined mesh, per-particle MV
+    }
+
+    /**
+     * Detect vanilla rain/splash billboards by their class hierarchy, so mappings or loader remapping do
+     * not require hard-linking an internal particle class that can be nested or renamed between MC builds.
+     * The regular particle path is retained for every unrelated effect (fire, crits, spell particles, etc.).
+     */
+    private static boolean isRainImpactParticle(Particle particle) {
+        for (Class<?> type = particle.getClass(); type != null && type != Particle.class; type = type.getSuperclass()) {
+            String name = type.getSimpleName().toLowerCase(java.util.Locale.ROOT);
+            if (name.contains("rainparticle") || name.contains("rainsplash")
+                    || name.equals("splashparticle") || name.contains("waterdropparticle")) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /** Average (rebase-space) position of a captured particle's verts — approximates the particle center. */
