@@ -27,6 +27,9 @@ import java.util.Arrays;
 import dev.comfyfluffy.caustica.rt.RtContext;
 import dev.comfyfluffy.caustica.rt.RtDebugLabels;
 
+import org.joml.Matrix4f;
+import org.joml.Matrix4fc;
+
 import static dev.comfyfluffy.caustica.rt.RtContext.check;
 
 /**
@@ -63,8 +66,12 @@ import static dev.comfyfluffy.caustica.rt.RtContext.check;
  */
 public final class RtSvgfDenoiser {
     private static final String SHADER_DIR = "/caustica/rt/";
-    /** Reproject push: int width, height, reset; float maxFrames. */
-    private static final int REPROJECT_PUSH_BYTES = 5 * Integer.BYTES;
+    /**
+     * Reproject push: int width, height, reset; float maxFrames; vec2 invProj; vec2 projShear;
+     * vec4 prevDepthRow. Must match {@code svgf_reproject.comp}'s Push block byte for byte
+     * (16-byte header, then the two vec2s, then the vec4 at offset 32).
+     */
+    private static final int REPROJECT_PUSH_BYTES = 12 * Integer.BYTES;
     /** À-trous push: int width, height, step; float phiLuminance, phiNormal, phiDepth; int extraSkySmooth. */
     private static final int ATROUS_PUSH_BYTES = 9 * Integer.BYTES;
     private static final int REPROJECT_BINDINGS = 12;
@@ -256,17 +263,62 @@ public final class RtSvgfDenoiser {
     }
 
     /**
+     * The exact previous-frame depth prediction for {@code svgf_reproject.comp}, as eight floats:
+     * {@code [rowX, rowY, rowZ, rowW, invProjX, invProjY, shearX, shearY]}.
+     *
+     * <p>The shader rebuilds a pixel's current view-space position as
+     * {@code viewPos = ((ndc + shear) * viewZ * invProj, -viewZ)} and predicts the depth that
+     * same surface point had in the previous frame as
+     * {@code expectedZPrev = -(dot(row.xyz, viewPos) + row.w)}. The row is row 2 (the
+     * view-depth output row) of {@code prevViewRotation * curViewRotation^T} with
+     * {@code row.w = row2(prevViewRotation) · (cam - prevCam)}: expanding
+     * {@code prevViewPos = prevRot * (curRot^T * viewPos + camDelta)} shows the prediction is
+     * exact for ANY inter-frame rotation and translation, for every pixel, at every distance.
+     *
+     * <p>It replaces the host's old scalar {@code camForwardDelta} ({@code z + forwardTravel}),
+     * which was only the translation half of this row: exact while walking in a straight line,
+     * but wrong by {@code distance * sin(deltaRot) * sin(bearing)} everywhere else. At 30 fps a
+     * routine mouse turn (6°/frame) mispredicts off-axis depths by 7–18% against the shader's
+     * 5% acceptance tolerance, so the geometry gate rejected the temporal history across most
+     * of the screen on every frame spent turning — the "light/shadows flicker while moving,
+     * settle when still" report, which translation-only verification could not see.
+     *
+     * <p>Pure matrix maths (no Vulkan state), so the unit test can check the row against a
+     * brute-force reprojection of known points. {@code camDelta} is the camera's world-space
+     * travel since the previous SVGF frame ({@code cam - prevCam}). Note JOML names elements
+     * {@code mNM} = column N, row M, so the depth output row's coefficients are
+     * {@code m02/m12/m22}, and the projection's clip.xy coefficients of view Z (the view-bob
+     * shear) are {@code m20/m21}.
+     */
+    public static float[] depthPrediction(Matrix4fc projection,
+                                          Matrix4fc curViewRotation,
+                                          Matrix4fc prevViewRotation,
+                                          double camDeltaX, double camDeltaY, double camDeltaZ) {
+        Matrix4f combined = new Matrix4f(prevViewRotation)
+                .mul(new Matrix4f(curViewRotation).transpose());
+        double rowW = prevViewRotation.m02() * camDeltaX
+                + prevViewRotation.m12() * camDeltaY
+                + prevViewRotation.m22() * camDeltaZ;
+        return new float[] {
+                combined.m02(), combined.m12(), combined.m22(), (float) rowW,
+                1.0f / projection.m00(), 1.0f / projection.m11(),
+                projection.m20(), projection.m21(),
+        };
+    }
+
+    /**
      * Temporal stage. {@code parity} is the caller's ping-pong parity (0 or 1), which selects the
      * descriptor set matching this frame's history/moment images. {@code reset} discards all
      * history for this frame (first frame after a (re)allocation or an FOV/projection change); the
-     * shader then falls back on its spatial variance estimate.
+     * shader then falls back on its spatial variance estimate. {@code depthPrediction} is the
+     * exact previous-depth row from {@link #depthPrediction} (unused when {@code reset} is set).
      */
     public void reproject(VkCommandBuffer cmd, int width, int height, int parity,
                           long currentView, long historyView, long momentsInView,
                           long histOutView, long momentsOutView, long filterOutView,
                           long motionView, long viewZView, long normalView,
                           long prevViewZView, long prevNormalView, long albedoView,
-                          boolean reset, float maxFrames, float camForwardDelta) {
+                          boolean reset, float maxFrames, float[] depthPrediction) {
         long set = reproject.setImages(ctx, parity, new long[] {
                 currentView, historyView, momentsInView, histOutView, momentsOutView, filterOutView,
                 motionView, viewZView, normalView, prevViewZView, prevNormalView, albedoView,
@@ -281,7 +333,16 @@ public final class RtSvgfDenoiser {
             push.putInt(4, height);
             push.putInt(8, reset ? 1 : 0);
             push.putFloat(12, maxFrames);
-            push.putFloat(16, camForwardDelta);
+            // vec4 prevDepthRow must land at offset 32 (vec4 alignment); the two vec2s fill
+            // 16..31 exactly. Order mirrors svgf_reproject.comp's Push block.
+            push.putFloat(16, depthPrediction[4]); // invProj.x
+            push.putFloat(20, depthPrediction[5]); // invProj.y
+            push.putFloat(24, depthPrediction[6]); // projShear.x
+            push.putFloat(28, depthPrediction[7]); // projShear.y
+            push.putFloat(32, depthPrediction[0]); // prevDepthRow.x
+            push.putFloat(36, depthPrediction[1]); // prevDepthRow.y
+            push.putFloat(40, depthPrediction[2]); // prevDepthRow.z
+            push.putFloat(44, depthPrediction[3]); // prevDepthRow.w
             VK10.vkCmdPushConstants(cmd, reproject.pipelineLayout, VK10.VK_SHADER_STAGE_COMPUTE_BIT, 0, push);
             VK10.vkCmdDispatch(cmd, (width + 15) / 16, (height + 15) / 16, 1);
         }

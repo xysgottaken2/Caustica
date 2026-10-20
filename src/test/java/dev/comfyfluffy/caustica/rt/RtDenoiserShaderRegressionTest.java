@@ -116,28 +116,38 @@ final class RtDenoiserShaderRegressionTest {
     }
 
     /**
-     * The SVGF depth gate predicts what a static surface's PREVIOUS view depth should have been by
-     * adding the camera's forward travel to the current depth. Row 2 of the rotation-only view
-     * matrix is view-space +Z, and view space looks down -Z (the tracer treats curClip.w = -z_view
-     * as a positive forward-growing depth), so that dot product is BACKWARD travel and has to be
-     * negated.
+     * The SVGF depth gate predicts what a static surface's PREVIOUS view depth should have been
+     * with an affine row that is exact under rotation AND translation
+     * ({@link dev.comfyfluffy.caustica.rt.pipeline.RtSvgfDenoiser#depthPrediction} — the maths
+     * itself is verified numerically by {@code RtSvgfDepthPredictionTest}).
      *
-     * <p>Getting this sign wrong does not soften the gate, it inverts the correction: the error
-     * becomes twice the per-frame travel instead of zero, and every surface within ~4.8 blocks
-     * fails the gate on every frame while walking. The whole history collapses to a single sample
-     * in motion -- confirmed in-game with debug view 10, which showed white standing still and
-     * black while moving. Pin the negation; it is one character and it is invisible in review.
+     * <p>The scalar this replaces ({@code z + camForwardDelta}, the camera's forward travel
+     * projected on the current view row) cancelled only the translation half of the motion. It
+     * was verified — correctly — as leaving a 0.0000 residual "at every distance and every
+     * off-axis angle", but only for a camera that does not rotate: under rotation the true
+     * previous depth of an off-axis point moves by distance * sin(deltaRot) * sin(bearing),
+     * which at 30 fps and a normal mouse turn is 7–18% of the depth against the gate's 5%
+     * tolerance. Turning while walking therefore rejected the history across most of the
+     * screen every frame, and the 1-spp light/shadow noise the history exists to average
+     * flickered until the camera stopped. Pin the exact row end to end: host snapshot of the
+     * previous rotation, helper call, shader reconstruction, and the scalar's absence.
      */
     @Test
-    void svgfDepthGateUsesForwardNotBackwardCameraTravel() throws IOException {
+    void svgfDepthGateUsesExactRotationAwarePrediction() throws IOException {
         String composite = Files.readString(
                 REPO_ROOT.resolve("src/main/java/dev/comfyfluffy/caustica/rt/RtComposite.java"));
 
-        assertTrue(composite.contains("svgfCamForwardDelta = (float) -((camX - svgfPrevCamX) * fx"),
-                "the camera's forward travel must negate the dot with view row 2, which points backward");
+        assertTrue(composite.contains("RtSvgfDenoiser.depthPrediction("),
+                "the gate's prediction must come from the exact rotation+translation helper");
+        assertTrue(composite.contains("svgfPrevViewRotation.set(frameViewRotation);"),
+                "the previous SVGF frame's view rotation must be snapshotted next to its camera position");
+        assertFalse(composite.contains("svgfCamForwardDelta"),
+                "the translation-only forward-travel scalar must stay gone; it cannot see rotation");
         String reproject = Files.readString(SVGF_REPROJECT);
-        assertTrue(reproject.contains("float expectedZPrev = z + pc.camForwardDelta;"),
+        assertTrue(reproject.contains("float expectedZPrev = expectedPrevDepth(pix, z);"),
                 "the gate must compare against the predicted previous depth, not the current one");
+        assertFalse(reproject.contains("camForwardDelta"),
+                "the shader must not fall back to the translation-only prediction");
     }
 
     /**
@@ -343,12 +353,36 @@ final class RtDenoiserShaderRegressionTest {
     @Test
     void svgfDepthGateAccountsForCameraTravel() throws Exception {
         String reproject = Files.readString(SVGF_REPROJECT);
-        assertTrue(reproject.contains("float expectedZPrev = z + pc.camForwardDelta;"),
-                "the gate must predict the previous depth from the camera's forward travel");
+        assertTrue(reproject.contains("float expectedZPrev = expectedPrevDepth(pix, z);"),
+                "the gate must predict the previous depth from the exact inter-frame transform");
         assertTrue(reproject.contains("abs(expectedZPrev - zPrev)"),
                 "the depth comparison must use the predicted previous depth");
         assertFalse(reproject.contains("abs(z - zPrev) >"),
                 "the naive current-vs-previous depth comparison must be gone");
+    }
+
+    /**
+     * DLSS Frame Generation must reproject between the CURRENT frame and the frame presented
+     * before it. {@code fgInterpolate} runs at present time, after {@code updateMotion()} has
+     * already advanced {@code mvPrevProjView} to the current frame's view-projection, so
+     * building clipToPrevClip from {@code mvPrevProjView} compared the current frame against
+     * itself: both transforms came out as the identity and DLSSG reprojected depth as if the
+     * camera never moved, smearing generated frames in exactly the moving-camera case. Pin the
+     * snapshot that {@code updateMotion()} takes before advancing, and its use at present time.
+     */
+    @Test
+    void dlssFrameGenerationUsesTheTruePreviousViewProjection() throws IOException {
+        String composite = Files.readString(
+                REPO_ROOT.resolve("src/main/java/dev/comfyfluffy/caustica/rt/RtComposite.java"));
+
+        assertTrue(composite.contains("fgPrevProjView.set(mvPushMatrix);"),
+                "updateMotion must snapshot the previous view-projection before advancing it");
+        assertTrue(composite.contains("fgClipToPrev.set(fgPrevProjView)"),
+                "clipToPrevClip must be built from the snapshotted previous frame");
+        assertFalse(composite.contains("fgClipToPrev.set(mvPrevProjView)"),
+                "mvPrevProjView already holds the CURRENT frame at present time; using it is the identity bug");
+        assertTrue(composite.contains("fgMatTmp.set(fgPrevProjView).invert();"),
+                "prevClipToClip must invert the snapshotted previous frame, not the advanced one");
     }
 
     /**

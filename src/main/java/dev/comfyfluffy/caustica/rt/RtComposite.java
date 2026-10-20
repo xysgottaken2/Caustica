@@ -649,6 +649,15 @@ public final class RtComposite {
     private final Matrix4f fgClipToPrev = new Matrix4f();
     private final Matrix4f fgPrevToClip = new Matrix4f();
     private final Matrix4f fgMatTmp = new Matrix4f();
+    // View-projection of the real frame PRESENTED BEFORE the current one, snapshotted in
+    // updateMotion() at the moment the shader's prevViewProj is chosen. fgInterpolate runs at
+    // present time, AFTER updateMotion() has already advanced mvPrevProjView to the current
+    // frame's matrix, so reading mvPrevProjView there compares the current frame against
+    // itself and both clip<->prevClip transforms come out as the identity -- DLSSG then
+    // reprojects depth as if the camera had not moved, smearing generated frames exactly
+    // while the camera moves. This snapshot is the matrix the motion vectors were actually
+    // built against, which is the previous presented frame FG interpolates from.
+    private final Matrix4f fgPrevProjView = new Matrix4f();
     // Jitter applied to this frame's trace (signed, render pixels) — the FG PREPARE input wants the
     // same sub-pixel offset the camera rays used; captured in recordFrame, read at present time.
     private float fgJitterX;
@@ -686,6 +695,10 @@ public final class RtComposite {
     private double svgfPrevCamX;
     private double svgfPrevCamY;
     private double svgfPrevCamZ;
+    // Previous SVGF frame's view rotation, snapshotted alongside svgfPrevCam* after each SVGF
+    // dispatch. Together they describe the camera that produced svgfPrevViewZ/svgfPrevNormal, so
+    // RtSvgfDenoiser.depthPrediction can predict previous depths exactly (rotation included).
+    private final Matrix4f svgfPrevViewRotation = new Matrix4f();
     private RtSvgfDenoiser svgfDenoiser;
     /** Sky-mask pass over FSR FG's generated frames (see RtFgSkyMaskPipeline); created lazily. */
     private RtFgSkyMaskPipeline fgSkyMaskPipeline;
@@ -1539,6 +1552,10 @@ public final class RtComposite {
             mvCamDeltaY = 0f;
             mvCamDeltaZ = 0f;
         }
+        // Snapshot the previous frame's view-projection for frame generation BEFORE the
+        // advance below overwrites it: fgPrevProjView must still name the frame the motion
+        // vectors reproject into when fgInterpolate reads it at present time.
+        fgPrevProjView.set(mvPushMatrix);
         mvPrevProjView.set(mvCurProjView);
         mvPrevCamX = camX;
         mvPrevCamY = camY;
@@ -1954,37 +1971,32 @@ public final class RtComposite {
                 // previous frame's projection, so a zoom arrives as ordinary screen displacement
                 // that the reprojection follows and the geometry gate validates.
                 boolean svgfReset = !svgfHasHistory;
-                // How far the camera travelled ALONG THE VIEW AXIS since the previous frame. The
-                // reprojection gate uses it to predict what a static surface's previous view depth
-                // should have been; without it, walking forward changes every nearby surface's
-                // depth by more than the 5% tolerance and the gate throws the history away every
-                // frame (at 36 fps, ~0.12 blocks/frame already exceeds the tolerance inside
-                // ~2.5 blocks), which is both the noise and the blur reported while moving.
-                float svgfCamForwardDelta = 0.0f;
+                // Exact previous-depth prediction for the reprojection's geometry gate (see
+                // RtSvgfDenoiser.depthPrediction). The scalar this replaces predicted the
+                // previous depth from the camera's forward travel alone, which cancels only the
+                // TRANSLATION half of the inter-frame motion: with the camera also ROTATING
+                // (any mouse look while walking, view bob, a jump's pitch change) the prediction
+                // is off by distance * sin(deltaRot) * sin(bearing) -- 7-18% at 30 fps against
+                // the gate's 5% tolerance -- so valid history was rejected across most of the
+                // screen on every frame spent turning, and the un-averaged 1-spp light/shadow
+                // noise flickered until the camera stopped. The affine row used now is exact
+                // for rotation and translation together, at every pixel and distance; the
+                // snapshot it is built from (svgfPrevViewRotation/svgfPrevCam*) is taken after
+                // each SVGF dispatch below, matching the frame svgfPrevViewZ/svgfPrevNormal
+                // were copied from. Unused on a reset frame; the identity values keep the push
+                // finite regardless.
+                float[] svgfDepthPrediction = {0f, 0f, 1f, 0f, 1f, 1f, 0f, 0f};
                 if (svgfHasHistory && !svgfReset) {
-                    // Row 2 of the rotation-only view matrix is the view-space +Z axis, and view
-                    // space looks down -Z -- the tracer relies on exactly that when it treats
-                    // curClip.w (= -z_view) as a positive depth growing forward. So row 2 is the
-                    // BACKWARD axis and the dot product below must be negated to get the camera's
-                    // forward travel.
-                    //
-                    // Without the negation the term did not cancel the camera's motion, it DOUBLED
-                    // it: the predicted previous depth moved one step the wrong way, leaving an
-                    // error of 2x the per-frame travel. At 4.3 blocks/s and 36 fps that is 0.239
-                    // blocks against a 5% tolerance, so every surface closer than ~4.8 blocks
-                    // failed the depth gate on EVERY frame while walking, and the history was
-                    // rebuilt from a single sample each frame. Measured with debug view 10:
-                    // white (converged) standing still, black (no history) the moment the camera
-                    // moved. Negated, the prediction is exact -- the residual is 0.0000 blocks at
-                    // every distance and every off-axis angle.
-                    double fx = frameViewRotation.m02();
-                    double fy = frameViewRotation.m12();
-                    double fz = frameViewRotation.m22();
-                    svgfCamForwardDelta = (float) -((camX - svgfPrevCamX) * fx
-                            + (camY - svgfPrevCamY) * fy
-                            + (camZ - svgfPrevCamZ) * fz);
-                    if (!Float.isFinite(svgfCamForwardDelta)) {
-                        svgfCamForwardDelta = 0.0f;
+                    svgfDepthPrediction = RtSvgfDenoiser.depthPrediction(
+                            frameProjection, frameViewRotation, svgfPrevViewRotation,
+                            camX - svgfPrevCamX, camY - svgfPrevCamY, camZ - svgfPrevCamZ);
+                    for (int i = 0; i < svgfDepthPrediction.length; i++) {
+                        if (!Float.isFinite(svgfDepthPrediction[i])) {
+                            // A degenerate camera frame must not poison the push; resetting is
+                            // the safe answer (the shader discards history everywhere once).
+                            svgfReset = true;
+                            break;
+                        }
                     }
                 }
                 // FG amplifies residual per-frame sky noise into visible flicker (it interpolates
@@ -1998,7 +2010,7 @@ public final class RtComposite {
                             historyOut.view, momentsOut.view, svgfFilterPing.view,
                             gMotion.view, gViewZ.view, gNormal.view,
                             svgfPrevViewZ.view, svgfPrevNormal.view, gAlbedo.view,
-                            svgfReset, SVGF_MAX_FRAMES, svgfCamForwardDelta);
+                            svgfReset, SVGF_MAX_FRAMES, svgfDepthPrediction);
                     VulkanCommandEncoder.memoryBarrier(cmd, stack); // reprojection visible to the wavelet
 
                     // À-trous cascade with doubling tap spacing. The first iteration's output is
@@ -2045,10 +2057,13 @@ public final class RtComposite {
                 svgfWriteToPing = !svgfWriteToPing;
                 svgfHasHistory = true;
                 svgfRan = true;
-                // Camera snapshot for next frame's forward-travel prediction (see above).
+                // Camera snapshot for next frame's exact depth prediction (see above): the
+                // rotation joins the position so the prediction can cancel rotation as well
+                // as translation against the guides just snapshotted.
                 svgfPrevCamX = camX;
                 svgfPrevCamY = camY;
                 svgfPrevCamZ = camZ;
+                svgfPrevViewRotation.set(frameViewRotation);
             }
             if (!rrDone && fsrPath && RtFsrUpscaler.INSTANCE.ensureFeature(displayW, displayH)) {
                 try (RtDebugLabels.Scope ignored = RtDebugLabels.scope(ctx, cmd, "FSR upscale");
@@ -3440,10 +3455,14 @@ public final class RtComposite {
             }
             ensureFgInterp(ctx, count, swapW, swapH, fmt);
             // clipToPrevClip = prevVP * inverse(curVP); prevClipToClip = curVP * inverse(prevVP). Both from
-            // the (rotation-only, camera-relative) MV view-projections, so jitter-free.
+            // the (rotation-only, camera-relative) MV view-projections, so jitter-free. prevVP is
+            // fgPrevProjView, NOT mvPrevProjView: updateMotion() has already advanced the latter
+            // to the current frame (it now serves as the NEXT frame's "previous"), so using it
+            // here would build both transforms from the same matrix and hand DLSSG an identity
+            // camera move on every generated frame.
             fgMatTmp.set(mvCurProjView).invert();
-            fgClipToPrev.set(mvPrevProjView).mul(fgMatTmp);
-            fgMatTmp.set(mvPrevProjView).invert();
+            fgClipToPrev.set(fgPrevProjView).mul(fgMatTmp);
+            fgMatTmp.set(fgPrevProjView).invert();
             fgPrevToClip.set(mvCurProjView).mul(fgMatTmp);
         }
         if (index < 1 || index > fgInterp.length || fgInterp[index - 1] == null) {

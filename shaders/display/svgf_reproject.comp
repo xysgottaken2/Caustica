@@ -46,11 +46,24 @@ layout(push_constant) uniform Push {
     int height;
     int reset;         // 1 = discard history everywhere (FOV change, rebase jump, toggle, first frame)
     float maxFrames;   // accumulation window cap: alpha never falls below 1 / maxFrames
-    // How much closer (positive) a static surface got along the view axis since the previous frame,
-    // i.e. the camera's forward travel projected on the previous view direction. Used to predict
-    // what a surviving surface's PREVIOUS view depth should have been, so ordinary movement is not
-    // mistaken for a disocclusion. Zero when the camera did not move.
-    float camForwardDelta;
+    // Inverse projection scales of the CURRENT frame: viewPos.xy = ndc * viewZ * invProj
+    // (the projection's x/y shears below complete the reconstruction). Supplied by the host
+    // (RtSvgfDenoiser.depthPrediction) so the depth gate can rebuild this pixel's view-space
+    // position from its pixel coordinate and viewZ alone.
+    vec2 invProj;      // (1 / proj.m00, 1 / proj.m11), signs included
+    vec2 projShear;    // (proj.m20, proj.m21): clip.xy coefficients of view Z (view-bob shear)
+    // Exact previous-depth prediction, as one affine row (see expectedPrevDepth):
+    //   expectedZPrev = -(dot(prevDepthRow.xyz, viewPos) + prevDepthRow.w)
+    // where the xyz row is row 2 of (prevViewRot * curViewRot^T) and w folds in the camera
+    // translation. This replaces the old scalar forward-travel prediction, which computed the
+    // previous depth as if the camera had only TRANSLATED: it is exact for pure translation
+    // (the case its author verified, residual 0.0000 at every angle), but under camera
+    // ROTATION the true previous depth of an off-axis point moves by up to
+    // distance * sin(deltaRot) * sin(bearing) -- at 30 fps and a normal mouse turn that is
+    // 7-18% of the depth against this gate's 5% tolerance, so turning while walking rejected
+    // the history across most of the screen every frame and the 1-spp light/shadow noise --
+    // which the history exists to average away -- flickered until the camera stopped.
+    vec4 prevDepthRow;
 } pc;
 
 // Matches the viewZ the tracer writes for sky/miss pixels (RtComposite.NRD_DENOISING_RANGE):
@@ -143,6 +156,25 @@ bool isSky(float z) {
 }
 
 /**
+ * The view depth the surface at this pixel is EXPECTED to have had last frame, computed
+ * exactly for arbitrary camera rotation + translation: rebuild the point's current
+ * view-space position from its (unjittered) pixel NDC and viewZ, then apply the affine
+ * row the host folded from prevViewRot * curViewRot^T and the camera delta.
+ *
+ * The sub-pixel jitter is deliberately not reconstructed: the surface point lies along
+ * the jittered ray, not the pixel-centre ray, but that lateral offset changes the
+ * predicted DEPTH only at second order (well under the gate's 5% tolerance), while the
+ * first-order rotation term this replaces it with was the dominant error by two orders
+ * of magnitude. A point that was behind the previous camera predicts <= 0 and is
+ * rejected by the caller's comparison, which is the correct disocclusion answer.
+ */
+float expectedPrevDepth(ivec2 pix, float z) {
+    vec2 ndc = (vec2(pix) + 0.5) / vec2(float(pc.width), float(pc.height)) * 2.0 - 1.0;
+    vec3 viewPos = vec3((ndc + pc.projShear) * z * pc.invProj, -z);
+    return -(dot(pc.prevDepthRow.xyz, viewPos) + pc.prevDepthRow.w);
+}
+
+/**
  * Is the surface that lived at `prevPix` last frame the same surface we see at this pixel now?
  * Geometry answers this far more reliably than colour: a disocclusion changes depth or normal
  * discontinuously, while noise leaves both untouched.
@@ -164,6 +196,9 @@ bool reprojectionValid(ivec2 prevPix, float z, vec3 n, bool sky, float expectedZ
     // ~2.5 blocks, so every nearby surface reset its history EVERY frame while moving. That is
     // both halves of the report at once -- no accumulation (noise) and a permanently short history
     // that forces the wide fallback filter (blur) -- and it disappeared when standing still.
+    // The expectation itself is now exact under rotation as well as translation (see
+    // expectedPrevDepth); the tolerance is then free to stay at the 5% that catches real
+    // disocclusions instead of absorbing the prediction's own error.
     if (abs(expectedZPrev - zPrev) > DEPTH_TOLERANCE * max(expectedZPrev, 1.0)) {
         return false;
     }
@@ -203,10 +238,12 @@ void main() {
             frac.x * frac.y);
     ivec2 offsets[4] = ivec2[4](ivec2(0, 0), ivec2(1, 0), ivec2(0, 1), ivec2(1, 1));
 
-    // A static surface seen at view depth z now was at z + camForwardDelta last frame (the camera
-    // moved camForwardDelta towards it). Predicting this is what lets the depth gate stay tight
-    // enough to catch real disocclusion while ignoring the camera's own motion.
-    float expectedZPrev = z + pc.camForwardDelta;
+    // A static surface's previous view depth, predicted exactly from this pixel's view-space
+    // position and the inter-frame camera transform (rotation + translation). Predicting this
+    // is what lets the depth gate stay tight enough to catch real disocclusion while ignoring
+    // the camera's own motion -- including the turn-while-walking case the old forward-travel
+    // scalar got wrong.
+    float expectedZPrev = expectedPrevDepth(pix, z);
 
     vec3 histColor = vec3(0.0);
     vec2 histMoments = vec2(0.0);
