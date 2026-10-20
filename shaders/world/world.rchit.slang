@@ -650,10 +650,14 @@ void main(inout Payload payload, in BuiltInTriangleIntersectionAttributes attr) 
         }
         float4 particleTexel = entityAlbedoTex[NonUniformResourceIndex(pslot)].SampleLevel(puv, particleLod);
         bool weatherSheet = (pr.flags & PRIM_WEATHER) != 0u;
-        // Rain/snow columns and splash billboards are clear-water droplets, not blue paint: neutral
-        // near-white albedo, with the sprite's alpha (times the capture coverage) acting as coverage.
-        payload.albedo = weatherSheet
-                ? half3(0.90h, 0.94h, 0.97h)
+        bool snowSheet = (pr.flags & PRIM_WEATHER_SNOW) != 0u;
+        // Rain columns and splash billboards are clear-water droplets, not blue paint: neutral near-white
+        // albedo, with the sprite's alpha (times the capture coverage) acting as coverage. Snow is the
+        // other kind of precipitation — a bright diffuse ice crystal — so it gets a near-white albedo too
+        // and is shaded by the ordinary particle path rather than through the refractive droplet branch.
+        payload.albedo = snowSheet
+                ? half3(0.93h, 0.95h, 0.99h)
+                : weatherSheet ? half3(0.90h, 0.94h, 0.97h)
                 : half3(srgbToLinear(particleTexel.rgb) * pr.tint.rgb);
         float weatherCoverage = clamp(asfloat(pr.aux0) * particleTexel.a, 0.0, 1.0);
         payload.normal = half3(pn);
@@ -673,9 +677,13 @@ void main(inout Payload payload, in BuiltInTriangleIntersectionAttributes attr) 
         float particleCoverage = weatherSheet ? weatherCoverage : 1.0;
         payloadSetPacked(payload, MATERIAL_PARTICLE, particleCoverage, 0.0, 0.0, 0.0,
                 1.0, 0.0, EMISSION_SOURCE_NONE);
-        // Rain/snow sheets are tagged at capture (RtWeatherCapture) and shaded as translucent refractive
-        // droplets in raygen — the path tracer's light response was visibly breaking them.
-        if (weatherSheet) {
+        // Rain sheets are tagged at capture (RtWeatherCapture) and shaded as translucent refractive
+        // droplets in raygen — the path tracer's light response was visibly breaking them. Snow shares
+        // the capture and coverage rules but not the optics: it is a diffuse scatterer, so it carries
+        // its own tag and raygen leaves the background behind the flake untouched.
+        if (snowSheet) {
+            payload.flags |= PAYLOAD_WEATHER_SNOW;
+        } else if (weatherSheet) {
             payload.flags |= PAYLOAD_WEATHER;
         }
         return;

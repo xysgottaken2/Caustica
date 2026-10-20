@@ -60,15 +60,21 @@ public final class RtEntityCapture implements VertexConsumer {
     // block-entity portal geometry (EndPortalRenderer's quad, endermen holding portal blocks) with
     // the procedural portal surfaces instead of the flat atlas texture.
     int currentPortalFlags;
-    // Extra per-prim flags for the current submission, OR-ed into the same flags lane. Two consumers
-    // today: the weather capture (PRIM_FLAG_WEATHER: rain/snow sheets must reach raygen tagged so they
-    // can be shaded UNLIT — the path tracer's light response was visibly breaking them) and the glint
+    // Extra per-prim flags for the current submission, OR-ed into the same flags lane. Three consumers
+    // today: the weather capture (PRIM_FLAG_WEATHER for rain/snow coverage, plus PRIM_FLAG_WEATHER_SNOW
+    // on snow so raygen never refracts through a flake), and the glint
     // paths (PRIM_FLAG_GLINT: enchantment/foil overlays are special-captured like the portal surfaces,
     // so world.rchit shades them with an animated self-lit branch). Particles share the flags lane but
     // never carry portal tags, so these bits are unambiguous there.
     int currentPrimFlags;
     /** Mirrors world_common.slang's PRIM_WEATHER. */
     static final int PRIM_FLAG_WEATHER = 16;
+    /**
+     * Mirrors world_common.slang's PRIM_WEATHER_SNOW. Both precipitation kinds carry
+     * {@link #PRIM_FLAG_WEATHER} (they share the capture path and the coverage dither); this extra bit
+     * says the sheet is snow, which scatters light diffusely instead of refracting it.
+     */
+    static final int PRIM_FLAG_WEATHER_SNOW = 32;
     /** Mirrors world_common.slang's PRIM_GLINT (entity-only bit; terrain never sets it). */
     static final int PRIM_FLAG_GLINT = 8;
     // Bindless texture slot of the armour layer this glint submission sits on (0 = none/unknown).

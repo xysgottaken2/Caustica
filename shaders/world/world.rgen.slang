@@ -428,11 +428,15 @@ public float3 tracePath(PathSegment seg, uint2 pix, uint sampleIndex,
             }
             float3 albedo = payload.albedo;
 
-            // Rain/snow sheets are not opaque blue panels: alpha is stochastic coverage in any-hit,
+            // Rain sheets are not opaque blue panels: alpha is stochastic coverage in any-hit,
             // and the accepted sample behaves like a thin refractive droplet. Add only a very faint,
             // mostly-neutral glint, bend the continuation ray slightly, and keep tracing the
             // background. The next iteration uses CULL_SECONDARY so the same camera-facing sheet
             // cannot be hit again.
+            //
+            // Snow never enters this branch: world.rchit gives a snowflake its own payload tag instead
+            // of PAYLOAD_WEATHER, because a flake is a diffuse ice crystal and not a lens. It falls
+            // through to the ordinary billboard shading below with its white albedo.
             if ((payload.flags & PAYLOAD_WEATHER) != 0u) {
                 float coverage = saturate(payloadRoughness());
                 // Ignore vanilla's blue weather tint: the sprite texture supplies coverage, not a

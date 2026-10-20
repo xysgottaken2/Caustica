@@ -314,12 +314,17 @@ public static const uint TERRAIN_PRIM_CUTOUT = 16u;
 public static const uint TERRAIN_PRIM_TRANSLUCENT = 32u;
 // Prim.flags (entity prims): a vanilla rain/snow sheet captured by RtWeatherCapture, or one of
 // vanilla's little rain-impact/splash billboards. Shares the flags lane the portal tags use on terrain —
-// particles never carry portal tags, so the bit is unambiguous. Raygen shades accepted samples as thin
-// refractive droplets (see PAYLOAD_WEATHER): neutral near-white albedo, stochastic alpha coverage in
-// any-hit, and the continuation ray bent through the sheet, so rain reads as clear water instead of
-// opaque blue bars. The sheets stay real BLAS geometry, so terrain still occludes them and the
-// heightmap clip still works.
+// particles never carry portal tags, so the bit is unambiguous. It selects the weather COVERAGE rules:
+// neutral near-white albedo and stochastic alpha in any-hit, so the sheets stop reading as opaque blue
+// bars. The sheets stay real BLAS geometry, so terrain still occludes them and the heightmap clip still
+// works. Refraction is a separate decision — see PRIM_WEATHER_SNOW and PAYLOAD_WEATHER.
 public static const uint PRIM_WEATHER = 16u;
+// Prim.flags bit 5: the weather sheet above is SNOW, not rain. Both kinds share the capture path and
+// the coverage dither, but a snowflake is a diffuse ice crystal: it scatters light instead of passing
+// it through, so raygen must not bend the continuation ray around it. world.rchit turns this bit into
+// PAYLOAD_WEATHER_SNOW (and deliberately not PAYLOAD_WEATHER), which shades the flake as an ordinary
+// white billboard — NEE, RIS and hand light included — like every other particle.
+public static const uint PRIM_WEATHER_SNOW = 32u;
 // Prim.flags (entity prims): an enchantment/foil glint overlay captured by RtEntityCollector. Tagging
 // lets world.rchit shade it with a dedicated branch — an animated, self-lit shimmer (the same special
 // capture the portal surfaces get) instead of a scene-lit paint — while world.rahit keeps the vanilla
@@ -374,10 +379,15 @@ public static const uint PAYLOAD_RAY_IN_WATER = 2048u;
 // Set by world.rchit on water hits whose surface is open to precipitation (the mesher's rain-exposed
 // bit): cave/roof water gets no rain-impact rings.
 public static const uint PAYLOAD_WATER_RAIN_EXPOSED = 4096u;
-// Rain/snow sheet (Prim.flags carried through by world.rchit): raygen treats an accepted sample as a
-// thin refractive droplet — a faint near-white glint plus a Snell-bent continuation — instead of
-// lighting the sheet like a diffuse surface. See PRIM_WEATHER.
+// RAIN sheet (Prim.flags carried through by world.rchit): raygen treats an accepted sample as a thin
+// refractive droplet — a faint near-white glint plus a Snell-bent continuation — instead of lighting
+// the sheet like a diffuse surface. See PRIM_WEATHER.
 public static const uint PAYLOAD_WEATHER = 512u;
+// SNOW sheet: the flake is a diffuse scatterer, so world.rchit sets this INSTEAD of PAYLOAD_WEATHER.
+// Raygen's droplet branch is gated on PAYLOAD_WEATHER, so snow simply falls through to the ordinary
+// billboard shading (white albedo, sun/moon NEE, RIS emitters, held light) and the background behind
+// it is left unbent — a snowflake does not act like a lens.
+public static const uint PAYLOAD_WEATHER_SNOW = 8192u;
 // End portal night-sky surface (set by world.rchit on both the terrain and the entity/block-entity
 // portal branches): raygen shades it fully UNLIT — only its own emission is added, then the path
 // ends. No NEE, no hand light, no RIS, no SHaRC and no indirect bounce, so no scene light (a

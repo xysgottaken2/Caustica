@@ -212,15 +212,19 @@ public final class RtWeatherCapture {
             return 0;
         }
         int captured = 0;
-        // Tag every emitted sheet (PRIM_WEATHER) so raygen shades an accepted sample as a thin
-        // refractive droplet instead of a lit billboard. The sheets stay real geometry — terrain
-        // occlusion and the heightmap clip are kept — but their alpha is stochastic coverage and the
-        // continuation ray bends through them.
+        // Tag every emitted sheet (PRIM_WEATHER) so raygen applies the weather coverage rules instead of
+        // shading a blue billboard. The sheets stay real geometry — terrain occlusion and the heightmap
+        // clip are kept — and their alpha is stochastic coverage.
         capture.currentPrimFlags = RtEntityCapture.PRIM_FLAG_WEATHER;
         capture.currentGlintArmorSlot = 0; // weather never carries a glint armour context
         try {
+            // Rain is a water droplet and gets the refractive branch in raygen.
             captured += captureColumns(capture, out, state.rainColumns, camPos, RAIN_MAX_ALPHA,
                     state.radius, intensity, RAIN_LOCATION, budget - captured);
+            // Snow shares the capture and coverage rules but not the optics: the extra tag keeps raygen
+            // out of the droplet branch, because a flake scatters light diffusely instead of bending it.
+            capture.currentPrimFlags = RtEntityCapture.PRIM_FLAG_WEATHER
+                    | RtEntityCapture.PRIM_FLAG_WEATHER_SNOW;
             captured += captureColumns(capture, out, state.snowColumns, camPos, SNOW_MAX_ALPHA,
                     state.radius, intensity, SNOW_LOCATION, budget - captured);
         } catch (Throwable t) {

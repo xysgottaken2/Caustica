@@ -76,8 +76,9 @@ public PathSegment tracePrimary(PathSegment seg,
                 gv_motionUseRefracted = false;
                 gv_motionObjDisp = payload.motionPrev;
                 if (material == MATERIAL_PARTICLE) {
-                    // Weather sheets are translucent droplets; guide them with the neutral droplet
-                    // albedo rather than the sprite's blue weather tint.
+                    // Rain sheets are translucent droplets; guide them with the neutral droplet albedo
+                    // rather than the sprite's blue weather tint. Snow already carries its own bright
+                    // albedo in the payload, so the same fallback covers both.
                     gv_albedo = (payload.flags & PAYLOAD_WEATHER) != 0u
                             ? float3(0.90, 0.94, 0.97) : float3(payload.albedo);
                     gv_rough = 1.0;

@@ -334,6 +334,67 @@ final class RtWeatherCaptureTest {
                 "a plain > 0 test admits a whole storm's worth of columns that never draw");
     }
 
+    /**
+     * Snow must not be refracted like rain.
+     *
+     * <p>Both kinds of precipitation share one capture path, one BLAS and one coverage dither, so the
+     * earlier port tagged them with the same bit and raygen bent the continuation ray through both. That
+     * is right for a raindrop — a small water lens — and wrong for a snowflake, which is a diffuse ice
+     * crystal: the background behind a flake must not swim, and the flake itself should read as a bright
+     * scatterer lit by the scene rather than as a transparent droplet.
+     *
+     * <p>The split is three assertions deep because a regression at any of them silently restores the
+     * old look: the capture has to tag snow separately, {@code world.rchit} has to turn that into a
+     * payload bit <em>instead of</em> the rain one, and raygen's droplet branch must stay gated on the
+     * rain bit alone.
+     */
+    @Test
+    void snowIsTaggedSeparatelySoItIsNotRefracted() throws IOException {
+        String src = Files.readString(source());
+        String capture = Files.readString(REPO_ROOT.resolve(
+                "src/main/java/dev/comfyfluffy/caustica/rt/entity/RtEntityCapture.java"));
+        String common = Files.readString(REPO_ROOT.resolve("shaders/world/world_common.slang"));
+        String rchit = Files.readString(REPO_ROOT.resolve("shaders/world/world.rchit.slang"));
+        String rgen = Files.readString(REPO_ROOT.resolve("shaders/world/world.rgen.slang"));
+
+        // The bit has to mean the same thing on both sides of the ABI.
+        assertTrue(capture.contains("PRIM_FLAG_WEATHER_SNOW = 32;"),
+                "RtEntityCapture must mirror world_common's PRIM_WEATHER_SNOW");
+        assertTrue(common.contains("public static const uint PRIM_WEATHER_SNOW = 32u;"),
+                "PRIM_WEATHER_SNOW must be bit 5, clear of PRIM_GLINT (8) and PRIM_WEATHER (16)");
+        assertTrue(common.contains("public static const uint PAYLOAD_WEATHER_SNOW = 8192u;"),
+                "snow needs its own payload bit; reusing PAYLOAD_WEATHER would refract it");
+
+        // The capture: rain keeps the plain weather tag, snow adds the extra one.
+        int rainCall = src.indexOf("state.rainColumns");
+        int snowCall = src.indexOf("state.snowColumns");
+        assertTrue(rainCall > 0 && snowCall > rainCall, "the rain list must be captured before the snow list");
+        String beforeRain = src.substring(Math.max(0, rainCall - 400), rainCall);
+        String between = src.substring(rainCall, snowCall);
+        assertTrue(beforeRain.contains("capture.currentPrimFlags = RtEntityCapture.PRIM_FLAG_WEATHER;"),
+                "rain must carry the weather bit to get the coverage rules");
+        assertFalse(beforeRain.contains("PRIM_FLAG_WEATHER_SNOW"),
+                "rain must NOT carry the snow bit, or it would lose its refraction");
+        assertTrue(between.contains("RtEntityCapture.PRIM_FLAG_WEATHER_SNOW"),
+                "snow must be tagged with the extra bit before its columns are captured");
+        assertTrue(between.contains("| RtEntityCapture.PRIM_FLAG_WEATHER_SNOW"),
+                "snow still needs the shared weather bit: only the optics differ, not the coverage");
+
+        // The hit shader: snow sets its own payload bit instead of the refractive one.
+        assertTrue(rchit.contains("bool snowSheet = (pr.flags & PRIM_WEATHER_SNOW) != 0u;"),
+                "world.rchit must read the snow tag");
+        assertTrue(rchit.contains("if (snowSheet) {\n            payload.flags |= PAYLOAD_WEATHER_SNOW;"
+                        + "\n        } else if (weatherSheet) {"),
+                "snow must set PAYLOAD_WEATHER_SNOW and rain the droplet bit — never both");
+
+        // Raygen: only the rain bit opens the refractive branch, and snow is never mentioned there, so
+        // a flake cannot be pulled back into it by a later edit.
+        assertTrue(rgen.contains("if ((payload.flags & PAYLOAD_WEATHER) != 0u) {"),
+                "the droplet branch must stay gated on PAYLOAD_WEATHER");
+        assertFalse(rgen.contains("PAYLOAD_WEATHER_SNOW"),
+                "raygen must not branch on the snow tag at all: snow simply skips the droplet path");
+    }
+
     private static Path anyHitShader() {
         return repoRoot().resolve("shaders/world/world.rahit.slang");
     }
