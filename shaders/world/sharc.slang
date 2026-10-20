@@ -19,11 +19,13 @@
 //     the entry with a count-weighted blend, AND back-propagate it into the previous vertices'
 //     entries weighted by the throughput ratio between the vertices. The back-propagation is what
 //     turns the cache from a "direct light field" into a real multi-bounce GI cache.
-//   * RENDER/QUERY (bounce >= startBounce): BEFORE the vertex adds any local light, query the cache
-//     at the vertex's own cell. On a hit the cached outgoing radiance REPLACES the vertex's entire
-//     shading and the rest of the path: L += throughput * cached, terminate (this is exactly the
-//     RTXGI SDK sample's `sampleRadiance += sharcRadiance * throughput; break;`). No albedo, no
-//     1/pi, no confidence factor - the cached value is already outgoing radiance.
+//   * RENDER/QUERY (bounce >= startBounce, default 1 = every eligible hit except the primary hit,
+//     which is never queried because that would quantise the image's own direct light to voxel
+//     resolution): BEFORE the vertex adds any local light, query the cache at the vertex's own
+//     cell. On a hit the cached outgoing radiance REPLACES the vertex's entire shading and the rest
+//     of the path: L += throughput * cached, terminate (this is exactly the RTXGI SDK sample's
+//     `sampleRadiance += sharcRadiance * throughput; break;`). No albedo, no 1/pi, no confidence
+//     factor - the cached value is already outgoing radiance.
 //
 // Correctness guards mirrored from NVIDIA's implementation and integration guide:
 //   * the query requires the arriving segment to be longer than one cell diagonal, so a path can

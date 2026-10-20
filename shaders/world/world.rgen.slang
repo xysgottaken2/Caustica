@@ -569,6 +569,21 @@ public float3 tracePath(PathSegment seg, uint2 pix, uint sampleIndex,
         // past the start bounce, never the ReSTIR receiver vertex (it must shade its reservoir),
         // and the arriving segment must be longer than one cell diagonal so a path can never read
         // back the entry its own previous vertex just wrote (self-feedback / energy gain).
+        //
+        // startBounce defaults to 1 — NVIDIA's contract: query every eligible hit EXCEPT the primary
+        // hit. Bounce 0 is the primary hit and is never queried (the config floor is 1): replacing it
+        // would quantise the image's own direct light to voxel resolution. Bounce 1 is the first
+        // indirect hit and carries most of a dark scene's variance (one emitter sample, one sky
+        // sample, Russian-roulette survivors), which is exactly what the cache exists to remove; the
+        // old default of 2 left ~99% of that variance fully traced and made the feature look inert.
+        //
+        // Update paths query too (Caustica fuses NVIDIA's separate Update and Render passes into one
+        // trace). That is deliberate: excluding them would turn each pixel into a per-frame coin flip
+        // between a traced and a cached tail, which adds more temporal variance than it removes. The
+        // cost is that a path which hits stops before propagating into the cell it stopped in, so
+        // entries sit slightly below the full tail they replace (~1% image energy, measured, and it
+        // does not grow with scene brightness). Separating the passes on the host would remove that
+        // bias, at the price of a second trace.
         if (sharcEnabled() && sharcReady(worldPush)
                 && bounce >= int(worldPush.sharcParams2.x)
                 && channel != 2

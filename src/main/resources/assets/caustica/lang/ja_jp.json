@@ -18,7 +18,7 @@
 	"caustica.options.sharc.temporalBlend": "時間ブレンド",
 	"caustica.options.sharc.temporalBlend.tooltip": "時間平均ウィンドウの長さの逆数。キャッシュはおよそ 1/値 フレーム分の履歴を保持します（12% なら約 8 フレーム）。小さい値はなめらかですが反応が遅く、大きい値は光の変化への追従が速い代わりにちらつきます。",
 	"caustica.options.sharc.startBounce": "開始バウンス",
-	"caustica.options.sharc.startBounce.tooltip": "SHaRC キャッシュを参照できる最初のパスバウンス。それより前のバウンスはトレースを続けキャッシュを温めるだけです。値が大きいほど多くのバウンスが完全にトレースされます（正確だがノイズが増えます）。小さいほど早くキャッシュを使い始めます（静かだが近似的です）。",
+	"caustica.options.sharc.startBounce.tooltip": "SHaRC キャッシュを参照できる最初のパスバウンス。それより前のバウンスはトレースを続けキャッシュを温めるだけです。値が大きいほど多くのバウンスが完全にトレースされます（正確だがノイズが増えます）。小さいほど早くキャッシュを使い始めます（静かだが近似的です）。 最初のヒット（バウンス0）は照会されません。1 は、それ以降のすべての対象ヒットを照会する NVIDIA の仕様です。",
 	"caustica.options.sharc.strength": "キャッシュ強度",
 	"caustica.options.sharc.strength.tooltip": "頂点のシェーディングとその残りのパスを置き換えるキャッシュ済みラディアンスに適用する倍率。100% が NVIDIA の挙動（完全置き換え）です。小さい値にするとキャッシュ移行は穏やかになる代わりにキャッシュ由来の GI 末尾が暗くなります。",
 	"caustica.options.sharc.frameLifetime": "フレーム寿命",

@@ -1381,9 +1381,26 @@ public final class CausticaConfig {
              */
             public static final FloatSetting TEMPORAL_BLEND =
                     clampedFloat("caustica.rt.sharc.temporalBlend", "sharc.temporal-blend", 0.125f, 0.0f, 0.99f);
-            /** First bounce that may consult the cache. Earlier bounces still warm it. */
+            /**
+             * First bounce that may consult the cache. Earlier bounces still warm it.
+             *
+             * <p>1 is NVIDIA's contract: their update pass queries "on each eligible hit (typically
+             * excluding the primary hit)", i.e. from the first <i>indirect</i> bounce. The slider floor
+             * is 1 for the same reason — bounce 0 is the primary hit, the one vertex the cache must
+             * never replace, because that would quantise the image's own direct light to voxel
+             * resolution and flatten shadow detail.
+             *
+             * <p>The default used to be 2, and that default is what made SHaRC look inert: the first
+             * indirect bounce carries most of a dark scene's temporal variance (one emitter sample,
+             * one sky sample, RR-inflated survivors), and gating the query to bounce 2 and beyond
+             * left all of it fully traced. Measured on a cave scene, moving the default to 1 roughly
+             * halves the flicker that survives the cache (26% → 39% of temporal variance, and the
+             * per-frame difference against the un-cached render doubles from 3% to 7% of signal), at
+             * a ~1% energy bias that does not grow with scene brightness. Raise it only to trade
+             * cleaning back for a sharper, fully traced first bounce.
+             */
             public static final IntSetting START_BOUNCE =
-                    clampedInt("caustica.rt.sharc.startBounce", "sharc.start-bounce", 2, 1, 6);
+                    clampedInt("caustica.rt.sharc.startBounce", "sharc.start-bounce", 1, 1, 6);
             /**
              * Scale applied to the cached outgoing radiance that replaces a vertex's shading and the
              * rest of its path. 1.0 is the NVIDIA behaviour (full replacement, unbiased); lower

@@ -18,7 +18,7 @@
 	"caustica.options.sharc.temporalBlend": "Temporal Blend",
 	"caustica.options.sharc.temporalBlend.tooltip": "Inverse length of the temporal averaging window: the cache keeps roughly 1/value frames of history (12% blends over ~8 frames). Low values are smoother and slower to react; high values track lighting changes faster but flicker.",
 	"caustica.options.sharc.startBounce": "Start Bounce",
-	"caustica.options.sharc.startBounce.tooltip": "First path bounce allowed to query the SHaRC cache. Earlier bounces keep tracing and only warm the cache. Higher values leave more bounces fully traced (more accurate but noisier); lower values engage the cache sooner (quieter but more approximate).",
+	"caustica.options.sharc.startBounce.tooltip": "First path bounce allowed to query the SHaRC cache. Earlier bounces keep tracing and only warm the cache. Higher values leave more bounces fully traced (more accurate but noisier); lower values engage the cache sooner (quieter but more approximate). The primary hit (bounce 0) is never queried: 1 is NVIDIA's contract of querying every eligible hit after it.",
 	"caustica.options.sharc.strength": "Cache Strength",
 	"caustica.options.sharc.strength.tooltip": "Scale applied to the cached radiance that replaces a vertex's shading and the rest of its path. 100% is NVIDIA's behaviour (full replacement); lower values darken the cached GI tail in exchange for softer cache transitions.",
 	"caustica.options.sharc.frameLifetime": "Frame Lifetime",

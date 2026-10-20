@@ -18,7 +18,7 @@
 	"caustica.options.sharc.temporalBlend": "Zeitliche Mischung",
 	"caustica.options.sharc.temporalBlend.tooltip": "Inverse Länge des zeitlichen Mittelungsfensters: der Cache behält etwa 1/Wert Frames an Verlauf (12 % mitteln über ~8 Frames). Kleine Werte sind ruhiger, reagieren aber langsamer; hohe Werte folgen Lichtänderungen schneller, flackern aber.",
 	"caustica.options.sharc.startBounce": "Start-Bounce",
-	"caustica.options.sharc.startBounce.tooltip": "Erster Pfad-Bounce, der den SHaRC-Cache abfragen darf. Frühere Bounces tracen weiter und laden nur den Cache. Höhere Werte lassen mehr Bounces vollständig tracen (genauer, aber verrauschter); niedrigere Werte nutzen den Cache früher (ruhiger, aber näherungsweise).",
+	"caustica.options.sharc.startBounce.tooltip": "Erster Pfad-Bounce, der den SHaRC-Cache abfragen darf. Frühere Bounces tracen weiter und laden nur den Cache. Höhere Werte lassen mehr Bounces vollständig tracen (genauer, aber verrauschter); niedrigere Werte nutzen den Cache früher (ruhiger, aber näherungsweise). Der Primärtreffer (Bounce 0) wird nie abgefragt: 1 folgt NVIDIAs Vertrag, jeden zulässigen Treffer danach abzufragen.",
 	"caustica.options.sharc.strength": "Cache-Stärke",
 	"caustica.options.sharc.strength.tooltip": "Skalierung der gecachten Radiance, die die Schattierung eines Vertex und den Rest seines Pfads ersetzt. 100 % ist NVIDIAs Verhalten (vollständiger Ersatz); niedrigere Werte dunkeln den gecachten GI-Anteil ab und weichen Cache-Übergänge auf.",
 	"caustica.options.sharc.frameLifetime": "Frame-Lebensdauer",

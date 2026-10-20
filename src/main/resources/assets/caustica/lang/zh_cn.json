@@ -18,7 +18,7 @@
 	"caustica.options.sharc.temporalBlend": "时间混合",
 	"caustica.options.sharc.temporalBlend.tooltip": "时间平均窗口长度的倒数：缓存保留约 1/数值帧的历史（12% 在约 8 帧内混合）。低值更平滑但反应更慢；高值更快跟踪光照变化，但会闪烁。",
 	"caustica.options.sharc.startBounce": "起始反弹",
-	"caustica.options.sharc.startBounce.tooltip": "允许查询 SHaRC 缓存的第一个路径反弹。更早的反弹继续追踪，只为缓存预热。较高的值让更多反弹完整追踪（更准确但更噪）；较低的值更早启用缓存（更安静但更近似）。",
+	"caustica.options.sharc.startBounce.tooltip": "允许查询 SHaRC 缓存的第一个路径反弹。更早的反弹继续追踪，只为缓存预热。较高的值让更多反弹完整追踪（更准确但更噪）；较低的值更早启用缓存（更安静但更近似）。 不会查询主命中（第 0 次反弹）：1 遵循 NVIDIA 的约定，即查询其后每一次符合条件的命中。",
 	"caustica.options.sharc.strength": "缓存强度",
 	"caustica.options.sharc.strength.tooltip": "对替代顶点着色及其路径余下部分的缓存辐亮度施加的比例。100% 即 NVIDIA 的行为（完全替代）；更低的值会调暗缓存 GI 尾部，以换取更柔和的缓存过渡。",
 	"caustica.options.sharc.frameLifetime": "帧寿命",

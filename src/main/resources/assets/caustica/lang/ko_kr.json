@@ -18,7 +18,7 @@
 	"caustica.options.sharc.temporalBlend": "시간 블렌드",
 	"caustica.options.sharc.temporalBlend.tooltip": "시간 평균 창 길이의 역수. 캐시는 대략 1/값 프레임의 기록을 유지합니다(12%는 약 8 프레임에 걸쳐 블렌드). 낮은 값은 더 부드럽지만 반응이 느리고, 높은 값은 조명 변화를 더 빨리 따라가지만 깜빡입니다.",
 	"caustica.options.sharc.startBounce": "시작 바운스",
-	"caustica.options.sharc.startBounce.tooltip": "SHaRC 캐시를 조회할 수 있는 첫 패스 바운스. 그 이전 바운스는 추적을 계속하며 캐시만 예열합니다. 값이 높으면 더 많은 바운스가 온전히 추적됩니다(더 정확하지만 더 노이즈가 큼). 낮으면 캐시를 더 일찍 씁니다(더 조용하지만 더 근사치).",
+	"caustica.options.sharc.startBounce.tooltip": "SHaRC 캐시를 조회할 수 있는 첫 패스 바운스. 그 이전 바운스는 추적을 계속하며 캐시만 예열합니다. 값이 높으면 더 많은 바운스가 온전히 추적됩니다(더 정확하지만 더 노이즈가 큼). 낮으면 캐시를 더 일찍 씁니다(더 조용하지만 더 근사치). 기본 히트(바운스 0)는 조회되지 않습니다. 1은 NVIDIA 규약대로 이후의 모든 적격 히트를 조회합니다.",
 	"caustica.options.sharc.strength": "캐시 강도",
 	"caustica.options.sharc.strength.tooltip": "정점의 셰이딩과 그 패스 나머지를 대체하는 캐시된 레디언스에 적용할 스케일. 100%가 NVIDIA 기본 동작(완전 대체)입니다. 낮추면 캐시 전환은 더 부드러워지는 대신 캐시된 GI 꼬리가 어두워집니다.",
 	"caustica.options.sharc.frameLifetime": "프레임 수명",

@@ -18,7 +18,7 @@
 	"caustica.options.sharc.temporalBlend": "時間混合",
 	"caustica.options.sharc.temporalBlend.tooltip": "時間平均視窗長度的倒數：快取保留約 1/數值幀的歷史（12% 約在 8 幀內混合）。低數值較平滑但反應較慢；高數值較快追蹤光照變化，但會閃爍。",
 	"caustica.options.sharc.startBounce": "起始反彈",
-	"caustica.options.sharc.startBounce.tooltip": "允許查詢 SHaRC 快取的第一個路徑反彈。更早的反彈持續追蹤，只為快取預熱。較高的數值保留更多完整追蹤的反彈（較精準但較噪）；較低的數值較早啟用快取（較安靜但較近似）。",
+	"caustica.options.sharc.startBounce.tooltip": "允許查詢 SHaRC 快取的第一個路徑反彈。更早的反彈持續追蹤，只為快取預熱。較高的數值保留更多完整追蹤的反彈（較精準但較噪）；較低的數值較早啟用快取（較安靜但較近似）。 不會查詢主命中（第 0 次彈跳）：1 遵循 NVIDIA 的約定，即查詢其後每一次符合條件的命中。",
 	"caustica.options.sharc.strength": "快取強度",
 	"caustica.options.sharc.strength.tooltip": "對取代頂點著色及其路徑餘下部分的快取輻亮度施行的倍率。100% 是 NVIDIA 的行為（完全取代）；較低數值會調暗快取 GI 尾端，換取更柔和的過渡。",
 	"caustica.options.sharc.frameLifetime": "幀壽命",

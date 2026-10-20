@@ -18,7 +18,7 @@
 	"caustica.options.sharc.temporalBlend": "Mistura Temporal",
 	"caustica.options.sharc.temporalBlend.tooltip": "Inverso do tamanho da janela de média temporal: o cache mantém aproximadamente 1/valor quadros de histórico (12% mistura ao longo de ~8 quadros). Valores baixos são mais suaves e reagem mais devagar; valores altos acompanham mudanças de iluminação mais rápido, mas podem piscar.",
 	"caustica.options.sharc.startBounce": "Rebote Inicial",
-	"caustica.options.sharc.startBounce.tooltip": "Primeiro rebote do caminho autorizado a consultar o cache SHOARC. Os rebotes anteriores continuam sendo tracejados e apenas aquecem o cache. Valores mais altos deixam mais rebotes totalmente tracejados (mais precisos, porém mais ruidosos); valores mais baixos ativam o cache mais cedo (mais limpo, porém mais aproximado).",
+	"caustica.options.sharc.startBounce.tooltip": "Primeiro rebote do caminho autorizado a consultar o cache SHOARC. Os rebotes anteriores continuam sendo tracejados e apenas aquecem o cache. Valores mais altos deixam mais rebotes totalmente tracejados (mais precisos, porém mais ruidosos); valores mais baixos ativam o cache mais cedo (mais limpo, porém mais aproximado). O impacto primário (rebote 0) nunca é consultado: 1 segue o contrato da NVIDIA de consultar todos os impactos elegíveis depois dele.",
 	"caustica.options.sharc.strength": "Força do Cache",
 	"caustica.options.sharc.strength.tooltip": "Escala aplicada à radiância em cache que substitui o sombreado de um vértice e o resto do seu caminho. 100% é o comportamento da NVIDIA (substituição total); valores menores escurecem a cauda de GI em cache em troca de transições de cache mais suaves.",
 	"caustica.options.sharc.frameLifetime": "Vida do Quadro",
