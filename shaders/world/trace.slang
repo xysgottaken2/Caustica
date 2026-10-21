@@ -61,9 +61,12 @@ public Payload makeRadiancePayload(uint flags, uint rayCone) {
 // Ordinary radiance trace for latency-sensitive, coherent work such as Pass A. It invokes hit/miss
 // shaders directly and therefore requires no invocation-reorder capability.
 public void traceRadiance(uint cullMask, float3 ro, float tmin, float3 rd, float tmax,
-                    bool showCelestial, float rayConeWidth, float rayConeSpread) {
-    payload = makeRadiancePayload(showCelestial ? PAYLOAD_SHOW_CELESTIAL : 0u,
-            packHalf2(float2(rayConeWidth, rayConeSpread)));
+                    bool showCelestial, bool rayInWater, float rayConeWidth, float rayConeSpread) {
+    // `rayInWater` is the CURRENT medium's water state: the miss shader uses it to keep the above-water
+    // cloud deck and the lightning bolt out of rays that have not left the water column yet.
+    uint flags = (showCelestial ? PAYLOAD_SHOW_CELESTIAL : 0u)
+            | (rayInWater && worldPush.underwaterEffects.w > 0.0 ? PAYLOAD_RAY_IN_WATER : 0u);
+    payload = makeRadiancePayload(flags, packHalf2(float2(rayConeWidth, rayConeSpread)));
     TraceRay(topLevelAS, RAY_FLAG_NONE, cullMask,
             SBT_RADIANCE, SBT_STRIDE_BUCKET, MISS_RADIANCE,
             makeRay(ro, tmin, rd, tmax), payload);

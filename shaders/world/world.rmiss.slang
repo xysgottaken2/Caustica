@@ -238,6 +238,44 @@ void writeSkyMiss(inout Payload payload, float3 radiance) {
     payload.rayCone = 0u;
 }
 
+float lightningHash(float3 p) {
+    return frac(sin(dot(p, float3(12.9898, 78.233, 37.719))) * 43758.5453);
+}
+
+float3 lightningNode(float3 ground, int index) {
+    const float segments = 9.0;
+    float t = float(index) / segments;
+    float seed = dot(ground.xz, float2(0.1031, 0.11369));
+    float jitterX = (lightningHash(float3(seed, float(index) + 1.7, 2.3)) - 0.5) * 5.2 * t;
+    float jitterZ = (lightningHash(float3(seed, float(index) + 8.1, 7.9)) - 0.5) * 5.2 * t;
+    return ground + float3(jitterX, 48.0 * t, jitterZ);
+}
+
+// Distance from the view ray to the jagged bolt polyline, as (core, halo) coverage in 0..1. The bolt is
+// authored in world space and only visible while the flash envelope is non-zero.
+float2 lightningBoltCoverage(float3 rayOrigin, float3 rayDirection, float3 strikeGround) {
+    float core = 0.0;
+    float halo = 0.0;
+    const int SEGMENTS = 9;
+    for (int i = 0; i < SEGMENTS; ++i) {
+        float3 a = lightningNode(strikeGround, i);
+        float3 b = lightningNode(strikeGround, i + 1);
+        float3 segment = b - a;
+        float3 offset = rayOrigin - a;
+        float raySegment = dot(rayDirection, segment);
+        float denominator = max(dot(segment, segment) - raySegment * raySegment, 1.0e-4);
+        float segmentT = clamp((dot(segment, offset) - raySegment * dot(rayDirection, offset))
+                / denominator, 0.0, 1.0);
+        float3 closestSegment = a + segment * segmentT;
+        float rayT = max(dot(closestSegment - rayOrigin, rayDirection), 0.0);
+        float distanceToRay = length(rayOrigin + rayDirection * rayT - closestSegment);
+        float radius = 0.16 + rayT * 0.0015;
+        core = max(core, 1.0 - smoothstep(radius * 0.18, radius * 0.80, distanceToRay));
+        halo = max(halo, 1.0 - smoothstep(radius * 0.65, radius * 3.5, distanceToRay));
+    }
+    return float2(core, halo);
+}
+
 [shader("miss")]
 void main(inout Payload payload) {
     WorldPush worldPush = ConstPtr<WorldPush>(pc.worldPushAddr)[0];
@@ -257,6 +295,7 @@ void main(inout Payload payload) {
     float sunUp = clamp((SdotU + 0.0625) / 0.125, 0.0, 1.0);
     float starBrightness = worldPush.lightRadiance.w;
     bool showCelestial = (payload.flags & PAYLOAD_SHOW_CELESTIAL) != 0u;
+    bool rayInWater = (payload.flags & PAYLOAD_RAY_IN_WATER) != 0u;
 
     float3 mdir = dir;
     float downFade = 1.0;
@@ -292,10 +331,22 @@ void main(inout Payload payload) {
     bool weatherOn = worldFeature(worldPush, FEATURE_WEATHER_LIGHTING);
     float rainStrength = weatherOn ? clamp(worldPush.weather.x, 0.0, 1.0) : 0.0;
     float skyDarken = weatherOn ? clamp(worldPush.weather.z, 0.0, 1.0) : 1.0;
+    // A thunderstorm grays the whole sky further than plain rain: the extra desaturation is driven by
+    // the storm lane (rain and thunder together) so the ambient fill, the horizon and the cloud deck's
+    // sky term all agree that the sky is a closed grey lid, not a blue sky with dark clouds in it.
+    float stormStrength = weatherOn
+            ? saturate(max(worldPush.weather.x, worldPush.weather.y)) : 0.0;
+    float stormGrey = stormStrength * stormStrength * (3.0 - 2.0 * stormStrength);
     if (rainStrength > 0.0) {
         float overcastLum = dot(col, float3(0.2126, 0.7152, 0.0722));
         float3 overcast = float3(overcastLum, overcastLum, overcastLum) * float3(0.92, 0.95, 1.0);
-        col = lerp(col, overcast, rainStrength * 0.85);
+        col = lerp(col, overcast, saturate(rainStrength * 0.85 + stormGrey * 0.12));
+    }
+    if (stormGrey > 0.0) {
+        // Storm clouds are dense enough to remove the remaining colour cast of a low sun: mix toward a
+        // neutral cool grey while keeping the luminance the physics already produced.
+        float stormLum = dot(col, float3(0.2126, 0.7152, 0.0722));
+        col = lerp(col, float3(stormLum) * float3(0.93, 0.96, 1.0), STORM_GREY_MIX * stormGrey);
     }
     col *= skyDarken;
     col += stars(dir, starBrightness, VdotS, worldPush.celestial);
@@ -331,8 +382,25 @@ void main(inout Payload payload) {
         }
     }
 
-    col = cloudLayer(worldPush, WorldRayOrigin() - worldPush.camOffset, dir, 1.0e9, col, skyAmbient,
-                     showCelestial);
+    // Clouds live in the air column. A ray segment still inside water must not march the cloud deck
+    // before world.rgen applies water absorption; doing so creates a hard black/cloud tile on a few
+    // underwater sky misses. Once refraction has left the medium, raygen clears this flag and the
+    // ordinary cloud layer is restored.
+    if (!rayInWater) {
+        col = cloudLayer(worldPush, WorldRayOrigin() - worldPush.camOffset, dir, 1.0e9, col, skyAmbient,
+                         showCelestial);
+    }
+
+    // A short lightning event is authored in world space. The bolt itself is a narrow jagged polyline
+    // against the sky; the broad, brief radiance lift represents the atmospheric flash, while a
+    // separate point-light term illuminates nearby ground in world.rgen (lightningIrradiance). An
+    // underwater ray does not see an unattenuated bolt.
+    float flash = clamp(worldPush.lightning.w, 0.0, 5.0);
+    if (!rayInWater && flash > 1.0e-4) {
+        col += float3(2.5, 3.2, 4.8) * flash;
+        float2 bolt = lightningBoltCoverage(WorldRayOrigin(), dir, worldPush.lightning.xyz);
+        col += (float3(48.0, 58.0, 72.0) * bolt.x + float3(4.0, 6.0, 10.0) * bolt.y) * flash;
+    }
 
     writeSkyMiss(payload, col);
 }

@@ -43,7 +43,7 @@ public PathSegment tracePrimary(PathSegment seg,
                                                rayConeWidth, rayConeSpread, seed, bounce,
                                                showCelestial);
         traceRadiance(CULL_PRIMARY, ro, 0.0, rd, 10000.0,
-                      showCelestial, rayConeWidth, rayConeSpread);
+                      showCelestial, medium.current.water, rayConeWidth, rayConeSpread);
 
         if (payload.hitT < 0.0) {
             if (bounce == 0) {
@@ -76,7 +76,11 @@ public PathSegment tracePrimary(PathSegment seg,
                 gv_motionUseRefracted = false;
                 gv_motionObjDisp = payload.motionPrev;
                 if (material == MATERIAL_PARTICLE) {
-                    gv_albedo = payload.albedo;
+                    // Rain sheets are translucent droplets; guide them with the neutral droplet albedo
+                    // rather than the sprite's blue weather tint. Snow already carries its own bright
+                    // albedo in the payload, so the same fallback covers both.
+                    gv_albedo = (payload.flags & PAYLOAD_WEATHER) != 0u
+                            ? float3(0.90, 0.94, 0.97) : float3(payload.albedo);
                     gv_rough = 1.0;
                     gv_spec = makeSpecSurface(gv_hitCamRel, n, 1.0,
                                               float3(0.0, 0.0, 0.0));
@@ -109,7 +113,8 @@ public PathSegment tracePrimary(PathSegment seg,
         if (isWater && waterWaves) {
             float waterFootprint = rayConeWidth / max(abs(dot(-rd, geometricNormal)), 0.2);
             waterSurf = evaluateWaterWaves(ro, rd, payload.hitT, geometricNormal,
-                    worldPush.waterParams.w, worldPush.waterAnchor.z, waterFootprint);
+                    worldPush.waterParams.w, worldPush.waterAnchor.z, waterFootprint,
+                    payloadWaterRainExposed());
             n = waterSurf.normal;
             previousNormal = waterSurf.previousNormal;
             hitPos = waterSurf.position;
@@ -178,6 +183,7 @@ public PathSegment tracePrimary(PathSegment seg,
                     deferredDir, throughput * (1.0 - F), transmittedMedium,
                     rayConeWidth, rayConeSpread, seed, bounce + 1,
                     true);
+            deferred.prefixScatterWeight = 1.0 - F;
             queue[splitRecord] = packPathSegment(deferred, PATH_NO_NEXT);
             nextRecord = splitRecord;
             float3 reflectedDir = reflect(rd, n);
@@ -188,6 +194,7 @@ public PathSegment tracePrimary(PathSegment seg,
                     reflectedDir, throughput * F, medium,
                     rayConeWidth, rayConeSpread, seed ^ 0xa511e9b3u, bounce + 1,
                     true);
+            reflected.prefixScatterWeight = F;
             return reflected;
         }
 
@@ -200,6 +207,7 @@ public PathSegment tracePrimary(PathSegment seg,
                     reflectedDir, throughput * F, medium,
                     rayConeWidth, rayConeSpread, seed, bounce + 1,
                     true);
+            continuation.prefixScatterWeight = F;
         } else {
             float3 deferredDir = normalize(transmittedDir);
             if (entering) {
@@ -212,6 +220,7 @@ public PathSegment tracePrimary(PathSegment seg,
                     deferredDir, throughput * (1.0 - F), medium,
                     rayConeWidth, rayConeSpread, seed, bounce + 1,
                     true);
+            continuation.prefixScatterWeight = 1.0 - F;
         }
         return continuation;
     }

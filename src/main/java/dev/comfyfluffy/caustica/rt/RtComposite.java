@@ -106,6 +106,8 @@ import java.nio.LongBuffer;
  */
 public final class RtComposite {
     public static final RtComposite INSTANCE = new RtComposite();
+    private static final RtSurfaceWetness SURFACE_WETNESS = new RtSurfaceWetness();
+    private static final RtLightning LIGHTNING = new RtLightning();
 
     public static boolean enabled() {
         return CausticaConfig.Rt.ENABLED.value();
@@ -150,6 +152,39 @@ public final class RtComposite {
 
     private static boolean waterWaves() {
         return CausticaConfig.Rt.Composite.WATER_WAVES.value();
+    }
+
+    /**
+     * Whether the weather system is currently producing precipitation anywhere in this level.
+     *
+     * <p>This is deliberately the coarse, world-wide answer: {@code getRainLevel} says how hard the
+     * storm is. It is the right switch for the lanes below, because those lanes are shared by every prim
+     * in the frame and cannot be per-column.
+     *
+     * <p>What rain is falling — and therefore whether a given <em>surface</em> may be wet or splashing —
+     * is decided per column in the terrain snapshot: each meshed prim carries whether its own column is
+     * rained on (the biome says RAIN) and open to the sky ({@link RtPrecipitation}). That is what makes a
+     * snow biome next to a rainy one show rings in one and nothing in the other within the same frame.
+     * An earlier version gated these lanes on the camera's biome instead, which switched the whole
+     * world's rain response on and off as the player crossed a border.
+     */
+    private static boolean precipitating(ClientLevel level, float partialTick) {
+        return level != null && level.getRainLevel(partialTick) > 0.001f;
+    }
+
+    /**
+     * Advances the renderer-global wetness clock and returns the 0..1 value for this frame. Disabling
+     * the option resets the clock, so re-enabling starts from dry ground instead of instantly soaked.
+     */
+    private static float surfaceWetnessForFrame(boolean raining) {
+        long now = System.nanoTime();
+        if (!CausticaConfig.Rt.Composite.WETNESS_ENABLED.value()) {
+            SURFACE_WETNESS.reset(now);
+            return 0.0f;
+        }
+        return SURFACE_WETNESS.update(raining, now,
+                CausticaConfig.Rt.Composite.WETNESS_WET_SECONDS.value(),
+                CausticaConfig.Rt.Composite.WETNESS_DRY_SECONDS.value());
     }
 
     /**
@@ -463,6 +498,12 @@ public final class RtComposite {
     // The volumetric style does NOT use it: its formations are generated and their vertical extent is
     // the Min/Max Cloud Thickness pair, in blocks, straight from the sliders.
     private static final float CLOUD_CLASSIC_MAX_THICKNESS_BLOCKS = 110.0f;
+    /**
+     * Extra formation height a full thunderstorm adds, in blocks. This grows the marched slab so the
+     * taller shader-side formations (clouds.slang's CLOUD_STORM_GROWTH_BLOCKS) still fit inside it;
+     * the two constants must stay equal.
+     */
+    private static final float CLOUD_STORM_GROWTH_BLOCKS = 18.0f;
     // Classic boxes never get thinner than vanilla's own 4-block extrusion (CloudRenderer's
     // putVec3(12, 4, 12)): the thickness slider scales the box HEIGHT from that baseline up, per the
     // classic rework's "vanilla shapes, slider-driven depth" decision.
@@ -1715,8 +1756,20 @@ public final class RtComposite {
             // Dimension + weather drive the sky model and the celestial light, so both are resolved
             // together, once, from the same level and partial tick.
             int dimension = dimensionId(level);
-            WeatherState weather = weatherState(level,
-                    Minecraft.getInstance().getDeltaTracker().getGameTimeDeltaPartialTick(false));
+            float partialTick = Minecraft.getInstance().getDeltaTracker().getGameTimeDeltaPartialTick(false);
+            WeatherState weather = weatherState(level, partialTick);
+            // Storm-wide switch. Whether a particular surface responds is decided per column by the
+            // mesher (see RtSectionSnapshots / RtPrecipitation), never by where the camera stands.
+            boolean raining = precipitating(level, partialTick);
+            // Render-thread lightning scheduler. It publishes a short-lived strike position and pulse
+            // envelope to the shaders (sky bolt + local point light) and plays positional thunder; it
+            // never mutates the world or spawns a server entity.
+            RtLightning.State lightning = LIGHTNING.update(level, camX, camY, camZ, weather.rain(),
+                    CausticaConfig.Rt.Composite.LIGHTNING_ENABLED.value(),
+                    CausticaConfig.Rt.Composite.LIGHTNING_STRIKES_PER_MINUTE.value(),
+                    CausticaConfig.Rt.Composite.LIGHTNING_INTENSITY.value(),
+                    CausticaConfig.Rt.Composite.LIGHTNING_SOUND_ENABLED.value(),
+                    CausticaConfig.Rt.Composite.LIGHTNING_SOUND_VOLUME.value(), System.nanoTime());
             SkyPush sky = skyPush(dimension, weather);
             // Two lanes, resolved together from the same weather + camera state the sky above used.
             CloudPush clouds = cloudState(dimension, weather, camY);
@@ -1805,7 +1858,38 @@ public final class RtComposite {
                     fogParams(),
                     // Biome/weather tint for the fog's scatter (WorldPush.fogTint): the game's
                     // own FOG_COLOR attribute, blended by the slider — see fogTint() above.
-                    fogTint()
+                    fogTint(),
+                    // Live rain material state. Disabling wetness clears it instead of leaving a stale
+                    // wet ground value to reappear if the option is toggled back on. These are feature
+                    // switches only — which surfaces actually respond is per prim, because only the
+                    // mesher knows each column's biome and sky exposure.
+                    new Float4(surfaceWetnessForFrame(raining),
+                            CausticaConfig.Rt.Composite.WETNESS_GLOSS.value(),
+                            CausticaConfig.Rt.Composite.GROUND_RAIN_RIPPLES.value()
+                                    ? CausticaConfig.Rt.Composite.GROUND_RIPPLE_STRENGTH.value() : 0.0f,
+                            CausticaConfig.Rt.Composite.WETNESS_TRANSITION_DISTANCE.value()),
+                    // x shrinks/enlarges procedural water rings; y disables/scales their amplitude;
+                    // z scales rain-lens ray bending; w caps how much weather fill clouds may add.
+                    // The water surface reads its own prim's rain-exposure bit, so a lake in a snow
+                    // biome stays glassy while the lake next door ripples.
+                    new Float4(CausticaConfig.Rt.Composite.WATER_RIPPLE_SCALE.value(),
+                            CausticaConfig.Rt.Composite.WATER_RAIN_RIPPLES.value()
+                                    ? CausticaConfig.Rt.Composite.WATER_RIPPLE_STRENGTH.value() : 0.0f,
+                            CausticaConfig.Rt.Composite.RAIN_REFRACTION_ENABLED.value()
+                                    ? CausticaConfig.Rt.Composite.RAIN_REFRACTION_STRENGTH.value() : 0.0f,
+                            CausticaConfig.Rt.Composite.RAIN_CLOUD_RESPONSE.value()
+                                    ? CausticaConfig.Rt.Composite.RAIN_CLOUD_DENSITY.value() : 0.0f),
+                    // Underwater options stay active independently of sky/weather-lighting settings.
+                    new Float4(CausticaConfig.Rt.Composite.UNDERWATER_HAZE_ENABLED.value()
+                                    ? CausticaConfig.Rt.Composite.UNDERWATER_HAZE_STRENGTH.value() : 0.0f,
+                            CausticaConfig.Rt.Composite.UNDERWATER_BLUE_TINT.value(),
+                            0.0f, // reserved: haze source attenuation no longer depends on a guessed local surface height
+                            CausticaConfig.Rt.Composite.UNDERWATER_SKY_ENABLED.value()
+                                    ? CausticaConfig.Rt.Composite.UNDERWATER_SKY_DISTANCE.value() : 0.0f),
+                    // Lightning's trailing lane: strike position rebased into the same space as camOffset.
+                    new Float4((float) (lightning.x() - terrain.blockX),
+                            (float) (lightning.y() - terrain.blockY),
+                            (float) (lightning.z() - terrain.blockZ), lightning.intensity())
             ).write(push);
             int flushBytes = Math.max(WORLD_PUSH_SIZE, READY_MASK_OFFSET + readyMaskBytes);
             if (cloudCellsAddress != 0L) {
@@ -2282,9 +2366,12 @@ public final class RtComposite {
      * zero there, but returning the shared constant keeps the fast path allocation-free.
      */
     private static WeatherState weatherState(ClientLevel level, float partial) {
-        if (level == null || !CausticaConfig.Rt.Composite.WEATHER_LIGHTING.value()) {
+        if (level == null) {
             return WeatherState.CLEAR;
         }
+        // Keep the actual precipitation levels available to clouds, ground/water ripples and rain
+        // sheets even when the user disables weather LIGHTING. That toggle suppresses the light/sky
+        // response; it should not make the visual weather simulation disappear.
         float rain = Math.clamp(level.getRainLevel(partial), 0f, 1f);
         if (rain <= 0f) {
             return WeatherState.CLEAR;
@@ -2299,6 +2386,9 @@ public final class RtComposite {
         float stormLight = 1.0f - 0.50f * thunder;
         float rainSky = 1.0f - 0.55f * rain;
         float stormSky = 1.0f - 0.45f * thunder;
+        if (!CausticaConfig.Rt.Composite.WEATHER_LIGHTING.value()) {
+            return new WeatherState(rain, thunder, 1.0f, 1.0f);
+        }
         return new WeatherState(rain, thunder, rainSky * stormSky, rainLight * stormLight);
     }
 
@@ -2511,12 +2601,21 @@ public final class RtComposite {
         }
         // Weather FILL, kept separate from the player's coverage slider all the way to the shader:
         // rain alone must be able to close the sky completely (the old 0.85/0.15 split topped out
-        // short of full cover in a plain rainstorm — the reported bug 3 — and the classic style's
-        // threshold then read the shortfall as punched holes). Thunder implies rain in vanilla, so it
-        // only ever reinforces the ramp. The two classic/volumetric styles consume this differently
-        // (authored cells fill progressively vs. the noise threshold dropping), which is why it rides
-        // its own lane instead of being pre-merged into the coverage value here.
-        float fill = Math.min(1f, weather.rain() + weather.thunder());
+        // short of full cover in a plain rainstorm, and the classic style's threshold then read the
+        // shortfall as punched holes). Thunder implies rain in vanilla, so it only ever reinforces the
+        // ramp. The effective amount is capped by RAIN_CLOUD_DENSITY: storms should expand and thicken
+        // the deck, but the default should not force a uniform full-sky wall. clouds.slang re-reads the
+        // same two inputs (cloudColor.w * rainEffects.w), so the two styles and the shadow query all
+        // agree on how overcast the sky is.
+        boolean rainCloudResponse = CausticaConfig.Rt.Composite.RAIN_CLOUD_RESPONSE.value();
+        float fill = rainCloudResponse ? Math.min(1f, weather.rain() + weather.thunder()) : 0f;
+        float rainDensity = rainCloudResponse
+                ? Math.clamp(CausticaConfig.Rt.Composite.RAIN_CLOUD_DENSITY.value(), 0f, 1f) : 0f;
+        float effectiveFill = fill * rainDensity;
+        // 0..1 storm severity: drives the extra slab height, opacity and albedo darkening. It is the
+        // same smoothstep clouds.slang applies to cloudColor.w * rainEffects.w, so Java and the shader
+        // agree on how severe the storm is.
+        float storm = smoothstep(0f, 1f, effectiveFill);
         float height = CausticaConfig.Rt.Composite.CLOUD_HEIGHT.value();
         // Wind drift, in blocks, from world time. Wrapped with the anchor below.
         double gameTime = 0.0;
@@ -2554,6 +2653,12 @@ public final class RtComposite {
                     Math.clamp(CausticaConfig.Rt.Composite.CLOUD_THICKNESS.value(), 0f, 1f)
                             * CLOUD_CLASSIC_MAX_THICKNESS_BLOCKS);
         }
+        // A storm thickens the deck as well as widening it. The slab grows by the same amount the
+        // shader adds to each generation's own vertical extent (CLOUD_STORM_GROWTH_BLOCKS), so cloud
+        // tops are never clipped by a slab that did not grow with them. Opacity rises a little too:
+        // dense storm cloud should occlude more of the sky behind it, not only cover more of it.
+        thickness += CLOUD_STORM_GROWTH_BLOCKS * storm;
+        opacity = Math.clamp(opacity + 0.12f * storm, 0f, 1f);
         // The height slider sets the deck's BASE, but the shader's slab is centred on the pushed height,
         // so the half-thickness is added back here. Pushing the base directly would make the clouds
         // appear to sink as the thickness changes (the slab would grow downward as well as upward),
@@ -2630,6 +2735,9 @@ public final class RtComposite {
         } catch (Throwable ignored) {
             // Probe unavailable (early boot / unsupported context): white is the correct default.
         }
+        // Storm darkening happens in clouds.slang (cloudWeatherAlbedo), where every style's shading
+        // term reads it: the albedo is multiplied by 1 - 0.38 * storm there, so the darkening scales
+        // with the same effective weather fill that grows the deck and cannot double-apply here.
         return new Float4(r, g, b, Math.clamp(weatherFill, 0f, 1f));
     }
 

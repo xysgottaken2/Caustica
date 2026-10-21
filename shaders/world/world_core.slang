@@ -46,6 +46,8 @@ public uint payloadMaterial() { return payload.flags & PAYLOAD_MATERIAL_MASK; }
 // Set by world.rchit on any dielectric hit (see PAYLOAD_DIELECTRIC_ENTERING) — whether the ray was
 // travelling into the volume (vs. out of it) at this hit's face.
 public bool payloadDielectricEntering() { return (payload.flags & PAYLOAD_DIELECTRIC_ENTERING) != 0u; }
+// Set by world.rchit on a water hit whose prim is open to precipitation (see TERRAIN_PRIM_RAIN_EXPOSED).
+public bool payloadWaterRainExposed() { return (payload.flags & PAYLOAD_WATER_RAIN_EXPOSED) != 0u; }
 public bool payloadEmitterInList() { return (payload.flags & PAYLOAD_EMITTER_IN_LIST) != 0u; }
 public bool payloadDynamicEntity() { return (payload.flags & PAYLOAD_DYNAMIC_ENTITY) != 0u; }
 // LINEAR roughness, i.e. GGX alpha directly — NOT perceptual roughness. This is the one convention used

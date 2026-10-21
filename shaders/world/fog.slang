@@ -83,6 +83,10 @@ public static const float FOG_MAX_SCATTER_LUMINANCE = 16.0;
 // god rays punching full-bright through rain the sky says is closed.
 public static const float FOG_RAIN_DENSITY_GAIN = 1.0;
 public static const float FOG_RAIN_SUN_DIM = 0.75;
+// How far a full thunderstorm desaturates the scattered air toward its own luminance. This is the
+// shared STORM_GREY_MIX from world_common, which world.rmiss also applies to the sky itself, so shafts,
+// horizon and ambient fill read as one closed grey lid instead of a blue sky with grey clouds in it.
+public static const float FOG_STORM_GREY = STORM_GREY_MIX;
 
 public float fogRain(WorldPush push) {
     return worldFeature(push, FEATURE_WEATHER_LIGHTING) ? saturate(push.weather.x) : 0.0;
@@ -95,7 +99,15 @@ public float fogRain(WorldPush push) {
 // emitter) read it through this one function: a shaft and a torch cone can never disagree about
 // what colour the air is, because they ask the same question the same way.
 public float3 fogTintNow(WorldPush push) {
-    return lerp(FOG_TINT, push.fogTint.xyz, saturate(push.fogTint.w));
+    float3 tint = lerp(FOG_TINT, push.fogTint.xyz, saturate(push.fogTint.w));
+    // Storm greying. Weather.x is rain, weather.y thunder; their maximum is how "closed" the sky is,
+    // smoothstepped so light rain keeps its colour and a real thunderstorm goes neutral. Gated on the
+    // same weather-lighting feature the sky uses, so turning weather lighting off restores the tint too.
+    float storm = worldFeature(push, FEATURE_WEATHER_LIGHTING)
+            ? saturate(max(push.weather.x, push.weather.y)) : 0.0;
+    storm = storm * storm * (3.0 - 2.0 * storm);
+    float stormLuminance = dot(tint, float3(0.2126, 0.7152, 0.0722));
+    return lerp(tint, float3(stormLuminance) * float3(0.93, 0.96, 1.0), FOG_STORM_GREY * storm);
 }
 
 public struct FogVolume {

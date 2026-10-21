@@ -59,6 +59,17 @@ public final class CausticaConfig {
             Rt.ENABLED, Rt.Composite.SPP, Rt.Composite.MAX_BOUNCES, Rt.Composite.SSS,
             Rt.Composite.WEATHER_LIGHTING, Rt.Composite.DENOISER, Rt.Composite.METALLIC_SHININESS,
             Rt.Composite.WATER_WAVE_STRENGTH, Rt.Composite.WATER_WAVE_SPEED, Rt.Composite.WATER_WAVE_DETAIL,
+            Rt.Composite.WETNESS_ENABLED, Rt.Composite.WETNESS_WET_SECONDS, Rt.Composite.WETNESS_DRY_SECONDS,
+            Rt.Composite.WETNESS_GLOSS, Rt.Composite.WETNESS_TRANSITION_DISTANCE,
+            Rt.Composite.GROUND_RAIN_RIPPLES, Rt.Composite.GROUND_RIPPLE_STRENGTH,
+            Rt.Composite.WATER_RAIN_RIPPLES, Rt.Composite.WATER_RIPPLE_SCALE, Rt.Composite.WATER_RIPPLE_STRENGTH,
+            Rt.Composite.RAIN_REFRACTION_ENABLED, Rt.Composite.RAIN_REFRACTION_STRENGTH,
+            Rt.Composite.UNDERWATER_HAZE_ENABLED, Rt.Composite.UNDERWATER_HAZE_STRENGTH,
+            Rt.Composite.UNDERWATER_BLUE_TINT, Rt.Composite.UNDERWATER_SKY_ENABLED,
+            Rt.Composite.UNDERWATER_SKY_DISTANCE, Rt.Composite.RAIN_CLOUD_RESPONSE,
+            Rt.Composite.RAIN_CLOUD_DENSITY, Rt.Composite.LIGHTNING_ENABLED,
+            Rt.Composite.LIGHTNING_STRIKES_PER_MINUTE, Rt.Composite.LIGHTNING_INTENSITY,
+            Rt.Composite.LIGHTNING_SOUND_ENABLED, Rt.Composite.LIGHTNING_SOUND_VOLUME,
             Rt.Composite.PARALLAX_QUALITY,
             Rt.Terrain.ASYNC_DISPATCH_PER_PASS, Rt.Omm.ENABLED,
             Rt.Entities.ENABLED, Rt.Entities.GLOW_ENABLED, Rt.EntityTextures.MAX_TEXTURES,
@@ -906,6 +917,93 @@ public final class CausticaConfig {
              */
             public static final FloatSetting CLOUD_OPACITY =
                     clampedFloat("caustica.rt.cloudOpacity", "composite.cloud-opacity", 0.9f, 0.0f, 1.0f);
+            /**
+             * Dynamic rain wetness. While it rains, upward-facing solid ground darkens and its
+             * roughness drops over {@link #WETNESS_WET_SECONDS}; after the rain stops it dries over
+             * {@link #WETNESS_DRY_SECONDS}. The wet film is a stylized single layer (no separate water
+             * volume), applied only where precipitation can actually reach the surface.
+             */
+            public static final BooleanSetting WETNESS_ENABLED =
+                    bool("caustica.rt.wetnessEnabled", "composite.wetness-enabled", true);
+            /** Seconds for ground wetness to rise from dry to fully wet while rain continues. */
+            public static final FloatSetting WETNESS_WET_SECONDS =
+                    clampedFloat("caustica.rt.wetnessWetSeconds", "composite.wetness-wet-seconds", 5.0f, 1.0f, 30.0f);
+            /** Seconds for fully wet ground to return to dry after rain ends. */
+            public static final FloatSetting WETNESS_DRY_SECONDS =
+                    clampedFloat("caustica.rt.wetnessDrySeconds", "composite.wetness-dry-seconds", 30.0f, 5.0f, 120.0f);
+            /** How smooth and mirror-like rain-wet ground becomes (0 = authored roughness retained). */
+            public static final FloatSetting WETNESS_GLOSS =
+                    clampedFloat("caustica.rt.wetnessGloss", "composite.wetness-gloss", 1.0f, 0.0f, 1.0f);
+            /** Horizontal spread, in blocks, for wetness and ground ripples to fade under shelter. */
+            public static final FloatSetting WETNESS_TRANSITION_DISTANCE =
+                    clampedFloat("caustica.rt.wetnessTransitionDistance", "composite.wetness-transition-distance",
+                            6.0f, 0.0f, 12.0f);
+            /** Small animated rain-impact ripples on wet upward-facing solid terrain. */
+            public static final BooleanSetting GROUND_RAIN_RIPPLES =
+                    bool("caustica.rt.groundRainRipples", "composite.ground-rain-ripples", true);
+            /** Amplitude of the procedural ground ripple normal detail. */
+            public static final FloatSetting GROUND_RIPPLE_STRENGTH =
+                    clampedFloat("caustica.rt.groundRippleStrength", "composite.ground-ripple-strength", 1.0f, 0.0f, 2.0f);
+            /** Small concentric rain-impact ripples on ray-traced water surfaces. */
+            public static final BooleanSetting WATER_RAIN_RIPPLES =
+                    bool("caustica.rt.waterRainRipples", "composite.water-rain-ripples", true);
+            /** Scales rain ripple radius, width and spacing (lower = finer, tighter rings). */
+            public static final FloatSetting WATER_RIPPLE_SCALE =
+                    clampedFloat("caustica.rt.waterRippleScale", "composite.water-ripple-scale", 0.65f, 0.25f, 2.0f);
+            /** Surface-normal amplitude of rain rings on water. */
+            public static final FloatSetting WATER_RIPPLE_STRENGTH =
+                    clampedFloat("caustica.rt.waterRippleStrength", "composite.water-ripple-strength", 1.0f, 0.0f, 2.0f);
+            /** Bend continuation rays through rain streaks so the scenery behind them distorts like droplets. */
+            public static final BooleanSetting RAIN_REFRACTION_ENABLED =
+                    bool("caustica.rt.rainRefractionEnabled", "composite.rain-refraction-enabled", true);
+            /** Amount of droplet-style ray bending through weather sheets. */
+            public static final FloatSetting RAIN_REFRACTION_STRENGTH =
+                    clampedFloat("caustica.rt.rainRefractionStrength", "composite.rain-refraction-strength", 2.0f, 0.0f, 2.0f);
+            /** Depth-dependent underwater extinction plus source-lit blue scattering. */
+            public static final BooleanSetting UNDERWATER_HAZE_ENABLED =
+                    bool("caustica.rt.underwaterHazeEnabled", "composite.underwater-haze-enabled", true);
+            /**
+             * Underwater haze strength. This targets short underwater visibility over a few blocks:
+             * red is absorbed fastest, green next, and blue survives longest. Scattering is derived from
+             * the real celestial light, so the haze cannot glow at night.
+             */
+            public static final FloatSetting UNDERWATER_HAZE_STRENGTH =
+                    clampedFloat("caustica.rt.underwaterHazeStrength", "composite.underwater-haze-strength", 0.1f, 0.0f, 2.0f);
+            /** Shifts underwater absorption toward blue without adding radiance. */
+            public static final FloatSetting UNDERWATER_BLUE_TINT =
+                    clampedFloat("caustica.rt.underwaterBlueTint", "composite.underwater-blue-tint", 0.5f, 0.0f, 1.0f);
+            /** Water-column handling for rays which miss the water surface at the horizon. */
+            public static final BooleanSetting UNDERWATER_SKY_ENABLED =
+                    bool("caustica.rt.underwaterSkyEnabled", "composite.underwater-sky-enabled", true);
+            /** Fallback integration distance (blocks) for underwater rays that miss the surface. */
+            public static final FloatSetting UNDERWATER_SKY_DISTANCE =
+                    clampedFloat("caustica.rt.underwaterSkyDistance", "composite.underwater-sky-distance", 128.0f, 8.0f, 128.0f);
+            /** Let rain expand, thicken, darken and close the cloud deck. */
+            public static final BooleanSetting RAIN_CLOUD_RESPONSE =
+                    bool("caustica.rt.rainCloudResponse", "composite.rain-cloud-response", true);
+            /**
+             * How strongly rain may expand and thicken the cloud deck, 0..1. Lower values preserve more
+             * gaps and sky detail during rain; the storm's extra cover, slab growth, opacity and
+             * darkening all scale with it.
+             */
+            public static final FloatSetting RAIN_CLOUD_DENSITY =
+                    clampedFloat("caustica.rt.rainCloudDensity", "composite.rain-cloud-density", 0.5f, 0.0f, 1.0f);
+            /** Random procedural lightning during precipitation. */
+            public static final BooleanSetting LIGHTNING_ENABLED =
+                    bool("caustica.rt.lightningEnabled", "composite.lightning-enabled", true);
+            /** Expected average number of randomized lightning strikes per minute while raining. */
+            public static final FloatSetting LIGHTNING_STRIKES_PER_MINUTE =
+                    clampedFloat("caustica.rt.lightningStrikesPerMinute", "composite.lightning-strikes-per-minute", 2.0f, 1.0f, 60.0f);
+            /** Lightning brightness and the amount of light cast on nearby terrain. */
+            public static final FloatSetting LIGHTNING_INTENSITY =
+                    clampedFloat("caustica.rt.lightningIntensity", "composite.lightning-intensity", 1.5f, 0.0f, 5.0f);
+            /** Play positional thunder for each procedural lightning strike. */
+            public static final BooleanSetting LIGHTNING_SOUND_ENABLED =
+                    bool("caustica.rt.lightningSoundEnabled", "composite.lightning-sound-enabled", true);
+            /** Volume multiplier for the extra positional thunder; the weather sound slider also applies. */
+            public static final FloatSetting LIGHTNING_SOUND_VOLUME =
+                    clampedFloat("caustica.rt.lightningSoundVolume", "composite.lightning-sound-volume", 1.0f, 0.0f, 2.0f);
+
             /**
              * World Y the BASE of the cloud deck sits at. Vanilla's clouds sit at 192; the default is
              * higher because Caustica's clouds have real thickness and a deck whose base is at vanilla

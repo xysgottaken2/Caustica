@@ -79,6 +79,13 @@ public final class RtWeatherCapture {
     private static final int RAIN_TABLE_SIZE = 32;
     private static final int HALF_RAIN_TABLE_SIZE = 16;
 
+    /**
+     * Vanilla weather radius is at most 10 blocks (21 x 21 = 441 columns). Reserve a slightly larger
+     * cap so every column remains available even when ordinary particles or nearby entities are
+     * plentiful.
+     */
+    public static final int MAX_CAPTURE_COLUMNS = 512;
+
     /** Max alpha for rain vs. snow, matching vanilla's two {@code renderInstances} calls. */
     private static final float RAIN_MAX_ALPHA = 1.0f;
     private static final float SNOW_MAX_ALPHA = 0.8f;
@@ -167,6 +174,15 @@ public final class RtWeatherCapture {
         return CausticaConfig.Rt.Entities.WEATHER_ENABLED.value();
     }
 
+    /** Whether this frame actually has precipitation, used to reserve particle capacity for it. */
+    public static boolean willRenderWeather() {
+        if (!enabled()) {
+            return false;
+        }
+        WeatherRenderState state = weatherState();
+        return state != null && state.intensity > 0.0f && state.radius > 0;
+    }
+
     /**
      * Append this frame's rain and snow columns to {@code capture} (a particle-mode capture: the caller
      * has already set the any-hit alpha bucket and the camera-relative → rebased offset on
@@ -196,15 +212,19 @@ public final class RtWeatherCapture {
             return 0;
         }
         int captured = 0;
-        // Tag every emitted sheet so raygen shades it UNLIT (see PRIM_WEATHER). The path tracer's
-        // direct/indirect light read as blotchy, blown-out streaks on the rain; the sheets stay real
-        // geometry (terrain occlusion and the heightmap clip are kept) but stop participating in
-        // lighting, the way vanilla's own weather pass is effectively unlit.
+        // Tag every emitted sheet (PRIM_WEATHER) so raygen applies the weather coverage rules instead of
+        // shading a blue billboard. The sheets stay real geometry — terrain occlusion and the heightmap
+        // clip are kept — and their alpha is stochastic coverage.
         capture.currentPrimFlags = RtEntityCapture.PRIM_FLAG_WEATHER;
         capture.currentGlintArmorSlot = 0; // weather never carries a glint armour context
         try {
+            // Rain is a water droplet and gets the refractive branch in raygen.
             captured += captureColumns(capture, out, state.rainColumns, camPos, RAIN_MAX_ALPHA,
                     state.radius, intensity, RAIN_LOCATION, budget - captured);
+            // Snow shares the capture and coverage rules but not the optics: the extra tag keeps raygen
+            // out of the droplet branch, because a flake scatters light diffusely instead of bending it.
+            capture.currentPrimFlags = RtEntityCapture.PRIM_FLAG_WEATHER
+                    | RtEntityCapture.PRIM_FLAG_WEATHER_SNOW;
             captured += captureColumns(capture, out, state.snowColumns, camPos, SNOW_MAX_ALPHA,
                     state.radius, intensity, SNOW_LOCATION, budget - captured);
         } catch (Throwable t) {
@@ -302,10 +322,21 @@ public final class RtWeatherCapture {
         int camFloorZ = Mth.floor(camPos.z);
         int emitted = 0;
 
-        for (WeatherEffectRenderer.ColumnInstance column : columns) {
+        // When the shared particle budget is tight, sample across the WHOLE vanilla column grid instead
+        // of stopping at the first N list entries. Stopping early creates a visible rain/no-rain boundary
+        // across the terrain even while the global wetness and ground ripples continue everywhere.
+        int sampleCount = Math.min(columns.size(), budget);
+        // Select exactly sampleCount columns spread across the entire vanilla weather grid. A simple
+        // ceil(size / budget) stride under-filled the budget badly (e.g. 700 columns / 600 slots selected
+        // only every second entry), leaving visible dry-looking gaps across the view.
+        for (int sampleIndex = 0; sampleIndex < sampleCount; sampleIndex++) {
             if (emitted >= budget) {
                 break;
             }
+            int columnIndex = sampleCount == columns.size() ? sampleIndex
+                    : (int) (((long) sampleIndex * columns.size() + columns.size() / 2L) / sampleCount);
+            columnIndex = Math.min(columns.size() - 1, columnIndex);
+            WeatherEffectRenderer.ColumnInstance column = columns.get(columnIndex);
             // Skip the column the camera stands inside — the one whose orientation-table entry is the
             // table centre. Vanilla never draws it: that entry is NaN (-0/0 in its constructor), and the
             // rasteriser discards any quad with a NaN vertex, so the accidental skip is part of the

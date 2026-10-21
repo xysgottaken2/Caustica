@@ -170,6 +170,7 @@ void main(inout Payload payload, in BuiltInTriangleIntersectionAttributes attr) 
         // looking exactly as heavy. That is the giveaway that the option was never being ignored: the
         // flash is this branch overriding it with 1.0, not the multiplier failing to apply.
         bool particleKind = instanceKind == PARTICLE_BIT;
+        bool weatherSheet = particleKind && (epr.flags & PRIM_WEATHER) != 0u;
         float primCoverage = clamp(asfloat(epr.aux0), 0.0, 1.0);
         if (!particleKind && epr.aux0 == 0u) {
             primCoverage = 1.0;
@@ -209,6 +210,14 @@ void main(inout Payload payload, in BuiltInTriangleIntersectionAttributes attr) 
                     IgnoreHit();
                 }
             } else {
+                IgnoreHit();
+            }
+        } else if (weatherSheet) {
+            // Weather alpha is a blend weight, not a binary cutout. Always dither it even when a
+            // resource pack's rain sprite did not advertise stochastic alpha: rejected samples see the
+            // scene behind the streak, accepted samples get a tiny refractive droplet highlight in
+            // raygen, so rain reads as translucent water instead of opaque blue bars.
+            if (alphaDitherThreshold(salt) >= clamp(texel.a * primCoverage, 0.0, 1.0)) {
                 IgnoreHit();
             }
         } else if (stochasticAlpha) {
