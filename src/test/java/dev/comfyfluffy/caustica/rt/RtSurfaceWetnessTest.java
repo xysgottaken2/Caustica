@@ -149,6 +149,8 @@ final class RtSurfaceWetnessTest {
                 "src/main/java/dev/comfyfluffy/caustica/rt/terrain/RtSectionSnapshots.java"));
         String precipitation = Files.readString(root.resolve(
                 "src/main/java/dev/comfyfluffy/caustica/rt/RtPrecipitation.java"));
+        String mesher = Files.readString(root.resolve(
+                "src/main/java/dev/comfyfluffy/caustica/rt/terrain/RtTerrainMesher.java"));
 
         // --- the rule itself lives in one place: vanilla's per-column biome answer ---
         assertTrue(precipitation.contains("getPrecipitationAt(pos, level.getSeaLevel())"),

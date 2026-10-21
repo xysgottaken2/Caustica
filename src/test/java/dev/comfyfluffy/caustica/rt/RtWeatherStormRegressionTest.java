@@ -70,10 +70,10 @@ final class RtWeatherStormRegressionTest {
      * says; the flash and the point light are zeroed per-lane instead.
      *
      * <p>It reads the global storm level on purpose. Which <em>column</em> a bolt may land on is a
-     * separate, per-column question answered in {@code RtLightning.chooseStrike} (vanilla's own
-     * {@code isRainingAt()} requires RAIN precipitation, so there is no thundersnow): gating the
-     * scheduler on the camera's biome instead would stop the lightning that a storm keeps throwing into
-     * the rainy biome next door.
+     * separate, per-column question answered in {@code RtLightning.chooseStrike} ({@code
+     * RtPrecipitation.isLiquidRain} asks that column's biome, the way vanilla's own {@code isRainingAt}
+     * does, so there is no thundersnow): gating the scheduler on the camera's biome instead would stop
+     * the lightning that a storm keeps throwing into the rainy biome next door.
      */
     @Test
     void lightningIsDrivenByRainNotByThePresentationToggle() throws IOException {
