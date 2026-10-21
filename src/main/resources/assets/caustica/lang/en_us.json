@@ -96,6 +96,8 @@
 	"caustica.options.rt.cloudShadowStrength.tooltip": "How much the cloud deck dims the sunlight and moonlight reaching the ground under it. 0% draws clouds that cast no shadow at all; 100% lets a solid cloud block the sun completely. Costs no extra rays.",
 	"caustica.options.rt.cloudOpacity": "Cloud Opacity",
 	"caustica.options.rt.cloudOpacity.tooltip": "How solid the clouds are. 0% is fully transparent (clouds are skipped entirely); 100% is as solid as the cloud shape gets. This is a hard ceiling: at 20% a cloud is never more than 20% opaque, no matter how thick it is or how far away it is, so it never fills in toward the horizon.",
+	"caustica.options.rt.cirrus": "Cirrus Clouds",
+	"caustica.options.rt.cirrus.tooltip": "Draw a high sheet of thin, fibrous ice clouds above the volumetric deck: long wispy threads that drift across the sky well above the cumulus, in patches rather than as a closed cover. They sit higher the higher Cloud Height is set, follow Cloud Opacity and fade out in a storm. Volumetric style only, since the classic deck is a flat texture with nothing above it. Cirrus are far too thin to cast a shadow, so Cloud Shadows still describes the deck below.",
 	"caustica.options.rt.denoiser": "Denoising Filter",
 	"caustica.options.rt.denoiser.tooltip": "Apply the DLSS Ray Reconstruction denoising filter to the path-traced image. Off shows the raw, noisy trace at full resolution — useful as a reference view, but far grainier at low sample counts. Requires DLSS Ray Reconstruction support.",
 	"caustica.options.rt.handFov": "Hand FOV",

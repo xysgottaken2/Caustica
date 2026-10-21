@@ -234,6 +234,10 @@ public static const uint FEATURE_RESTIR = 32u;            // temporal + spatial 
 public static const uint FEATURE_NRD = 64u;              // NRD denoiser signal capture (per-lobe radiance + hit distance)
 public static const uint FEATURE_VIEWZ = 128u;           // a renderer-side denoiser needs gViewZ (reprojection validation + sky cutoff)
 public static const uint FEATURE_SHARC = 256u;           // experimental spatial-hash radiance cache
+// High cirrus filament sheet above the volumetric cloud deck (clouds.slang). Only ever set for the
+// volumetric style: the classic deck is a flat authored texture with nothing above it. Off answers the
+// pre-cirrus output exactly, layer for layer.
+public static const uint FEATURE_CIRRUS = 512u;
 
 // How far a full thunderstorm pulls the sky and the fog toward their own luminance, in 0..1. One shared
 // number on purpose: world.rmiss desaturates the sky with it and fog.slang desaturates the scattered

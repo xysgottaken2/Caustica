@@ -33,6 +33,11 @@
 // The two styles are independent by design: the classic deck's shape is authored data, the volumetric
 // deck's shape is generated. Weather fill (cloudColor.w) closes either sky completely in a storm.
 //
+// A CIRRUS SHEET can ride above the volumetric deck (see the cirrus section below). It is a separate
+// layer rather than part of the marched volume: high, thin ice filaments with their own field, their
+// own single-scatter lighting and no shadow, composited against the deck in true depth order so a ray
+// that looks up through a gap sees cirrus and a ray that looks up through a cloud does not.
+//
 // DEPTH-CORRECT AGAINST THE WORLD. Every entry point that produces visible cloud takes the distance to
 // the nearest scene hit and stops there, so terrain in front of a cloud occludes it. Getting this wrong
 // is exactly the bug where the world appeared to punch through the deck from above (see cloudLayer).
@@ -230,6 +235,52 @@ public static const float3 CLOUD_MS_FACTORS = float3(1.0, 0.45, 0.18);
 // Classic clouds are opaque boxes; this scales their extinction so a box saturates within its own
 // thickness rather than looking like translucent haze.
 public static const float CLOUD_CLASSIC_EXTINCTION_SCALE = 6.0;
+
+// ---- Cirrus sheet (volumetric style only) ---------------------------------------------------------
+//
+// A second, much higher cloud LAYER: the thin, fibrous ice clouds that streak across the sky above a
+// cumulus deck. They are not part of the cumulus in any sense — no lobes, no cavities, no
+// self-shadowing, no march — so they are modelled separately and composed as their own layer instead
+// of being folded into cloudVolumeDensity. RtComposite only sets FEATURE_CIRRUS for the volumetric
+// style, and the clouds screen hides the toggle for classic, so this sheet never grows over the
+// authored vanilla deck.
+//
+//   * ALTITUDE is a fixed gap above the deck's own crown, so Cloud Height, the Min/Max thickness pair
+//     and a storm's vertical growth all lift the cirrus with the deck and the two layers can never
+//     intersect.
+//   * SHAPE is a strongly anisotropic noise: 192-block filaments along X — the direction the deck
+//     already drifts, which is where the high-altitude wind points too — and 12-block strands across
+//     them. A second, finer cross-noise carves the low ground away, which is what turns one smeared
+//     sheet of noise into separate threads. A much larger patch field decides which parts of the sky
+//     carry cirrus at all.
+//   * LIGHT is single scattering only. Cirrus are optically thin ice: the bright silver lining toward
+//     the sun and the blue-grey body away from it ARE the look, and there is nothing dense enough in
+//     them for the powder / multiple-scattering terms the cumulus needs. They cast no ground shadow
+//     either, so Cloud Shadows keeps describing the cumulus footprint it was tuned against.
+//
+// EVERY divisor below is a power of two no larger than CLOUD_WEATHER_DIV (16), so each lattice's own
+// period in blocks divides the anchor wrap (12 * 1024 * 16 = 196608) exactly: x at 192 blocks repeats
+// once per wrap, z at 12 blocks divides it 16 times, the patch field at 192 blocks once. Octaves only
+// ever multiply by powers of two, which shortens a period further and keeps it dividing. That is the
+// same invariant the cumulus lattices carry, and for the same reason — a non-dividing lattice makes
+// the sheet snap to a different pattern as the wind scroll crosses the anchor wrap. RtCirrusCloudTest
+// recomputes it and fails if an edit breaks it.
+public static const float CLOUD_CIRRUS_GAP_BLOCKS = 110.0;    // above the deck's crown
+public static const float CLOUD_CIRRUS_THICKNESS_BLOCKS = 8.0; // the sheet's own thickness, in blocks
+public static const float CLOUD_CIRRUS_STRETCH_DIV = 16.0;    // x: 192-block filaments
+public static const float CLOUD_CIRRUS_FIBRE_DIV = 1.0;       // z: 12-block strands
+public static const float CLOUD_CIRRUS_PATCH_DIV = 16.0;      // 192-block regions that carry cirrus
+public static const float CLOUD_CIRRUS_WARP_CELLS = 0.35;     // domain warp, in fibre cells
+public static const float CLOUD_CIRRUS_STRAND_CARVE = 0.36;   // how hard the cross-noise cuts gaps
+public static const float CLOUD_CIRRUS_THRESHOLD = 0.34;      // isosurface of the filament field
+public static const float CLOUD_CIRRUS_EDGE_SOFTNESS = 0.20;  // width of the filament ramp
+public static const float CLOUD_CIRRUS_PATCH_START = 0.35;    // where the region mask opens
+public static const float CLOUD_CIRRUS_PATCH_END = 0.60;      // ... and where it is fully open
+public static const float CLOUD_CIRRUS_OPACITY = 0.75;        // optical depth of one vertical crossing
+public static const float CLOUD_CIRRUS_GRAZE_GAIN_MAX = 2.0;  // cap on the grazing path-length gain
+public static const float CLOUD_CIRRUS_STORM_FADE = 0.85;     // storm fraction the sheet fades out by
+public static const float CLOUD_CIRRUS_SUN_GAIN = 4.0;        // forward-scatter weight (single scatter)
+public static const float CLOUD_CIRRUS_SKY_FILL = 0.55;       // sky ambient mixed into the lit sheet
 
 // ---- Authored cell map (classic style).
 //
@@ -1266,6 +1317,175 @@ public CloudVolume cloudMarch(WorldPush push, float3 originRel, float3 dir, floa
     return result;
 }
 
+// ---- Cirrus sheet --------------------------------------------------------------------------------
+
+/**
+ * Whether this frame draws the cirrus sheet.
+ *
+ * <p>Two conditions, and both are load-bearing. The deck itself must be on — {@code cloudsEnabled}
+ * already covers the master switch, the Overworld-only rule, the coverage/opacity sliders and a
+ * full-storm fill — and {@code FEATURE_CIRRUS} must be set, which RtComposite only does for the
+ * volumetric style with the player's own toggle on. Classic therefore answers false without a
+ * dimension or style check here, so the authored vanilla deck never grows a layer above it.
+ */
+public bool cirrusEnabled(WorldPush push) {
+    return cloudsEnabled(push) && worldFeature(push, FEATURE_CIRRUS);
+}
+
+/**
+ * World-space height of the cirrus sheet's mid-plane, camera-relative — the same space as
+ * {@code push.clouds.w}.
+ *
+ * <p>{@code push.clouds.w} is the deck's CENTRE and {@code cloudAnchor.z} its slab thickness, so the
+ * deck's crown is {@code clouds.w + thickness * 0.5}. The sheet sits a fixed gap above that crown:
+ * raising Cloud Height lifts it, a thicker deck lifts it, and a storm's vertical growth lifts it too,
+ * which is what guarantees the two layers can never occupy the same air.
+ */
+public float cloudCirrusHeight(WorldPush push) {
+    return push.clouds.w + max(push.cloudAnchor.z, 0.0) * 0.5 + CLOUD_CIRRUS_GAP_BLOCKS;
+}
+
+/**
+ * The filament field: how much cirrus is at one horizontal position, 0..1.
+ *
+ * <p>Deliberately a different field from {@link cloudCoverageField}: cirrus are not located by the
+ * cumulus weather system. Their threads are 16x longer than they are wide (192 blocks along X against
+ * 12 across it), and a slower patch field decides which regions of sky hold them at all — so the deck
+ * keeps its own separate shapes and the sky above it is filled with fields of threads that do not
+ * mirror the clouds below.
+ *
+ * <p>Everything sampled here is periodic over the anchor wrap; see the constant block for why.
+ */
+public float cloudCirrusCoverage(float2 samplePos) {
+    // Anisotropic fibres: long along the wind (X), fragile across it (Z).
+    float2 p = float2(samplePos.x / (CLOUD_CELL_BLOCKS * CLOUD_CIRRUS_STRETCH_DIV),
+                      samplePos.y / (CLOUD_CELL_BLOCKS * CLOUD_CIRRUS_FIBRE_DIV));
+    // Domain warp. It varies slowly ALONG a filament and faster across it, so a thread bends and frays
+    // instead of reading as a straight smeared streak — and because the warp is built from the same
+    // periodic lattice, the bend repeats with the sheet.
+    float2 warp = float2(cloudNoise(p + float2(37.0, 11.0)),
+                         cloudNoise(p * float2(1.0, 2.0) + float2(7.0, 43.0))) - 0.5;
+    p += warp * CLOUD_CIRRUS_WARP_CELLS;
+
+    float fibre = cloudNoise(p) * 0.52
+                + cloudNoise(p * 2.0 + float2(13.0, 29.0)) * 0.30
+                + cloudNoise(p * 4.0 + float2(41.0, 61.0)) * 0.18;
+    // Carve the low ground out with a faster cross-noise. This is the step that turns one continuous
+    // smeared sheet into separate threads: without it the fBm alone has no gaps, and cirrus read as a
+    // grey haze rather than as fibres. Two cells across (6 blocks) rather than four: a 3-block carve
+    // is the same scale as the finest fibre octave, so it separates no threads, it only adds
+    // sub-pixel shimmer at distance.
+    float strands = cloudNoise(p * float2(1.0, 2.0) + float2(5.0, 3.0));
+    float shaped = fibre - CLOUD_CIRRUS_STRAND_CARVE * (1.0 - strands);
+    float threads = smoothstep(CLOUD_CIRRUS_THRESHOLD,
+                               CLOUD_CIRRUS_THRESHOLD + CLOUD_CIRRUS_EDGE_SOFTNESS, shaped);
+    if (threads <= 0.0) {
+        return 0.0;
+    }
+    // Whole regions of sky carry cirrus and whole regions do not. Much larger than a filament, so the
+    // result is a few fields of threads crossing an otherwise empty sky.
+    float patch = cloudNoise(samplePos / (CLOUD_CELL_BLOCKS * CLOUD_CIRRUS_PATCH_DIV)
+                             + float2(71.0, 23.0));
+    return threads * smoothstep(CLOUD_CIRRUS_PATCH_START, CLOUD_CIRRUS_PATCH_END, patch);
+}
+
+/**
+ * Distance along the ray to the cirrus sheet's mid-plane, or a large value when the ray never reaches
+ * it. Used only to decide the compositing order against the deck; the sheet's own shading is done by
+ * {@link cloudCirrusSegment}, which intersects it properly.
+ */
+float cloudCirrusDistance(WorldPush push, float3 originRel, float3 dir) {
+    if (abs(dir.y) < 1.0e-4) {
+        return 1.0e9;
+    }
+    float t = (cloudCirrusHeight(push) - originRel.y) / dir.y;
+    return t > 0.0 ? t : 1.0e9;
+}
+
+/** Distance to the deck's mid-plane, in the same sense as {@link cloudCirrusDistance}. */
+float cloudDeckDistance(WorldPush push, float3 originRel, float3 dir) {
+    if (abs(dir.y) < 1.0e-4) {
+        return 1.0e9;
+    }
+    float t = (push.clouds.w - originRel.y) / dir.y;
+    return t > 0.0 ? t : 1.0e9;
+}
+
+/**
+ * The cirrus sheet crossed by one ray, in the same premultiplied form as the deck's own segment
+ * ({@code L += throughput * scatter; throughput *= transmittance}).
+ *
+ * <p>The sheet is shaded as a THIN MEDIUM, not as a marched volume: one intersection at its mid-plane,
+ * a coverage lookup, and an alpha that grows with the path length through its own thickness. A grazing
+ * ray crosses more ice than a vertical one, which is exactly why real cirrus pile up into a bright
+ * band toward the horizon; the gain is capped so that band stays wispy instead of sealing into a wall.
+ *
+ * <p>Lighting is single-scatter only (see the constant block): sun radiance through the dual-lobe phase
+ * plus a sky fill. At night {@code lightRadiance} drops, so the sheet goes grey-blue on its own, and a
+ * storm fades it out because the cumulus underneath has closed the sky.
+ */
+public CloudVolume cloudCirrusSegment(WorldPush push, float3 originRel, float3 dir, float maxDistance,
+                                      float3 ambient) {
+    CloudVolume result;
+    result.scatter = float3(0.0, 0.0, 0.0);
+    result.transmittance = 1.0;
+
+    float sheetRel = cloudCirrusHeight(push) - originRel.y;
+    float halfThickness = max(CLOUD_CIRRUS_THICKNESS_BLOCKS, 0.5) * 0.5;
+    // The same crossing fade the deck uses: a camera passing through the sheet dissolves it instead of
+    // flipping between a lit top and a dark underside across a single pixel.
+    float crossFade = smoothstep(halfThickness * 0.5, halfThickness * 2.5, abs(sheetRel));
+    if (crossFade <= 0.0 || abs(dir.y) < 1.0e-4) {
+        return result;
+    }
+    float t = sheetRel / dir.y;
+    if (t <= 0.0 || t >= maxDistance) {
+        return result; // behind the ray, or behind solid geometry
+    }
+    float viewLimit = max(push.cloudAnchor.w, 1.0);
+    float horizontal = length(dir.xz) * t;
+    if (horizontal >= viewLimit) {
+        return result;
+    }
+    // Same horizon fade as the deck, but starting EARLIER (45% instead of 55% of the view limit): the
+    // sheet is high above the camera, so its plane compresses into a few pixels near the horizon and
+    // every filament there is sub-pixel. Cirrus are wisps seen against blue sky, not a white band, so
+    // the far field has to open back up earlier than the deck's does.
+    float fade = 1.0 - smoothstep(viewLimit * 0.45, viewLimit, horizontal);
+    if (fade <= 0.0) {
+        return result;
+    }
+
+    float2 samplePos = push.cloudAnchor.xy + originRel.xz + dir.xz * t;
+    float coverage = cloudCirrusCoverage(samplePos);
+    if (coverage <= 0.0) {
+        return result;
+    }
+
+    float pathGain = clamp(1.0 / max(abs(dir.y), 1.0e-3), 1.0, CLOUD_CIRRUS_GRAZE_GAIN_MAX);
+    float stormFade = 1.0 - CLOUD_CIRRUS_STORM_FADE * cloudStormAmount(push);
+    // Cloud Opacity caps the sheet exactly as it caps the deck: the slider is the player's "how solid is
+    // the sky" control, and a second layer that ignored it would undo a 20%-opacity setting.
+    //
+    // Beer-Lambert rather than a plain product, and that is not cosmetic: multiplying the numbers
+    // straight through let a grazing view (pathGain 3) push alpha past 1 and the sheet turned into a
+    // solid white band across the sky. An absorbing medium saturates instead — full coverage straight up
+    // is 1 - exp(-0.55) = 42% opaque, a grazing view is 81%, and cirrus can never become a wall.
+    float opticalDepth = coverage * CLOUD_CIRRUS_OPACITY * pathGain * fade * crossFade * stormFade
+                       * clamp(push.clouds.y, 0.0, 1.0);
+    float alpha = 1.0 - exp(-opticalDepth);
+    if (alpha <= 0.0) {
+        return result;
+    }
+
+    float phase = cloudPhase(dot(dir, push.lightDir.xyz));
+    float3 inScatter = CLOUD_ALBEDO * (push.lightRadiance.xyz * phase * CLOUD_CIRRUS_SUN_GAIN
+                                       + ambient * CLOUD_CIRRUS_SKY_FILL);
+    result.scatter = inScatter * alpha;
+    result.transmittance = 1.0 - alpha;
+    return result;
+}
+
 // ---- Unified entry point -------------------------------------------------------------------------
 
 /**
@@ -1282,8 +1502,8 @@ public float3 cloudSkyAmbient(WorldPush push) {
 }
 
 /**
- * Clouds crossed along ONE ray segment, as premultiplied scattered radiance plus the transmittance the
- * background keeps. Both styles answer in this same form.
+ * The CLOUD DECK alone, crossed along one ray segment, as premultiplied scattered radiance plus the
+ * transmittance the background keeps. Both styles answer in this same form.
  *
  * This shape is deliberate: callers composite clouds with two lines
  * ({@code L += throughput * scatter; throughput *= transmittance;}), and being a premultiplied
@@ -1293,9 +1513,12 @@ public float3 cloudSkyAmbient(WorldPush push) {
  * `maxDistance` is the distance to the nearest scene hit along the ray (or a large value when the ray
  * escapes to the sky). Bounding the cloud by it is the fix for the "world shows through the clouds"
  * bug — see cloudSegmentNote below.
+ *
+ * {@link cloudSegment} is the entry point callers use: it wraps this with the cirrus sheet. This
+ * function is the deck on its own, with no second layer.
  */
-public CloudVolume cloudSegment(WorldPush push, float3 originRel, float3 dir, float maxDistance,
-                                float3 ambient, bool highQuality) {
+CloudVolume cloudDeckSegment(WorldPush push, float3 originRel, float3 dir, float maxDistance,
+                             float3 ambient, bool highQuality) {
     CloudVolume result;
     result.scatter = float3(0.0, 0.0, 0.0);
     result.transmittance = 1.0;
@@ -1332,6 +1555,56 @@ public CloudVolume cloudSegment(WorldPush push, float3 originRel, float3 dir, fl
     // Premultiplied, so `background * transmittance + scatter` reproduces the lerp exactly.
     result.scatter = cloudRadianceClassic(push, faceLight, albedo, ambient) * alpha;
     result.transmittance = 1.0 - alpha;
+    return result;
+}
+
+/**
+ * Every cloud along one ray segment: the deck, plus the cirrus sheet when the volumetric style has it
+ * enabled. This is the function world.rmiss and world.rgen composite, and it stays a single
+ * premultiplied participating-medium term precisely so the two layers cannot be stacked in the wrong
+ * order by a caller.
+ *
+ * <p>THE ORDERING MATTERS AND IS DERIVED, NOT ASSUMED. The cirrus sheet sits above the deck, so for a
+ * ray that looks up from the ground the deck is the NEAR layer and the cirrus is behind it; but a ray
+ * that looks down from a jet above both crosses the cirrus first. Hardcoding "deck first" would draw
+ * the deck through the cirrus whenever the camera is above the sheet — visible as cumulus poking
+ * through a veil that should be in front of them. The two analytic mid-plane distances settle it, and
+ * the layers are composited far-to-near: {@code near + near.T * far}.
+ *
+ * <p>That same distance decides one early-out: a deck in FRONT that has already gone opaque hides the
+ * sheet completely, so the overwhelmingly common "ray ends on a cumulus" case skips the cirrus field
+ * rather than paying for a layer it cannot see.
+ *
+ * <p>When the sheet contributes nothing (both toggles off, no coverage here, or the sheet behind solid
+ * geometry) this returns exactly what the deck alone returned, so the cirrus option is bit-identical
+ * to the previous output when it is off.
+ */
+public CloudVolume cloudSegment(WorldPush push, float3 originRel, float3 dir, float maxDistance,
+                                float3 ambient, bool highQuality) {
+    CloudVolume deck = cloudDeckSegment(push, originRel, dir, maxDistance, ambient, highQuality);
+    if (!cirrusEnabled(push)) {
+        return deck;
+    }
+    bool deckInFront = cloudDeckDistance(push, originRel, dir) <= cloudCirrusDistance(push, originRel, dir);
+    // Nothing behind a saturated deck can be seen, so the common case — a ray that ends on a cumulus
+    // top — does not pay for the cirrus field at all.
+    if (deckInFront && deck.transmittance <= 1.0e-3) {
+        return deck;
+    }
+    CloudVolume cirrus = cloudCirrusSegment(push, originRel, dir, maxDistance, ambient);
+    if (cirrus.transmittance >= 1.0) {
+        return deck;
+    }
+    CloudVolume result;
+    if (deckInFront) {
+        // Deck in front: the cirrus is the far layer behind it.
+        result.scatter = deck.scatter + deck.transmittance * cirrus.scatter;
+        result.transmittance = deck.transmittance * cirrus.transmittance;
+    } else {
+        // Camera is above the sheet: the cirrus is the near layer this time.
+        result.scatter = cirrus.scatter + cirrus.transmittance * deck.scatter;
+        result.transmittance = cirrus.transmittance * deck.transmittance;
+    }
     return result;
 }
 

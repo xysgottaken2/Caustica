@@ -306,3 +306,38 @@ the caller mixes it, instead of a duplicate of the brightening term.
   GPU.
 - The previews used to judge silhouette and lighting are offline ray-marched renders of the numpy
   mirror described above, not Minecraft frames.
+
+## Cirrus sheet above the volumetric deck
+
+Cirrus are the thin, fibrous ice clouds that streak across the sky well above a cumulus deck —
+"various threads on top of the normal cloud", which is exactly the shape this adds.
+
+They are a **second layer**, not part of the marched volume. Folding them into
+`cloudVolumeDensity` would have meant lobes, cavities and self-shadowing applied to a cloud type
+that has none of those, and it would have put the ice inside the same 16–22-block slab as the
+cumulus. Instead:
+
+- `cirrusEnabled` requires the deck itself to be on *and* `FEATURE_CIRRUS`, which
+  `RtComposite.featureFlags()` only sets for the **volumetric** style with the player's toggle on.
+  The classic deck is a flat authored texture with nothing above it, and the clouds screen hides the
+  row in that mode, so the setting is remembered rather than silently applied.
+- Altitude is `clouds.w + thickness * 0.5 + 110`, i.e. a fixed gap above the deck's **crown**: Cloud
+  Height, the Min/Max thickness pair and a storm's vertical growth all lift the sheet, and the two
+  layers can never intersect.
+- The field (`cloudCirrusCoverage`) is 16:1 anisotropic — 192-block filaments along X (the direction
+  the deck already drifts, and where the high-altitude wind points) against 12-block strands across
+  it — with a domain warp that bends the filaments, a finer cross-noise that carves gaps between
+  them, and a 192-block patch field deciding which regions of sky carry cirrus at all. It is *not*
+  the cumulus coverage field: the sky above the deck gets its own shapes.
+- Every lattice divisor is a power of two no coarser than `CLOUD_WEATHER_DIV`, so each period in
+  blocks divides the 196608-block anchor wrap and the sheet stays seamless as the wind scroll rolls
+  over. `RtCirrusCloudTest` recomputes this.
+- Shading is single-scatter only (dual-lobe phase × sun radiance + a sky fill): the sheet is far too
+  tenuous for a multiple-scattering sum, and its alpha grows with the path length through its own
+  thickness, so it brightens into a band toward the horizon. `Cloud Opacity` caps it like the deck,
+  and a storm fades it out.
+- `cloudSegment` composites the two layers **far-to-near** off their analytic mid-plane distances
+  rather than assuming the deck is in front: a camera above the sheet crosses the cirrus first, and a
+  hardcoded order would draw cumulus through a veil that should hide it.
+- Cirrus cast **no** ground shadow. The Cloud Shadows slider keeps describing the cumulus footprint
+  it was tuned against.

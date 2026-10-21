@@ -276,6 +276,12 @@ public final class RtVideoOptions {
         }
         options.add(cloudShadowStrength());
         options.add(cloudOpacity());
+        if (!classic) {
+            // Cirrus only exist above the volumetric deck: the classic deck is a flat authored texture
+            // with nothing above it, so the row is hidden there rather than offering a knob that does
+            // nothing. The value is kept, so switching back to volumetric restores the sheet.
+            options.add(cirrus());
+        }
         // Storm response: rain may thicken, darken and close the deck. These live on the clouds page
         // because they change how the cloud layer is generated, not the weather system itself.
         options.add(rainCloudResponse());
@@ -1082,6 +1088,15 @@ public final class RtVideoOptions {
      */
     private static OptionInstance<Boolean> clouds() {
         return bool("caustica.options.rt.clouds", CausticaConfig.Rt.Composite.CLOUDS);
+    }
+
+    /**
+     * The cirrus sheet above the volumetric deck: high, thin ice filaments that drift over the
+     * cumulus. Volumetric-only — {@link #cloudOptions} hides the row for the classic deck, since a
+     * classic sky has no layer above it for cirrus to be part of.
+     */
+    private static OptionInstance<Boolean> cirrus() {
+        return bool("caustica.options.rt.cirrus", CausticaConfig.Rt.Composite.CIRRUS);
     }
 
     private static final List<String> CLOUD_STYLES = List.of("classic", "volumetric");

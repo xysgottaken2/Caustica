@@ -284,6 +284,10 @@ public final class RtComposite {
     // sky cutoff, NRD's IN_VIEWZ), so it is set for both denoisers.
     private static final int FEATURE_VIEWZ = 128;
     private static final int FEATURE_SHARC = 256;
+    // High cirrus filament sheet above the volumetric deck. Resolved together with the style below
+    // rather than straight from the toggle: cirrus only exist in the volumetric style, so switching to
+    // classic drops the layer without clearing the player's setting.
+    private static final int FEATURE_CIRRUS = 512;
 
     // ---- Dimension ids (WorldPush.dimension). Mirrors world_common.slang's DIMENSION_* constants.
     // The Overworld runs the atmosphere march and the sun/moon cycle; the Nether and the End have no
@@ -317,6 +321,12 @@ public final class RtComposite {
             // player-facing effect toggles, and an integer bit survives every float quirk.
             if (CausticaConfig.Rt.Composite.cloudStyleIndex() == CLOUD_STYLE_VOLUMETRIC) {
                 flags |= FEATURE_CLOUDS_VOLUMETRIC;
+                // Cirrus ride above the VOLUMETRIC deck only. The classic deck is a flat authored
+                // texture with nothing above it, so the bit stays clear there: the shader then costs one
+                // comparison and the toggle is remembered for when the player switches back.
+                if (CausticaConfig.Rt.Composite.CIRRUS.value()) {
+                    flags |= FEATURE_CIRRUS;
+                }
             }
         }
         // Reports what the pipeline is ACTUALLY doing, not just what the option asks for:

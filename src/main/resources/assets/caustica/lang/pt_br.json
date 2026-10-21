@@ -96,6 +96,8 @@
 	"caustica.options.rt.cloudShadowStrength.tooltip": "Quanto o deck de nuvens escurece a luz do sol e da lua que chega ao chão embaixo. 0% desenha nuvens sem sombra nenhuma; 100% permite que uma nuvem sólida bloqueie o sol por completo. Não custa raios extras.",
 	"caustica.options.rt.cloudOpacity": "Opacidade das nuvens",
 	"caustica.options.rt.cloudOpacity.tooltip": "Quão sólidas são as nuvens. 0% é totalmente transparente (as nuvens são puladas inteiramente); 100% é o máximo que a forma da nuvem permite. É um teto rígido: a 20% uma nuvem nunca fica mais de 20% opaca, não importa a espessura ou a distância, então ela nunca se fecha na direção do horizonte.",
+	"caustica.options.rt.cirrus": "Nuvens Cirrus",
+	"caustica.options.rt.cirrus.tooltip": "Desenha uma camada alta de nuvens cirrus acima das nuvens volumétricas: fios longos e finos de gelo que passam pelo céu bem acima dos cúmulos, em manchas em vez de uma cobertura fechada. Ficam mais altas quanto maior for a Altura das nuvens, seguem a Opacidade das nuvens e desaparecem numa tempestade. Só no estilo Volumétrico, já que o estilo Clássico é uma textura plana sem nada acima. As cirrus são finas demais para projetar sombra, então Sombras das nuvens continua se referindo à camada de baixo.",
 	"caustica.options.rt.denoiser": "Filtro de redução de ruído",
 	"caustica.options.rt.denoiser.tooltip": "Aplica o filtro de redução de ruído do DLSS Ray Reconstruction à imagem com path tracing. Desativado, mostra o traçado bruto e ruidoso em resolução total — útil como referência, mas bem mais granulado com poucas amostras. Requer suporte a DLSS Ray Reconstruction.",
 	"caustica.options.rt.handFov": "FOV da mão",

@@ -28,7 +28,8 @@ unverified.
 - Deep settings UI: nearly every renderer feature has its own sub-screen with a "Reset to
   Defaults" button, plus a global one on the hub
 - Weather-driven lighting: rain and thunderstorms dim the sun/moon and darken the sky
-- Volumetric 3D clouds (classic vanilla-style or photoreal cumulus), volumetric fog with
+- Volumetric 3D clouds (classic vanilla-style or photoreal cumulus), with an optional high cirrus
+  sheet of fibrous ice filaments above the volumetric deck, volumetric fog with
   per-light god rays, water waves, parallax occlusion mapping
 - Dedicated Nether, End and portal skyboxes
 - OMM (Opacity Micro-Map) + SER (Shader Execution Reordering) optimizations
