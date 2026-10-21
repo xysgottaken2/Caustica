@@ -2,6 +2,7 @@ package dev.comfyfluffy.caustica.mixin;
 
 import com.mojang.blaze3d.pipeline.RenderTarget;
 import com.mojang.blaze3d.systems.RenderSystem;
+import com.mojang.blaze3d.vertex.PoseStack;
 import com.mojang.renderpearl.api.textures.GpuTextureView;
 import com.mojang.renderpearl.backend.vulkan.VulkanDevice;
 import dev.comfyfluffy.caustica.CausticaConfig;
@@ -10,12 +11,15 @@ import dev.comfyfluffy.caustica.client.WorldRenderScaler;
 import dev.comfyfluffy.caustica.rt.RtComposite;
 import dev.comfyfluffy.caustica.rt.RtReflex;
 import dev.comfyfluffy.caustica.rt.RtUiOverlay;
+import dev.comfyfluffy.caustica.rt.entity.RtViewmodel;
 import dev.comfyfluffy.caustica.rt.overlay.RtWorldOverlay;
 import net.minecraft.client.Minecraft;
+import net.minecraft.client.renderer.FirstPersonHandsAndItemsRenderer;
 import net.minecraft.client.renderer.GameRenderer;
 import net.minecraft.client.renderer.state.OptionsRenderState;
 import net.minecraft.client.renderer.state.level.CameraRenderState;
 import net.minecraft.client.renderer.state.level.PlayerRenderState;
+import net.minecraft.world.level.GameType;
 import org.joml.Matrix4f;
 import org.spongepowered.asm.mixin.Final;
 import org.spongepowered.asm.mixin.Mixin;
@@ -24,6 +28,7 @@ import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.ModifyArg;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
+import org.spongepowered.asm.mixin.gen.Invoker;
 
 /**
  * Brackets the level-rendering section of {@link GameRenderer#render} with the
@@ -45,11 +50,22 @@ public abstract class GameRendererMixin {
 	@Final
 	private RenderTarget mainRenderTarget;
 
+	/**
+	 * Vanilla's own viewmodel submitter, driven directly by {@code caustica$captureViewmodelForRt} so the
+	 * ray-traced hand is literally the submission the game would otherwise have rastered.
+	 */
+	@Shadow
+	@Final
+	private FirstPersonHandsAndItemsRenderer firstPersonHandsAndItemsRenderer;
+
 	// Reset the UI overlay's per-frame clear latch at the very start of the frame (before the world, hand,
 	// or GUI render into it).
 	@Inject(method = "render()V", at = @At("HEAD"))
 	private void caustica$beginOverlayFrame(CallbackInfo ci) {
 		RtUiOverlay.beginFrame();
+		// Drop a viewmodel capture left over by a frame that never composited, and release the one-frame
+		// window in which the captured submission is allowed to suppress vanilla's hand pass.
+		RtViewmodel.INSTANCE.beginFrame();
 		// Clear the stale HDR-present flag every frame: composite() only runs while a level renders, so on
 		// menu frames it would otherwise stay true from the last world frame and present a black HDR image.
 		RtComposite.INSTANCE.beginFrame();
@@ -157,6 +173,12 @@ public abstract class GameRendererMixin {
 					shift = At.Shift.AFTER))
 	private void caustica$endWorldScaleBeforeHand(CameraRenderState cameraState, PlayerRenderState playerState,
 			OptionsRenderState optionsState, boolean renderCrosshair, CallbackInfo ci) {
+		// The composite records the TLAS build it is about to submit, so a viewmodel instance has to exist
+		// before this call and nothing later in the frame can add one. Capturing is gated on the toggle so
+		// frames with the feature off pay no pose work at all.
+		if (RtViewmodel.enabled() && WorldRenderScaler.INSTANCE.isRtWindowOpen()) {
+			this.caustica$captureViewmodelForRt(cameraState, playerState, optionsState);
+		}
 		WorldRenderScaler.INSTANCE.end(this.mainRenderTarget);
 		// Fold RT world overlays into the shared transparent UI image before hand/screen effects and the GUI
 		// add their own layers. RtUiOverlay then performs the single final blend to SDR/HDR.
@@ -169,6 +191,68 @@ public abstract class GameRendererMixin {
 			RtComposite.INSTANCE.finishGraphicsUse();
 		}
 	}
+
+	// ---- Ray-traced viewmodel ---------------------------------------------------------------------
+	//
+	// The RT composite owns the whole screen image, so anything that should be lit, reflected and
+	// parallaxed by the world has to be inside it, and it has to be there one step earlier than vanilla
+	// would draw it. The geometry is not re-implemented: vanilla's renderItemInHand is a thin
+	// "build a pose, hand it to the submitter" method, so the pose is rebuilt here from the same render
+	// states and the submission itself is the game's own call, retargeted into the RT entity collector.
+	// Everything the hand depends on (swing, item swap, tints, glint, hurt tilt, bobbing) is computed by
+	// vanilla inside that call; FirstPersonHandsAndItemsRendererMixin then cancels the real pass so the
+	// hand is not drawn twice.
+
+	/** Gates copied from {@code GameRenderer.renderItemInHand}: whatever vanilla would not draw, so does not. */
+	private boolean caustica$handRenderable(CameraRenderState cameraState, PlayerRenderState playerState,
+			OptionsRenderState optionsState) {
+		if (cameraState.isPanoramicMode || !playerState.hasPlayer
+				|| !optionsState.cameraType.isFirstPerson()
+				|| cameraState.entityRenderState.isSleeping
+				|| this.gameRenderState().guiRenderState.isHudHidden
+				|| playerState.firstPersonHandsAndItems == null) {
+			return false;
+		}
+		Minecraft minecraft = Minecraft.getInstance();
+		// Vanilla reads this straight off the client without a guard; the extra null checks only matter
+		// during teardown, where a throw out of an injection point would take the frame down with it.
+		return minecraft == null || minecraft.gameMode == null
+				|| minecraft.gameMode.getPlayerMode() != GameType.SPECTATOR;
+	}
+
+	/**
+	 * Replay vanilla's viewmodel submission into the ray-traced capture. The pose stack is assembled the way
+	 * {@code renderItemInHand} assembles it — inverse camera rotation, then hurt tilt, then view bobbing when
+	 * the option asks for it — so the captured vertices sit exactly where vanilla's hand pass would have put
+	 * them; the model-view stack is deliberately left alone, since only the raster draw needs it and that draw
+	 * is what the capture replaces.
+	 */
+	private void caustica$captureViewmodelForRt(CameraRenderState cameraState, PlayerRenderState playerState,
+			OptionsRenderState optionsState) {
+		if (!this.caustica$handRenderable(cameraState, playerState, optionsState)) {
+			return;
+		}
+		PoseStack poseStack = new PoseStack();
+		poseStack.pushPose();
+		poseStack.mulPose(cameraState.viewRotationMatrix.invert(new Matrix4f()));
+		this.caustica$callBobHurt(cameraState, poseStack);
+		if (optionsState.bobView) {
+			this.caustica$callBobView(cameraState, poseStack);
+		}
+		RtViewmodel.INSTANCE.capture(cameraState, playerState, poseStack, this.firstPersonHandsAndItemsRenderer);
+	}
+
+	/**
+	 * {@code GameRenderer.bobHurt} / {@code bobView} are private and read the camera render state directly.
+	 * Invoking them is the only way to keep the tilt and bob identical without copying their math, which
+	 * would silently drift on the next game update; {@code docs/minecraft-26.3-abi.tsv} pins both signatures
+	 * so a rename breaks the build instead of the pose.
+	 */
+	@Invoker("bobHurt")
+	protected abstract void caustica$callBobHurt(CameraRenderState cameraState, PoseStack poseStack);
+
+	@Invoker("bobView")
+	protected abstract void caustica$callBobView(CameraRenderState cameraState, PoseStack poseStack);
 
 	// ---- Hand FOV (viewmodel FOV) ----------------------------------------------------------------
 	//

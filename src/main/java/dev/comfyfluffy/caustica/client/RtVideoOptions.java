@@ -135,6 +135,8 @@ public final class RtVideoOptions {
             moonSize(),
             sunSouthTilt(),
             handFov(),
+            viewmodelRayTraced(),
+            viewmodelMatchHudFov(),
         };
     }
 
@@ -1348,6 +1350,21 @@ public final class RtVideoOptions {
      */
     private static OptionInstance<Boolean> handFov() {
         return bool("caustica.options.rt.handFov", CausticaConfig.Rt.Hand.FOV_FOLLOWS_CAMERA);
+    }
+
+    /**
+     * ON moves the first-person hand and held item from vanilla's screen-space overlay into the traced
+     * scene; OFF keeps vanilla's raster hand. Needs no rebuild in either direction — the capture is taken
+     * and released frame by frame — so the row is a plain toggle.
+     */
+    private static OptionInstance<Boolean> viewmodelRayTraced() {
+        return bool("caustica.options.rt.viewmodelRayTraced", CausticaConfig.Rt.Hand.PATH_TRACED);
+    }
+
+    /** Dollies the traced hand so its projected size matches vanilla's. */
+    private static OptionInstance<Boolean> viewmodelMatchHudFov() {
+        return bool("caustica.options.rt.viewmodelMatchHudFov",
+                CausticaConfig.Rt.Hand.PATH_TRACED_MATCHES_HUD_FOV);
     }
 
     // NVSDK_NGX_PerfQuality_Value, ordered performance -> quality for the slider. Per NVIDIA's DLSS-RR

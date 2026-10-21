@@ -22,6 +22,16 @@ public final class WorldRenderScaler {
 	private WorldRenderScaler() {
 	}
 
+	/**
+	 * Whether the RT composite is still ahead of us this frame. The ray-traced viewmodel asks this before
+	 * capturing: the mesh is only useful to a frame that will really be traced, and outside the window
+	 * (menus, paused-and-not-tracing states, the {@code -Dcaustica.rt=false} run) vanilla keeps drawing the
+	 * hand with no work wasted on the capture.
+	 */
+	public boolean isRtWindowOpen() {
+		return this.rtWindowOpen;
+	}
+
 	/** Open the level-render window. Called right before level rendering. */
 	public void begin(RenderTarget mainTarget) {
 		VanillaRenderController.INSTANCE.beginFrame(mainTarget);

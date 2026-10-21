@@ -725,6 +725,16 @@ void main(inout Payload payload, in BuiltInTriangleIntersectionAttributes attr) 
                 ep0, ep1, ep2, euv[e0], euv[e1], euv[e2]);
         MaterialHeader header = ConstPtr<MaterialHeader>(pc.materialTableAddr)[pr.materialId];
         uint material = header.model;
+        // The ray-traced first-person viewmodel (RtViewmodel) is tagged per geometry, not per instance kind,
+        // so it inherits every entity material path above. Two things differ: a held glass/ice block or water
+        // bucket stays opaque instead of refracting the world it is drawn over (and thereby reaches the POM
+        // branch, which only runs on opaque geometry — parallax on the block in your hand is the point of the
+        // whole feature), and the payload carries PAYLOAD_VIEWMODEL so raygen layers it above the blocks it
+        // clips into and its own shadow rays ignore the player.
+        bool viewmodelGeom = (g.flags & ENTITY_GEOM_VIEWMODEL) != 0u;
+        if (viewmodelGeom && (material == MATERIAL_DIELECTRIC || material == MATERIAL_WATER)) {
+            material = MATERIAL_OPAQUE;
+        }
         // Portal surfaces captured through the entity/block-entity path (EndPortalRenderer's quad, or a
         // held/displayed nether portal block): the same dedicated procedural shading as terrain portals,
         // so the flat end_portal texture never shows. The collector stamps TERRAIN_PRIM_PORTAL_* into
@@ -766,6 +776,9 @@ void main(inout Payload payload, in BuiltInTriangleIntersectionAttributes attr) 
                 payload.f0 = half3(0.0h, 0.0h, 0.0h);
                 payload.flags |= PAYLOAD_END_PORTAL_UNLIT;
             }
+            if (viewmodelGeom) {
+                payload.flags |= PAYLOAD_VIEWMODEL;
+            }
             return;
         }
         // Enchantment/foil glint overlay (armour, held enchanted items, tridents): special-captured
@@ -802,6 +815,11 @@ void main(inout Payload payload, in BuiltInTriangleIntersectionAttributes attr) 
             // Entity emissive geometry (armour overlays, the flame, held lights): raygen applies the
             // dynamic/entity emission scale and two-sided lighting to it, like every other entity hit.
             payload.flags |= PAYLOAD_DYNAMIC_ENTITY;
+            if (viewmodelGeom) {
+                // A held enchanted item glints exactly like armour does, but it must still be layered above
+                // blocks and keep the player's own shadow off it.
+                payload.flags |= PAYLOAD_VIEWMODEL;
+            }
             return;
         }
         // POM on the opaque entity BLAS geometry only; cutout/translucent entities keep the exact UV
@@ -844,6 +862,9 @@ void main(inout Payload payload, in BuiltInTriangleIntersectionAttributes attr) 
                 materialEmissionSource(header, emission));
         payload.flags |= PAYLOAD_DYNAMIC_ENTITY;
         payloadSetDielectric(payload, material, entering);
+        if (viewmodelGeom) {
+            payload.flags |= PAYLOAD_VIEWMODEL;
+        }
         return;
     }
 

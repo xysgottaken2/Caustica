@@ -121,6 +121,26 @@ final class RtShaderConstantMirrorTest {
                 "SPP averaging must not dilute ReSTIR with legacy RIS at the same receiver");
     }
 
+    /**
+     * The ray-traced viewmodel's geometry kind flag has no generated-record protection: it is a plain int
+     * written into one lane of a 64-byte table entry that the shader reads as {@code EntityGeom.flags}. A
+     * mismatch compiles and runs, and quietly turns the hand into an ordinary entity (no player-free shadow
+     * rays, no above-blocks layer), so the two spellings are checked against each other here.
+     */
+    @Test
+    void viewmodelGeometryFlagMatchesBetweenJavaAndSlang() throws IOException {
+        Map<String, Long> slang = slangConstants("ENTITY_GEOM_");
+        Path viewmodel = REPO_ROOT.resolve(
+                "src/main/java/dev/comfyfluffy/caustica/rt/entity/RtViewmodel.java");
+        Map<String, Long> java = scan(Files.readString(viewmodel),
+                Pattern.compile("static\\s+final\\s+int\\s+(GEOM_FLAG_\\w+)\\s*=\\s*(\\d+)\\s*;"));
+
+        assertFalse(slang.isEmpty(), "no ENTITY_GEOM_* constants found in " + SLANG);
+        assertEquals(slang.size(), java.size(), "a viewmodel geometry flag exists on only one side");
+        assertEquals(slang.get("ENTITY_GEOM_VIEWMODEL"), java.get("GEOM_FLAG_VIEWMODEL"),
+                "ENTITY_GEOM_VIEWMODEL and RtViewmodel.GEOM_FLAG_VIEWMODEL must be the same value");
+    }
+
     @Test
     void worldPushCarriesTheFieldsTheNewFeaturesPush() throws IOException {
         String slang = Files.readString(SLANG);
@@ -128,7 +148,7 @@ final class RtShaderConstantMirrorTest {
         // the rain/underwater feature set travel in. Removing one would still compile (the generated
         // record just loses a component) but would silently drop a feature, so pin them here.
         for (String field : new String[] {"weather", "dimension", "featureFlags",
-                "surfaceWetness", "rainEffects", "underwaterEffects", "lightning"}) {
+                "surfaceWetness", "rainEffects", "underwaterEffects", "lightning", "viewmodel"}) {
             assertTrue(Pattern.compile("^\\s*public\\s+\\S+\\s+" + field + "\\s*;", Pattern.MULTILINE)
                             .matcher(slang).find(),
                     "WorldPush is missing the '" + field + "' field");

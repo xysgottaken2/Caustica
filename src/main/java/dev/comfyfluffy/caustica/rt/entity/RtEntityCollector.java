@@ -174,7 +174,22 @@ public final class RtEntityCollector implements SubmitNodeCollector {
             this.pendingOrder = 0;
             this.flameSubmittedThisEntity = false;
             this.lastArmorTexSlot = 0;
+            this.discardedSubmissions = 0;
         }
+    }
+
+    /**
+     * How many submissions since {@link #begin} this collector deliberately cannot reproduce — the phases
+     * whose geometry is built elsewhere (a live map's drawn contents, a mod's custom submit node, particle
+     * groups). The world entity pass ignores them; the ray-traced viewmodel does not, because a hand missing
+     * half of what it holds is worse than a hand drawn the vanilla way. See
+     * {@link RtViewmodel#capture}.
+     */
+    private int discardedSubmissions;
+
+    /** Submissions the collector skipped because their drawing has no RT equivalent. */
+    public int discardedSubmissions() {
+        return discardedSubmissions;
     }
 
     /** This entity's Glowing-effect outline colour (opaque ARGB), or 0 if it isn't glowing. */
@@ -1618,13 +1633,26 @@ public final class RtEntityCollector implements SubmitNodeCollector {
 
     @Override
     public void submitQuadParticleGroup(QuadParticleRenderState particles) {
+        if (capture != null) {
+            discardedSubmissions++;
+        }
     }
 
     @Override
     public void submitGizmoPrimitives(DrawableGizmoPrimitives.Group group, CameraRenderState camera, boolean onTop) {
+        if (capture != null) {
+            discardedSubmissions++;
+        }
     }
 
+    // The one real escape hatch: whoever calls this owns its own vertex emission (MapRenderer for a held
+    // map, a mod for a custom viewmodel), so nothing reaches the capture buffers and there is nothing to
+    // trace. Counted so the viewmodel path can hand the whole hand back to vanilla instead of showing a
+    // half-drawn one; the entity pass ignores the count, where such a submission is rare and harmless.
     @Override
     public <T extends SubmitNode> void submitCustom(SubmitRenderPhase<T> phase, T node) {
+        if (capture != null) {
+            discardedSubmissions++;
+        }
     }
 }

@@ -203,6 +203,12 @@ public struct WorldPush {
     // Lightning state, trailing to preserve the established WorldPush offsets: xyz = strike position
     // in terrain-rebased world blocks, w = momentary flash intensity (0 when inactive).
     public float4   lightning;
+    // Ray-traced first-person viewmodel overlay. x = the largest distance from the eye any captured hand
+    // vertex reached this frame in blocks (0 = no viewmodel geometry in this frame's TLAS), which is what
+    // lets traceViewmodelOverlay skip its extra trace on every pixel that cannot possibly contain the hand,
+    // and to bound that trace's tmax. yzw are reserved for the viewmodel's own controls (fade, per-eye
+    // offset) so adding them costs no offset shift. Trailing lane; the generated WorldPushData appends it.
+    public float4   viewmodel;
 };
 
 // worldPush.dimension: the sky/lighting model this frame renders with. The Overworld runs the full
@@ -370,7 +376,7 @@ public struct Payload {
     public float  hitT;        // >= 0 on hit, < 0 on miss.
     public half3  motionPrev;  // per-vertex world displacement since last frame.
     public half3  f0;          // specular F0.
-    public uint  flags;       // bits 0..1 material, bit 2 celestial, bit 3 water-entering, bits 4..6 emission source, bit 7 emitter-in-list, bit 8 dynamic entity, bit 9 weather, bit 10 end-portal unlit, bit 11 ray still in water (miss), bit 12 rain-exposed water (hit).
+    public uint  flags;       // bits 0..1 material, bit 2 celestial, bit 3 water-entering, bits 4..6 emission source, bit 7 emitter-in-list, bit 8 dynamic entity, bit 9 weather, bit 10 end-portal unlit, bit 11 ray still in water (miss), bit 12 rain-exposed water (hit), bit 14 ray-traced viewmodel.
     public uint   roughMetal;  // packHalf2x16(roughness, metalness)
     public uint   emissionSss; // packHalf2x16(emission, sss)
     public uint   iorTransmission; // packHalf2x16(IOR, transmission factor)
@@ -398,6 +404,12 @@ public static const uint PAYLOAD_WEATHER_SNOW = 8192u;
 // portal branches): raygen shades it fully UNLIT — only its own emission is added, then the path
 // ends. No NEE, no hand light, no RIS, no SHaRC and no indirect bounce, so no scene light (a
 // nearby torch, the sun, GI) can ever illuminate or reflect off the portal's starfield.
+// Set by world.rchit on the ray-traced first-person viewmodel (the geometry-table kind flag
+// ENTITY_GEOM_VIEWMODEL carried through). Two consumers, both about keeping the hand a *viewmodel*:
+// raygen's above-blocks overlay sets nothing else with it, and visibility() swaps to
+// CULL_VIEWMODEL_SHADOW while a viewmodel surface is being shaded, so the first-person body, particles and
+// the hand's own geometry can never throw a shadow across the item held in it.
+public static const uint PAYLOAD_VIEWMODEL = 16384u;
 public static const uint PAYLOAD_END_PORTAL_UNLIT = 1024u;
 // Set by world.rchit on a terrain hit whose prim carries TERRAIN_PRIM_IN_LIGHT_BUFFER: this emitter is
 // RIS-sampled, so raygen gates its direct-hit emission on diffuse continuation rays (no double count).
@@ -529,8 +541,20 @@ public struct EntityGeom {
     public uint64_t dispAddr;
     public float4 rigidDisp;
     public uint triBase[2];
-    public uint2 reserved;
+    // Geometry kind flags (ENTITY_GEOM_* below), written by RtEntities.writeTableEntry's +56 lane. This is
+    // the only per-geometry channel the viewmodel can use: its instance keeps the ordinary ENTITY_BIT custom
+    // index so every entity material path (cutout alpha, glint, portal, emission) applies to held geometry
+    // unchanged, and an extra custom-index kind bit is not available — ENTITY_BIT|PARTICLE_BIT already means
+    // Distant Horizons, and the hit shaders decode the table index as InstanceID() & ~ENTITY_BIT.
+    public uint flags;
+    public uint reserved;
 };
+
+// ENTITY_GEOM_VIEWMODEL: this geometry is the first-person hand and whatever it holds. It forces the
+// dielectric/water surface classes opaque (a screen-fixed refractor would bend the world it is drawn over,
+// and POM only runs on opaque geometry), and it marks the hit payload so shadow rays from it ignore the
+// player. Mirrored by RtViewmodel.GEOM_FLAG_VIEWMODEL and pinned by RtShaderConstantMirrorTest.
+public static const uint ENTITY_GEOM_VIEWMODEL = 1u;
 
 // TLAS instance-custom-index encoding + terrain geometry buckets (shared by rahit/rchit).
 public static const uint ENTITY_BIT = 0x800000u;
