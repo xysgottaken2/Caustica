@@ -1016,7 +1016,7 @@ public final class RtEntities {
             viewmodel.discardPendingCapture();
             return;
         }
-        float[] disp = viewmodel.motionDisplacements(rbx, rby, rbz);
+        float[] disp = viewmodel.motionDisplacements();
         appendCapture(ctx, build, cap, new Motion(uploadDisp(ctx, build, disp), 0f, 0f, 0f),
                 -1, ENTITY_BIT, VIEWMODEL_MASK, viewmodel.instanceTransform(rbx, rby, rbz),
                 RtViewmodel.GEOM_FLAG_VIEWMODEL);

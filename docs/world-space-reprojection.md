@@ -97,7 +97,10 @@ blocks at most.
 
 Sky is special-cased to zero: `gViewZ` forces every sky pixel to the same 1e6 sentinel
 while the guide point sits at `1e6 * cos(angle to the view axis)`. The difference is a
-pure scale along one ray (identical screen position) and does not fit in fp16.
+pure scale along one ray (identical screen position) and is meaningless at 1e6 blocks, so
+`writeGuides` zeroes both vectors for `isSky`. Sky then reprojects as the rotation-only,
+effectively infinite point it is: a still camera gives it exactly zero motion, and a
+turning camera gives it pure rotation.
 
 ## Precipitation
 
@@ -116,22 +119,78 @@ publishes the equivalent world-space travel: one V unit is four blocks, and an i
 vertices' entry of `particleDisp`, so it reaches the guide as an ordinary particle
 displacement and flows through the shared path.
 
-## DLSS-RR history invalidation on geometry edits
+## The viewmodel
 
-RR only ever rejects history through a soft depth/normal weight. With correct, static
-motion vectors its history is fully trustworthy, so geometry that did not exist last
-frame — a block or sign the player just placed — can take dozens of frames to reach full
-strength: the classic "the block takes forever to appear while I stand still" report,
-which FSR/XeSS do not show because they do not accumulate a denoised signal.
+The hand is captured camera-relative: vanilla composes its pose as `V^-1 * bob * model`
+and the raster pass re-applies `V`, so the world-to-view rotation cancels and the vertices
+arrive as offsets around the eye, placed by a translate-only TLAS instance
+(`capture`: `RtViewmodel.capture`, instance: `RtViewmodel.instanceTransform`).
 
-The renderer knows something RR cannot: a block edit happened this frame
-(`RtTerrain.geometryRevision()`, bumped by the edit hooks). `RtComposite` asks RR to drop
-its history for that one frame when the camera did **not** move or rotate, which puts the
-new content on screen immediately at the cost of a single noisier frame. While the camera
-moves the reset is skipped: RR is already refreshing the image, and building continuously
-would otherwise cost a reset every time a block lands.
+That changes the shift inside the displacement formula. Every rebased capture computes
 
-## Invariants (pinned by `RtWorldReprojectionTest`)
+```
+disp = (cur - prev) + (anchor_cur - anchor_prev)
+```
+
+and the viewmodel has no terrain anchor: its "anchor" is the camera, so
+
+```
+disp = (cur - prev) + (camera_cur - camera_prev)
+```
+
+An earlier revision did both halves of this wrong — it *subtracted* the camera delta and
+*added* `previousRb - rb`, an anchor term that cannot move camera-relative geometry at
+all. The hand sits half a block to a block from the eye, where one block of camera travel
+projects to several hundred render pixels, so a walking step produced a ~400 px vector
+(`ViewmodelDisplacementTest` pins the numbers: at 0.62 blocks of depth, a 0.4-block step
+gives -408 px on the old sign, 0 px on the correct one). Every temporal filter then saw a
+mesh that teleported each step and smeared its history across the hand — the scratches
+reported while walking.
+
+A changed vertex count (an item swap) is *not* "no motion": the hand still travels with
+the eye, so a mesh with no predecessor reports the camera's own travel. That reprojects
+to (almost) zero screen motion, which is what the screen shows. Reporting zero there — or
+returning no displacement at all, which the reprojection reads as "world-static" — would
+hand every filter a scene-sized vector at hand depth on the first frame of the swap.
+
+## DLSS-RR history policy
+
+Correct static vectors make RR's history *the* thing to keep: that is what accumulates 1
+spp into a clean image. They also make it hard to change: RR rejects history only through
+a soft depth/normal weight, so geometry that did not exist last frame — a block or sign
+the player just placed — is blended in against a confident, converged history and can
+take dozens of frames to reach full strength. FSR and XeSS do not show this because they
+never accumulate a denoised signal.
+
+NGX has no per-pixel reset, so the only lever is `InReset`, which costs exactly one raw
+1-spp frame. The policy therefore has to choose *when* that frame is worth it, and it is
+deliberately neither "keep everything" nor "reset on anything":
+
+* **Any edit the player can see earns a reset, whether or not the camera is moving.**
+  An earlier revision only reset while the camera was still, on the theory that a moving
+  camera refreshes the image anyway. It does not: the edit changes the picture in a place
+  the motion vectors say is static, so a sign placed while crossing a room faded in over
+  a second. `RtComposite.maybeInvalidateRrHistoryForEdits` reads the last block-change
+  request (`RtTerrain.lastBlockEdit()`, the box the edit hooks forwarded) and resets when
+  its nearest block is within `RR_EDIT_RESET_RADIUS` (32 blocks) of the eye **and** its
+  centre projects into the frame.
+* **Ambient churn does not.** That same dirty counter fires for flowing water, crop
+  growth, fire and every block a server tick touches — anywhere in the loaded world.
+  Resetting on those replaced the whole converged image with one noisy frame several
+  times a second, worst exactly while standing still and looking at the scene that was
+  changing. The distance and frustum tests are what separate "the block I just placed"
+  from "a river three chunks away".
+* **Resets are rate-limited.** `RR_EDIT_RESET_COOLDOWN_FRAMES` (4) caps how often a reset
+  can fire, so a build spree, a fast break, or a waterfall at the player's feet cannot
+  strobe the image. A lone edit is never delayed — the cooldown only throttles the ones
+  that arrive inside the window — and an edit consumed by the cooldown is dropped rather
+  than replayed later, when its noisy frame would land on content that has already
+  settled.
+
+`RtFrameStats` counts the resets as `rrHistoryResets`; a nonzero steady rate while
+standing still in a still scene is a bug in this policy, not in the vectors.
+
+## Invariants (pinned by `RtWorldReprojectionTest` and `ViewmodelDisplacementTest`)
 
 1. `guides.slang` must not write `gMotion`; `world_reproject.comp` is its only producer.
 2. Both sides build the 3D point through `cameraRelativePointAtViewDepth` — no second
@@ -143,6 +202,11 @@ would otherwise cost a reset every time a block lands.
    *previous* frame's projection, carrying its FOV) and the frame's `WorldPushConstants`
    block — the same matrices and jitter the trace used.
 5. `RtComposite` dispatches the reprojection after Pass A and before NRD/SVGF/DLSS-RR.
+6. A capture's displacement is a **world** displacement: `(cur - prev) + shift`, where the
+   shift re-expresses last frame in this frame's space — the rebase shift for rebased
+   geometry, the camera's travel for the camera-relative viewmodel. The viewmodel must not
+   add an anchor term, and a hand with no predecessor reports the camera's travel, never
+   zero (`RtViewmodel` / `ViewmodelDisplacement`, pinned by `ViewmodelDisplacementTest`).
 
 `gViewZ` must stay written unconditionally (it used to be gated on NRD-or-SVGF being
 active); it is now the reprojection's depth source on every path.

@@ -90,8 +90,9 @@ public final class RtDlssRr {
      * did not exist last frame (a block or sign the player just placed) is blended in against a
      * confident, fully-converged history and can take dozens of frames to reach full strength. The
      * renderer cannot express "this pixel is new" to NGX, but it can tell RR that the scene changed,
-     * which costs one noisier frame and puts the new content on screen immediately. Callers fire this
-     * only for genuine geometry edits under a still camera — see RtComposite's DLSS-RR call site.
+     * which costs one noisier frame and puts the new content on screen immediately. The caller owns the
+     * policy — which edits are worth that frame, and how often they may ask for one — because a reset is
+     * all-or-nothing for the whole image. See RtComposite.maybeInvalidateRrHistoryForEdits.
      */
     public void requestHistoryReset() {
         resetHistory = true;

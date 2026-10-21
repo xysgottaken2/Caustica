@@ -42,6 +42,7 @@ import net.minecraft.world.phys.Vec3;
 import org.joml.Matrix4f;
 import org.joml.Matrix4fc;
 import org.joml.Vector3fc;
+import org.joml.Vector4f;
 import org.joml.Vector4fc;
 import org.lwjgl.system.MemoryStack;
 import org.lwjgl.system.MemoryUtil;
@@ -794,11 +795,14 @@ public final class RtComposite {
     // position, read into the push constant each frame then advanced at frame end. RtWorldReprojectPipeline
     // consumes exactly these values, so the vector it builds describes the frame that actually rendered.
     private final Matrix4f mvPrevProjView = new Matrix4f();
-    // DLSS-RR history invalidation for geometry edits under a still camera (see the RR call site):
-    // the last terrain edit revision we acted on, and the view rotation it was compared against.
-    private long rrSeenGeometryRevision;
-    private final Matrix4f rrPrevViewRotation = new Matrix4f();
-    private boolean rrViewRotationValid;
+    // DLSS-RR history policy (see maybeInvalidateRrHistoryForEdits): the block-edit sequence we already
+    // acted on, and how many RR frames have been rendered since the last history reset.
+    private long rrSeenEditSeq;
+    private int rrFramesSinceReset = Integer.MAX_VALUE;
+    /** An edit farther than this from the eye cannot be what the player is waiting for. */
+    private static final double RR_EDIT_RESET_RADIUS = 32.0;
+    /** Minimum RR frames between two resets: a build spree must not replace every frame with raw noise. */
+    private static final int RR_EDIT_RESET_COOLDOWN_FRAMES = 4;
     private final Matrix4f mvCurProjView = new Matrix4f();
     private final Matrix4f mvPushMatrix = new Matrix4f();
     private final Matrix4f frameInvViewProj = new Matrix4f();
@@ -1644,32 +1648,90 @@ public final class RtComposite {
     }
 
     /**
-     * Drop DLSS-RR's history for one frame when the world's geometry changed while the camera did not.
+     * Keep DLSS-RR's history only where it can still be trusted: drop it for one frame when a block the
+     * player can actually see was placed or broken.
      *
-     * <p>This is the block/sign latency fix. With correct (static) motion vectors RR's history is fully
-     * trustworthy, so new geometry is only let through by its soft depth weight — a block placed on a
-     * wall can then take dozens of frames to reach full strength, while the image everywhere else keeps
-     * accumulating. The renderer knows something RR cannot: a block edit happened this frame. When the
-     * camera is still, that edit is the only thing that could have changed the picture, so one history
-     * reset makes the new content appear immediately at the cost of a single noisier frame. While the
-     * camera moves the reset is skipped on purpose: RR is already refreshing the image, and building
-     * continuously would otherwise cost a reset every time a block lands.
+     * <p>RR rejects history only through a soft depth/normal weight, so geometry that did not exist last
+     * frame is blended in against a confident, fully-converged history and can take dozens of frames to
+     * reach full strength — the "my block takes forever to appear" report, which FSR and XeSS do not show
+     * because they never accumulate a denoised signal. NGX cannot be told "this pixel is new"; it can be
+     * told the scene changed, which costs exactly one noisier frame and puts the new content on screen now.
+     *
+     * <p>The policy is deliberately neither of the two easy ones:
+     *
+     * <ul>
+     *   <li><b>Not "accept everything".</b> With correct static vectors the history <em>is</em> the point of
+     *       RR, so a blanket reset is wrong; but so is the earlier revision's rule, which only reset while
+     *       the camera was still. An edit changes the picture whether or not the player is walking, and
+     *       gating on motion meant a sign placed while crossing a room faded in over a second.</li>
+     *   <li><b>Not "reset for any terrain churn".</b> The dirty counter also fires for flowing water, crop
+     *       growth, fire and every block a server tick touches. Each reset replaces the whole converged image
+     *       with one raw 1-spp frame, so resetting on those produced a visible strobe — worst exactly while
+     *       standing still, looking at the scene that was changing.</li>
+     * </ul>
+     *
+     * <p>So an edit earns a reset when it is within {@link #RR_EDIT_RESET_RADIUS} blocks of the eye and its
+     * box projects into the frame: that is the edit the player is waiting for, and it is also the only kind
+     * of edit a single noisy frame can be justified for. Anything farther away or behind the camera is left
+     * to RR's own depth weight. {@link #RR_EDIT_RESET_COOLDOWN_FRAMES} caps the rate so a build spree — or a
+     * river at the player's feet — cannot strobe the image; a lone edit is never delayed, because the
+     * cooldown only throttles the ones that arrive inside the window.
      */
     private void maybeInvalidateRrHistoryForEdits() {
+        if (rrFramesSinceReset < RR_EDIT_RESET_COOLDOWN_FRAMES) {
+            rrFramesSinceReset++;
+        }
         if (RtTerrain.currentOrNull() == null) {
-            rrViewRotationValid = false;
             return;
         }
-        long revision = RtTerrain.geometryRevision();
-        boolean changed = revision != rrSeenGeometryRevision;
-        rrSeenGeometryRevision = revision;
-        boolean rotated = !rrViewRotationValid || !rrPrevViewRotation.equals(frameViewRotation);
-        rrPrevViewRotation.set(frameViewRotation);
-        rrViewRotationValid = true;
-        boolean moved = mvCamDeltaX != 0f || mvCamDeltaY != 0f || mvCamDeltaZ != 0f;
-        if (changed && !moved && !rotated) {
-            RtDlssRr.INSTANCE.requestHistoryReset();
+        RtTerrain.BlockEdit edit = RtTerrain.lastBlockEdit();
+        if (edit.seq() == rrSeenEditSeq) {
+            return;
         }
+        // Consume the edit either way: an edit skipped by the cooldown must not fire later, when its noisy
+        // frame would land on content the player has already seen settle.
+        rrSeenEditSeq = edit.seq();
+        if (rrFramesSinceReset < RR_EDIT_RESET_COOLDOWN_FRAMES || !editReachesTheFrame(edit)) {
+            return;
+        }
+        RtDlssRr.INSTANCE.requestHistoryReset();
+        rrFramesSinceReset = 0;
+        RtFrameStats.FRAME.count("rrHistoryResets", 1);
+    }
+
+    /**
+     * Whether an edit box can be part of the frame the player is looking at: nearest-block distance inside
+     * the reset radius, and the box centre in front of the camera and inside the raster frame (with margin).
+     *
+     * <p>The centre is enough of a probe: the boxes are a single block for the ordinary edit, and this test
+     * only has to separate "the thing I just touched" from "something behind me" and "something across the
+     * valley". {@code mvCurProjView} is {@code projection * rotation} — no translation — so it maps
+     * camera-relative world straight to clip, which is the space this asks about.
+     */
+    private boolean editReachesTheFrame(RtTerrain.BlockEdit edit) {
+        // Block (x, y, z) covers [x, x+1), so clamping the eye into [min, max + 1] gives the exact nearest
+        // point of the edit volume, not just of its centre.
+        double nx = Mth.clamp(camX, edit.minX(), edit.maxX() + 1.0);
+        double ny = Mth.clamp(camY, edit.minY(), edit.maxY() + 1.0);
+        double nz = Mth.clamp(camZ, edit.minZ(), edit.maxZ() + 1.0);
+        double dx = nx - camX;
+        double dy = ny - camY;
+        double dz = nz - camZ;
+        if (dx * dx + dy * dy + dz * dz > RR_EDIT_RESET_RADIUS * RR_EDIT_RESET_RADIUS) {
+            return false;
+        }
+        float cx = (edit.minX() + edit.maxX() + 1) * 0.5f;
+        float cy = (edit.minY() + edit.maxY() + 1) * 0.5f;
+        float cz = (edit.minZ() + edit.maxZ() + 1) * 0.5f;
+        Vector4f clip = new Vector4f(cx - (float) camX, cy - (float) camY, cz - (float) camZ, 1.0f)
+                .mul(mvCurProjView);
+        if (clip.w <= 0.0f) {
+            return false;
+        }
+        float ndcX = clip.x / clip.w;
+        float ndcY = clip.y / clip.w;
+        // A margin, so a block straddling the edge of the screen still counts as on screen.
+        return ndcX >= -1.2f && ndcX <= 1.2f && ndcY >= -1.2f && ndcY <= 1.2f;
     }
 
     private void recordFrame(RtContext ctx, RtPipeline active, GpuTexture nativeColor) {

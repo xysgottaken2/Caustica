@@ -105,7 +105,6 @@ public final class RtViewmodel {
     private float[] previousPlaced = new float[0];
     private int previousCount = -1;
     private double previousCamX, previousCamY, previousCamZ;
-    private int previousRbx, previousRby, previousRbz;
 
     private boolean pending;
     private boolean capturing;
@@ -302,33 +301,24 @@ public final class RtViewmodel {
 
     /**
      * Per-vertex motion vectors for the captured mesh, in one atomic step: the world displacement of each
-     * vertex since the previous frame, in the <em>current</em> frame's rebased space, then the history is
-     * rotated so the next frame can diff against it. A viewmodel is camera-locked, so its screen position
-     * barely moves while the world behind it sweeps past; the denoiser and the upscaler can only reuse a hand
-     * pixel once the vectors say "this surface travelled with the eye", which is what these say.
+     * vertex since the previous frame, then the history is rotated so the next frame can diff against it.
      *
-     * @return four floats per vertex (xyz displacement, w unused), or null when the vertex count changed
-     *         (an item swap has no predecessor to reproject from, so shading must re-estimate instead of
-     *         dragging a previous item's colour across the swap)
+     * <p>The convention is the entity uploader's — {@code (cur - prev) + shift} — but the capture is
+     * camera-relative rather than rebased, so the shift is the camera's travel this frame and the terrain
+     * anchor does not enter at all (see {@link ViewmodelDisplacement}). A viewmodel is camera-locked, so its
+     * screen position barely moves while the world behind it sweeps past; the denoiser and the upscaler can
+     * only reuse a hand pixel once the vectors say "this surface travelled with the eye", which is what
+     * these say — for a hand locked to the eye the whole displacement is the eye's own motion.
+     *
+     * @return four floats per vertex (xyz displacement, w unused), or {@code null} for an empty mesh. A
+     *         changed vertex count is not "no motion": the hand still travels with the camera, and reporting
+     *         zero there would hand every temporal filter a scene-sized vector at half a block of depth.
      */
-    float[] motionDisplacements(int rbx, int rby, int rbz) {
+    float[] motionDisplacements() {
         int vertices = capture.verts.size() / 3;
         float[] cur = capture.verts.elements();
-        float[] disp = null;
-        if (previousCount == vertices && previousPlaced.length >= vertices * 3) {
-            // Same convention as the entity uploader: (cur - prev) + shift, where the shift re-expresses
-            // last frame's anchor in this frame's rebased origin (skipping it would paint a whole-world-sized
-            // vector the moment terrain re-bases).
-            float sx = (float) (camX - previousCamX) + (previousRbx - rbx);
-            float sy = (float) (camY - previousCamY) + (previousRby - rby);
-            float sz = (float) (camZ - previousCamZ) + (previousRbz - rbz);
-            disp = new float[vertices * 4];
-            for (int i = 0; i < vertices; i++) {
-                disp[i * 4] = cur[i * 3] - (previousPlaced[i * 3] + sx);
-                disp[i * 4 + 1] = cur[i * 3 + 1] - (previousPlaced[i * 3 + 1] + sy);
-                disp[i * 4 + 2] = cur[i * 3 + 2] - (previousPlaced[i * 3 + 2] + sz);
-            }
-        }
+        float[] disp = ViewmodelDisplacement.fill(cur, vertices * 3, previousPlaced, previousCount * 3,
+                previousCount >= 0, camX - previousCamX, camY - previousCamY, camZ - previousCamZ);
         // The capture's buffer is reused in place next frame, so the history needs a real copy.
         if (previousPlaced.length < vertices * 3) {
             previousPlaced = new float[vertices * 3];
@@ -338,9 +328,6 @@ public final class RtViewmodel {
         previousCamX = camX;
         previousCamY = camY;
         previousCamZ = camZ;
-        previousRbx = rbx;
-        previousRby = rby;
-        previousRbz = rbz;
         return disp;
     }
 

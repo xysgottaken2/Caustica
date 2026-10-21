@@ -169,6 +169,8 @@ public final class RtTerrain {
     private volatile long terrainEpoch = 1L;
     private long buildToken;
     private long dirtyGroupSeq;
+    // Last block-change request (see BlockEdit). Swapped under dirtyLock; read by the RR history policy.
+    private BlockEdit lastEdit = BlockEdit.NONE;
     private final RtSectionTable table = new RtSectionTable();
     private boolean ready;
     // Full-residency invalidation requested off the render thread. Wired to Fabric's
@@ -349,17 +351,27 @@ public final class RtTerrain {
     }
 
     /**
-     * Monotonic count of block-edit groups requested so far, or 0 before the first one.
+     * The most recent block-change request, as forwarded by the {@code LevelExtractor} hooks.
      *
-     * <p>Used by the denoiser path to notice that the world's GEOMETRY changed (a block or block entity
-     * was placed/broken) without the camera moving. That is precisely the case a temporal denoiser
-     * cannot detect on its own at one sample per pixel — it sees a depth step only through its soft
-     * rejection weight — so DLSS-RR is asked to drop its history for that frame. Read on the render
-     * thread; the counter is bumped under {@code dirtyLock} by the (possibly off-thread) edit hooks.
+     * <p>{@code seq} is the same monotonically increasing id that keys {@code dirtyEvents}: it changes on
+     * every request, including the ambient ones (fluid flow, crop growth, fire) that no player caused.
+     * {@code RtComposite} reads it to decide whether a DLSS-RR history reset is justified — see
+     * {@code maybeInvalidateRrHistoryForEdits}. The bounds are the request's own inclusive block box, in
+     * absolute world coordinates; they are what lets that decision be about the block the player can see
+     * instead of about "something, somewhere, changed".
+     *
+     * <p>Immutable and swapped wholesale under {@code dirtyLock}, because the edit hooks can run off the
+     * render thread. Read on the render thread via {@link #lastBlockEdit()}.
      */
-    public static long geometryRevision() {
+    public record BlockEdit(long seq, int minX, int minY, int minZ, int maxX, int maxY, int maxZ) {
+        /** Before the first edit of the session: no sequence number, no area. */
+        public static final BlockEdit NONE = new BlockEdit(0L, 0, 0, 0, 0, 0, 0);
+    }
+
+    /** The last {@link BlockEdit} handed to {@link #markBlocksDirty}, or {@link BlockEdit#NONE}. */
+    public static BlockEdit lastBlockEdit() {
         synchronized (INSTANCE.dirtyLock) {
-            return INSTANCE.dirtyGroupSeq;
+            return INSTANCE.lastEdit;
         }
     }
 
@@ -392,6 +404,7 @@ public final class RtTerrain {
                 if (groupId == NO_DIRTY_GROUP) {
                     groupId = ++terrain.dirtyGroupSeq;
                 }
+                terrain.lastEdit = new BlockEdit(groupId, minX, minY, minZ, maxX, maxY, maxZ);
                 terrain.dirtyEvents.add(new DirtyEvent(groupId, keys));
                 terrain.dirtyPending = true;
             }
