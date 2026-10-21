@@ -16,7 +16,6 @@ public static float3 gv_normal = float3(0.0, 0.0, 0.0);
 public static float3 gv_albedo = float3(0.0, 0.0, 0.0);
 public static float gv_rough = 0.0;
 public static float3 gv_hitCamRel = float3(0.0, 0.0, 0.0);       // primary-surface hit position relative to the current camera
-public static bool gv_motionUseRefracted = false; // true when the MV tracks the refracted hit (its own reprojection delta)
 // World-space displacement of the motion-guide surface since the previous frame (0 for static
 // terrain/sky, an entity's per-vertex/object motion for a dynamic hit).
 public static float3 gv_motionObjDisp = float3(0.0, 0.0, 0.0);
@@ -143,7 +142,6 @@ public void setTransmissionGuide(float3 hitCamRel, float3 motionPrev, float3 nor
                           float roughness, float3 diffuseAlbedo) {
     gv_hitCamRel = hitCamRel;
     gv_motionObjDisp = motionPrev;
-    gv_motionUseRefracted = true;
     gv_normal = normal;
     gv_rough = roughness;
     gv_albedo = diffuseAlbedo;
@@ -280,57 +278,94 @@ public void writeGuides(int2 pix, float3 primaryDir, float2 jndc, float2 size, f
     float4 curClip = mul(worldPush.curViewProj, float4(gv_hitCamRel, 1.0));
     float depth = curClip.w > 0.0 ? curClip.z / curClip.w : 0.0;
 
-    // NRD IN_VIEWZ / SVGF reprojection guide: linear view depth of the primary hit (positive, grows forward;
-    // the perspective divide's w is exactly that distance). Sky/miss pixels place gv_hitCamRel at
-    // 1e6 blocks, so their viewZ lands above CommonSettings::denoisingRange — how REBLUR recognizes
-    // INF pixels and how SVGF recognizes sky. Written here (Pass A) because the
-    // primary hit is owned here; Pass B only reads it for hit-distance normalization.
-    if (nrdEnabled() || viewZEnabled()) {
-        // BUGFIX: for sky, curClip.w works out to ~1e6 * |rd.z_view|, which is DIRECTION-dependent:
-        // sky rays near the view axis exceed denoisingRange (correctly INF) but sky rays far from the
-        // axis fall BELOW it, so the NRD mistakes edge-of-screen sky for geometry and tries to denoise
-        // it — a visible circular boundary between "sky treated as sky" and "sky treated as geometry".
-        // Detect sky robustly by hit distance instead: sky sits at |gv_hitCamRel| = 1e6 exactly (the
-        // miss path writes rd*1e6, sq = 1e12), while real geometry never approaches that — even far LOD
-        // terrain stays well under 1e5 blocks (sq < 1e10). A 1e11 threshold separates the two with wide
-        // margins on both sides. Force sky viewZ to a guaranteed-INF value regardless of ray direction.
-        float hitDistSq = dot(gv_hitCamRel, gv_hitCamRel);
-        bool isSky = hitDistSq > 1.0e11;
-        gViewZ[pix] = isSky ? 1.0e6 : (curClip.w > 0.0 ? min(curClip.w, 1.0e6) : 1.0e6);
-    }
+    // NRD IN_VIEWZ / SVGF reprojection guide / WORLD-SPACE REPROJECTION DEPTH BUFFER: the linear view
+    // depth of the primary hit (positive, grows forward; the perspective divide's w is exactly that
+    // distance). Sky/miss pixels place gv_hitCamRel at 1e6 blocks, so their viewZ lands above
+    // CommonSettings::denoisingRange — how REBLUR recognizes INF pixels and how SVGF recognizes sky.
+    // Written here (Pass A) because the primary hit is owned here; Pass B only reads it for
+    // hit-distance normalization, and world_reproject.comp reconstructs every pixel's 3D position from
+    // it, which is why it is now written UNCONDITIONALLY. It used to be gated on NRD-or-SVGF being
+    // active because those two were the only readers — that gate would silently zero the motion
+    // vectors on the raw-trace and DLSS-RR paths.
+    //
+    // BUGFIX: for sky, curClip.w works out to ~1e6 * |rd.z_view|, which is DIRECTION-dependent:
+    // sky rays near the view axis exceed denoisingRange (correctly INF) but sky rays far from the
+    // axis fall BELOW it, so the NRD mistakes edge-of-screen sky for geometry and tries to denoise
+    // it — a visible circular boundary between "sky treated as sky" and "sky treated as geometry".
+    // Detect sky robustly by hit distance instead: sky sits at |gv_hitCamRel| = 1e6 exactly (the
+    // miss path writes rd*1e6, sq = 1e12), while real geometry never approaches that — even far LOD
+    // terrain stays well under 1e5 blocks (sq < 1e10). A 1e11 threshold separates the two with wide
+    // margins on both sides. Force sky viewZ to a guaranteed-INF value regardless of ray direction.
+    float hitDistSq = dot(gv_hitCamRel, gv_hitCamRel);
+    bool isSky = hitDistSq > 1.0e11;
+    float guideViewZ = isSky ? 1.0e6 : (curClip.w > 0.0 ? min(curClip.w, 1.0e6) : 1.0e6);
+    gViewZ[pix] = guideViewZ;
 
-    // Motion vector: reproject this guide point through the previous frame's view-projection.
-    // The primary ray was cast through the JITTERED ndc (jndc), so this hit's current screen position is
-    // jndc, NOT the pixel centre. Subtract jndc so the MV is jitter-free (= 0 when static), which is
-    // what DLSS expects with MVJittered unset. Scaled from NDC into render-pixel space.
-    // For a dynamic surface, previous-frame position is the current point minus its world-space
-    // displacement; subtracting gv_motionObjDisp de-cameras the MV.
-    float4 prevClip = mul(worldPush.prevViewProj,
-            float4(gv_hitCamRel + worldPush.camDelta - gv_motionObjDisp, 1.0));
-    float2 curNdc = jndc; // primary hit's current screen position is exactly the jittered ray ndc
-    // Transmitted content is its own feature: compare its previous and current projections rather than
-    // subtracting the primary interface's jittered NDC.
-    float4 curClipMotion = gv_motionUseRefracted
-            ? mul(worldPush.curViewProj, float4(gv_hitCamRel, 1.0))
-            : float4(0.0, 0.0, 0.0, 1.0); // unused; keeps the guard below uniform
-    // Guard both perspective divides the way the depth above does. A guide point can land behind either
-    // camera — most easily a transmitted destination seen at a grazing angle, or one that leaves the
-    // frustum as the camera turns — and w at or below zero turns the divide into an arbitrarily large
-    // vector that DLSS-RR reprojects with. No valid previous position exists in that case, so report no
-    // motion and let RR fall back instead of handing it garbage.
-    float2 motion;
-    if (prevClip.w > 0.0 && (!gv_motionUseRefracted || curClipMotion.w > 0.0)) {
-        if (gv_motionUseRefracted) curNdc = curClipMotion.xy / curClipMotion.w;
-        motion = (prevClip.xy / prevClip.w - curNdc) * 0.5 * size;
-    } else {
-        motion = float2(0.0, 0.0);
+    // ---- World-space reprojection guide. This pass no longer computes a screen-space motion vector.
+    //
+    // What used to happen here: the shaded point was pushed through prevViewProj and the difference to
+    // the pixel's own NDC became the motion vector — a 2D delta derived from a 1-spp ray hit. That is
+    // the vector DLSS-RR / NRD / SVGF / frame generation reprojected their history with. Deriving it
+    // from the shading sample means the vector inherits that sample's whole error budget (the jittered
+    // hit, per-vertex motion interpolation on entities and particles, the analytic wave surface,
+    // half-precision motionPrev) and lands it in a texture whose entire job is to be a smooth,
+    // sub-pixel-accurate displacement field — a field a temporal filter reads as real surface motion
+    // and a frame generator reads as real fractional-pixel travel between frames.
+    //
+    // world_reproject.comp now owns the vector: it rebuilds the pixel's 3D position from THIS frame's
+    // depth G-buffer (gViewZ, which is exactly the clip .w of the visible layer) and projects that
+    // through prevViewProj. A static surface therefore reprojects to exactly where it was, no matter
+    // how the sample happened to land inside the pixel, and the vector is consistent with the depth and
+    // normal the denoisers validate the same history against — they can no longer disagree.
+    //
+    // What is left for this pass is the part the depth buffer cannot know: the offset between the point
+    // depth describes and the point the pixel actually shows, minus the surface's own world-space
+    // displacement. Concretely, with `jndc` the pixel's (jittered) NDC and `guideViewZ` its linear view
+    // depth — the exact value world_reproject.comp reads back out of gViewZ:
+    //
+    //   depthPoint = point on THIS pixel's ray at guideViewZ (what world_reproject reconstructs)
+    //   delta      = gv_hitCamRel - gv_motionObjDisp - depthPoint
+    //
+    //   * static terrain / sky: the visible point IS on the ray, so delta is zero to within fp32 and the
+    //     reprojection is pure depth reprojection;
+    //   * dynamic geometry (entities, particles, animated water): delta carries the per-frame world
+    //     displacement only, so the reprojection moves with the surface instead of standing still;
+    //   * transmitted content: the visible destination is OFF the pixel's ray, so delta carries the
+    //     lateral refraction offset and the reprojection lands where that destination really was. This
+    //     is why the guide is a world-space correction and not a 2D vector: a depth-based scheme has no
+    //     way to recover a point seen through glass, and guessing would smear every water surface.
+    //
+    // The correction is zero for the overwhelming majority of the screen, which is exactly the point:
+    // the per-pixel information the reprojection depends on is now the depth buffer, not this guide.
+    //
+    // guideViewZ (not curClip.w) is load-bearing: this must be the value world_reproject.comp will read
+    // back out of gViewZ, not merely the one this pass would have preferred. The two differ only for
+    // sky — zeroed below — and for a hit behind the camera plane, which a primary ray cannot produce.
+    float3 depthPoint = cameraRelativePointAtViewDepth(jndc, guideViewZ, worldPush.invViewProj);
+    float3 reprojDelta = gv_hitCamRel - gv_motionObjDisp - depthPoint;
+    // Sky sits at a fixed |hitCamRel| = 1e6 but gViewZ is forced to exactly 1e6 for every sky pixel, so
+    // the two reconstructions are the same point only up to the ray's cosine with the view axis. The
+    // difference is meaningless at 1e6 blocks (it is a pure scale along one ray, and the projected
+    // screen position is identical), and it does not fit in fp16 — writing it would overflow the guide
+    // to Inf. Report zero: sky then reprojects as the rotation-only, effectively infinite point it is.
+    if (isSky) {
+        reprojDelta = float3(0.0, 0.0, 0.0);
     }
+    // fp16 headroom guard: a legitimate correction is at most a few blocks (one frame of entity travel
+    // or the lateral spread of a refraction); anything larger is a NaN/Inf artefact of a degenerate
+    // projection and must not reach the reprojection as a teleport.
+    if (any(isnan(reprojDelta)) || any(isinf(reprojDelta))) {
+        reprojDelta = float3(0.0, 0.0, 0.0);
+    }
+    reprojDelta = clamp(reprojDelta, -4096.0, 4096.0);
 
     // Guide buffers: first-hit or coherently replaced attributes consumed by the denoiser/DLSS-RR.
+    // gReprojDelta occupies the slot the motion vector used to fill, and is the only guide written
+    // here that this pipeline does not consume: world_reproject.comp (a compute pass outside it) does.
     gNormal[pix] = float4(gv_normal, gv_rough);
     gAlbedo[pix] = float4(gv_albedo, 1.0);
     gDepth[pix] = depth;
-    gMotion[pix] = motion;
+    gReprojDelta[pix] = float4(reprojDelta, 0.0);
     gSpecAlbedo[pix] = float4(specAlbedo, 1.0);
     gSpecMotion[pix] = specMotion;
 }
@@ -353,7 +388,12 @@ public void writeDebugView(int2 pix) {
     } else if (pc.debugView == 7u) {
         dbg = float3(clamp(0.5 + gSpecMotion[pix] * 0.05, 0.0, 1.0), 0.5);
     } else {
-        dbg = float3(clamp(0.5 + gMotion[pix] * 0.05, 0.0, 1.0), 0.5);
+        // Debug view 5 ("Motion") is painted by world_reproject.comp: the final vector does not exist
+        // until that pass runs, and this one would only be able to show the previous frame's. Every
+        // other id that reaches here is unexposed (8/9 are the emission views, owned by Pass B), so
+        // show the correction this pass just produced — a nonzero value over static geometry is
+        // exactly the shape of a reprojection bug, which makes this the useful fallback.
+        dbg = float3(clamp(length(gReprojDelta[pix].xyz) * 0.25, 0.0, 1.0), 0.0, 0.0);
     }
     outImage[pix] = float4(dbg, 1.0);
 }

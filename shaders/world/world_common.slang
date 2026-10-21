@@ -232,7 +232,6 @@ public static const uint FEATURE_CLOUDS = 8u;            // cloud deck in the sk
 public static const uint FEATURE_CLOUDS_VOLUMETRIC = 16u; // clouds are ray-marched, not a flat deck
 public static const uint FEATURE_RESTIR = 32u;            // temporal + spatial emitter-reservoir reuse
 public static const uint FEATURE_NRD = 64u;              // NRD denoiser signal capture (per-lobe radiance + hit distance)
-public static const uint FEATURE_VIEWZ = 128u;           // a renderer-side denoiser needs gViewZ (reprojection validation + sky cutoff)
 public static const uint FEATURE_SHARC = 256u;           // experimental spatial-hash radiance cache
 
 // How far a full thunderstorm pulls the sky and the fog toward their own luminance, in 0..1. One shared
@@ -264,6 +263,47 @@ public static const float PARALLAX_WALL_TILT = 0.5;
 // world_core re-exports the same predicates against its module-level `worldPush` for every other pass.
 public bool worldFeature(WorldPush push, uint feature) { return (push.featureFlags & feature) != 0u; }
 public bool worldFlag(WorldPush push, uint flag) { return (push.flags & flag) != 0u; }
+
+// ---- Camera-relative reconstruction (the world-space reprojection primitive) ----------------
+//
+// `invViewProj` is the inverse of the forward (jitter-free, camera-relative) view-projection, so it
+// maps clip space straight into CAMERA-RELATIVE world space: the eye sits at the origin, the view
+// rotation is already baked in, and world_primary.rgen only adds worldPush.camOffset to get a true
+// world-space ray origin.
+//
+// For any perspective projection the homogeneous .w of a camera-relative point is its LINEAR VIEW
+// DEPTH — distance along the view axis, positive in front of the eye. gViewZ stores exactly that
+// value for the primary hit, which makes these two functions the exact inverse of the projection
+// that produced it. Anything that rebuilds a 3D position from the depth G-buffer must go through
+// them instead of assuming a near/far or reversed-Z convention: the sign of the depth row and the
+// handedness of the projection then cannot silently disagree with the tracer.
+//
+// They live here, not in math.slang, because world_common is the one module with no bindings: a
+// compute pass (world_reproject.comp) can use them without dragging in world_core's raygen images.
+public float3 cameraRayDir(float2 ndc, float4x4 invViewProj) {
+    float4 nearH = mul(invViewProj, float4(ndc.x, ndc.y, 1.0, 1.0));
+    float4 farH = mul(invViewProj, float4(ndc.x, ndc.y, 0.0, 1.0));
+    return normalize(farH.xyz / farH.w - nearH.xyz / nearH.w);
+}
+
+/**
+ * Camera-relative point on the ray through `ndc` whose linear view depth (clip .w) is `viewDepth`.
+ *
+ * The point is a scalar multiple of the unit ray direction, and its view depth is the dot product
+ * with the camera forward axis — which, in camera-relative space, is simply the centre ray. Solving
+ * `dot(dir * t, forward) = viewDepth` gives the multiplier below, so this is exact for any
+ * projection (reversed-Z, infinite far, off-centre frustum) that produced the depth in the first
+ * place.
+ */
+public float3 cameraRelativePointAtViewDepth(float2 ndc, float viewDepth, float4x4 invViewProj) {
+    float3 dir = cameraRayDir(ndc, invViewProj);
+    float3 forward = cameraRayDir(float2(0.0, 0.0), invViewProj);
+    float denom = dot(dir, forward);
+    // |denom| is the cosine between the pixel's ray and the view axis; only a ray 90 degrees off the
+    // axis could reach zero, and no pixel of a perspective frustum does. The guard keeps a degenerate
+    // matrix (or a corrupted depth) from turning into an Inf position downstream.
+    return dir * (viewDepth / (abs(denom) > 1.0e-6 ? denom : 1.0e-6));
+}
 
 // 32-byte hot area-light record. Radiance uses packed R11G11B10 and the grid-relative owner section
 // uses three unsigned 10-bit coordinates; the geometric normal is reconstructed from the half axes.

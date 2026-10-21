@@ -80,6 +80,7 @@ import dev.comfyfluffy.caustica.rt.pipeline.RtNativeFrameGenPipeline;
 import dev.comfyfluffy.caustica.rt.pipeline.RtSvgfDenoiser;
 import dev.comfyfluffy.caustica.rt.pipeline.RtNrdDenoiser;
 import dev.comfyfluffy.caustica.rt.pipeline.RtNrdCombinePipeline;
+import dev.comfyfluffy.caustica.rt.pipeline.RtWorldReprojectPipeline;
 import dev.comfyfluffy.caustica.rt.overlay.RtWorldOverlay;
 import dev.comfyfluffy.caustica.rt.pipeline.RtHdrCompositePipeline;
 import dev.comfyfluffy.caustica.rt.pipeline.RtSdrPresentPipeline;
@@ -135,7 +136,10 @@ public final class RtComposite {
     // Hot addresses/frameIndex and raygen's debugView avoid unnecessary global-memory dereferences;
     // WorldPushConstantsData is generated from the same Slang module and owns this second ABI as well.
     // RR guide buffers (bindings 3..8) + NRD signals (bindings 9..11: viewZ + per-lobe radiance/hit
-    // distance). The NRD images are only written when FEATURE_NRD is on, but the bindings always exist.
+    // distance). The NRD images are only written when FEATURE_NRD is on, but the bindings always
+    // exist. Slot 3 used to hold the screen-space motion vector; it now carries the world-space
+    // reprojection correction, so the count is unchanged and the celestials atlas stays at
+    // 3 + GUIDE_COUNT (RtCloudShaderRegressionTest enforces that).
     private static final int GUIDE_COUNT = 9;
     private static final long PATH_RECORD_BYTES = 48L;
     // Reflected from PackedRestirReservoir's std430 array stride (world_layout_probe.slang).
@@ -280,9 +284,6 @@ public final class RtComposite {
     // Per-lobe NRD signal capture: only the NRD path needs it (it costs an extra shadow ray for the
     // lobe split), so it is a feature bit rather than something the tracer always pays for.
     private static final int FEATURE_NRD = 64;
-    // gViewZ capture. Every denoised non-DLSS path needs it (SVGF's reprojection validation and
-    // sky cutoff, NRD's IN_VIEWZ), so it is set for both denoisers.
-    private static final int FEATURE_VIEWZ = 128;
     private static final int FEATURE_SHARC = 256;
 
     // ---- Dimension ids (WorldPush.dimension). Mirrors world_common.slang's DIMENSION_* constants.
@@ -331,10 +332,6 @@ public final class RtComposite {
                 // internally and SVGF works on the combined radiance, so capturing the split would
                 // burn an extra shadow ray plus bandwidth for buffers nothing reads.
                 flags |= FEATURE_NRD;
-                flags |= FEATURE_VIEWZ;
-            } else if (CausticaConfig.Rt.Denoise.ENABLED.value() && debugView() == 0) {
-                // SVGF needs gViewZ for its geometry-validated reprojection and its sky cutoff.
-                flags |= FEATURE_VIEWZ;
             }
         }
         return flags;
@@ -702,7 +699,12 @@ public final class RtComposite {
     private RtImage gNormal;
     private RtImage gAlbedo;
     private RtImage gDepth;
+    // Written by the world-space reprojection pass (RtWorldReprojectPipeline), not by the tracer; see
+    // that class for why the vector is rebuilt from the depth G-buffer instead of the shaded point.
     private RtImage gMotion;
+    // Per-pixel world-space correction fed to the reprojection: zero for static terrain/sky, the
+    // per-frame displacement for dynamic surfaces, the lateral refraction offset for transmitted ones.
+    private RtImage gReprojDelta;
     private RtImage gSpecAlbedo;
     private RtImage gSpecMotion;
     // Primary-hit linear view depth (the denoisers' sky cutoff + NRD's IN_VIEWZ), plus the tracer's
@@ -741,6 +743,8 @@ public final class RtComposite {
     private RtImage nrdCombined;
     private RtImage nrdValidation;
     private RtNrdCombinePipeline nrdCombinePipeline;
+    /** World-space reprojection (gMotion's only producer); created with the render-size images. */
+    private RtWorldReprojectPipeline reprojectPipeline;
     private boolean renderSizeNrdEnabled;
     // Display-res RT image the display mapper reads: DLSS-RR writes it (render -> display denoise+upscale), or a
     // linear blit of `output` fills it when RR is off/unavailable (the no-RR reference / fallback).
@@ -776,8 +780,9 @@ public final class RtComposite {
     private boolean renderSizeXessEnabled;
     private int renderSizeXessQuality = Integer.MIN_VALUE;
 
-    // Motion-vector reprojection state: the previous frame's camera-relative view-projection and
-    // camera position, read into the push constant each frame then advanced at frame end.
+    // World-space reprojection state: the previous frame's camera-relative view-projection and camera
+    // position, read into the push constant each frame then advanced at frame end. RtWorldReprojectPipeline
+    // consumes exactly these values, so the vector it builds describes the frame that actually rendered.
     private final Matrix4f mvPrevProjView = new Matrix4f();
     private final Matrix4f mvCurProjView = new Matrix4f();
     private final Matrix4f mvPushMatrix = new Matrix4f();
@@ -1217,7 +1222,10 @@ public final class RtComposite {
         worldPipeline.setExtraStorageImage(0, gNormal.view);
         worldPipeline.setExtraStorageImage(1, gAlbedo.view);
         worldPipeline.setExtraStorageImage(2, gDepth.view);
-        worldPipeline.setExtraStorageImage(3, gMotion.view);
+        // Slot 3 used to be the tracer-written motion vector. gMotion is deliberately NOT bound to the
+        // RT pipeline any more: world_reproject.comp is its only writer, and an unbound texture cannot
+        // quietly gain a second one.
+        worldPipeline.setExtraStorageImage(3, gReprojDelta.view);
         worldPipeline.setExtraStorageImage(4, gSpecAlbedo.view);
         worldPipeline.setExtraStorageImage(5, gSpecMotion.view);
         // NRD signals: always bound (the layout carries them); only written under FEATURE_NRD.
@@ -1242,6 +1250,10 @@ public final class RtComposite {
         if (gMotion != null) {
             gMotion.destroy();
             gMotion = null;
+        }
+        if (gReprojDelta != null) {
+            gReprojDelta.destroy();
+            gReprojDelta = null;
         }
         if (gSpecAlbedo != null) {
             gSpecAlbedo.destroy();
@@ -1491,12 +1503,17 @@ public final class RtComposite {
         gNormal = ctx.createStorageImage(renderW, renderH, VK10.VK_FORMAT_R16G16B16A16_SFLOAT, "guide normal roughness " + renderW + "x" + renderH);
         gAlbedo = ctx.createStorageImage(renderW, renderH, VK10.VK_FORMAT_R16G16B16A16_SFLOAT, "guide diffuse albedo " + renderW + "x" + renderH);
         gDepth = ctx.createStorageImage(renderW, renderH, VK10.VK_FORMAT_R32_SFLOAT, "guide linear depth " + renderW + "x" + renderH);
+        // gMotion is an OUTPUT of the world-space reprojection pass; its input guide is gReprojDelta,
+        // which occupies the guide slot the tracer-written motion vector used to fill.
         gMotion = ctx.createStorageImage(renderW, renderH, VK10.VK_FORMAT_R16G16_SFLOAT, "guide motion " + renderW + "x" + renderH);
+        gReprojDelta = ctx.createStorageImage(renderW, renderH, VK10.VK_FORMAT_R16G16B16A16_SFLOAT, "guide reprojection delta " + renderW + "x" + renderH);
         gSpecAlbedo = ctx.createStorageImage(renderW, renderH, VK10.VK_FORMAT_R16G16B16A16_SFLOAT, "guide specular albedo " + renderW + "x" + renderH);
         gSpecMotion = ctx.createStorageImage(renderW, renderH, VK10.VK_FORMAT_R16G16_SFLOAT, "guide specular motion " + renderW + "x" + renderH);
-        // gViewZ is live on every denoised path (SVGF's sky cutoff and NRD's IN_VIEWZ). The per-lobe
-        // signal images are bound unconditionally because the world pipeline's descriptor layout
-        // carries their bindings, but the tracer only writes them under FEATURE_NRD.
+        // gViewZ is live on EVERY path: it is NRD's IN_VIEWZ and SVGF's validation guide, and it is
+        // also the depth G-buffer the world-space reprojection reconstructs each pixel's 3D position
+        // from, so the tracer writes it unconditionally. The per-lobe signal images are bound
+        // unconditionally because the world pipeline's descriptor layout carries their bindings, but
+        // the tracer only writes them under FEATURE_NRD.
         gViewZ = ctx.createStorageImage(renderW, renderH, VK10.VK_FORMAT_R32_SFLOAT, "nrd viewZ " + renderW + "x" + renderH);
         gNrdDiff = ctx.createStorageImage(renderW, renderH, VK10.VK_FORMAT_R16G16B16A16_SFLOAT, "nrd diffuse radiance+hitdist " + renderW + "x" + renderH);
         gNrdSpec = ctx.createStorageImage(renderW, renderH, VK10.VK_FORMAT_R16G16B16A16_SFLOAT, "nrd specular radiance+hitdist " + renderW + "x" + renderH);
@@ -1549,6 +1566,14 @@ public final class RtComposite {
             // NRD's own temporal history cannot survive a resolution change either.
             RtNrdDenoiser.INSTANCE.resetHistory();
         }
+        // Motion vectors: built here, from the depth G-buffer, for every path (Off / SVGF / NRD /
+        // DLSS-RR / FSR 3 / XeSS / frame generation). The tracer no longer writes gMotion at all.
+        if (reprojectPipeline == null) {
+            reprojectPipeline = RtWorldReprojectPipeline.create(ctx);
+        } else {
+            reprojectPipeline.invalidateBindings(); // same recycled-handle hazard as SVGF/NRD above
+        }
+        reprojectPipeline.setImages(gViewZ.view, gReprojDelta.view, gMotion.view, output.view);
         // Display-res RT image the display mapper reads. Always present (DLSS-RR target, or blit-upscale fallback).
         rrOutput = ctx.createStorageImage(width, height, VK10.VK_FORMAT_R16G16B16A16_SFLOAT, "DLSS-RR output " + width + "x" + height);
         exposure.ensureResources(ctx);
@@ -1569,9 +1594,10 @@ public final class RtComposite {
     }
 
     /**
-     * Compute this frame's motion-vector push data: the matrix that projects a current world point
-     * into the previous frame's clip space, plus the per-frame camera translation. On the first frame
-     * (or after a reset) push the current view-projection with zero delta so MVs come out zero.
+     * Compute this frame's reprojection push data: the matrix that projects a current camera-relative
+     * world point into the previous frame's clip space, plus the per-frame camera translation. On the
+     * first frame (or after a reset) push the current view-projection with zero delta so the
+     * reprojection reports no motion.
      */
     private void updateMotion() {
         mvCurProjView.set(frameProjection).mul(frameViewRotation);
@@ -1748,7 +1774,8 @@ public final class RtComposite {
             // only the cheap instance-level TLAS is rebuilt per frame. Retired terrain geometry/table
             // generations are reclaimed by graphics-timeline completion.
             // Entity BLASes are built inline below and merged into the per-frame TLAS. geomTableAddr
-            // feeds the hit shader entity path (per-prim normal/tint) and motion vectors.
+            // feeds the hit shader entity path (per-prim normal/tint) and the per-vertex world-space
+            // displacement the reprojection guide carries for dynamic content.
             var staticInstances = RtDistantHorizonsTerrain.INSTANCE.appendInstances(
                     terrain.staticInstances(), terrain.blockX, terrain.blockY, terrain.blockZ);
             RtEntities.FrameEntities fe = RtEntities.INSTANCE.beginFrame(ctx, staticInstances,
@@ -1960,9 +1987,22 @@ public final class RtComposite {
                 active.trace(cmd, renderW, renderH, pushConstants, 1);
             }
             VulkanCommandEncoder.memoryBarrier(cmd, stack); // RT writes visible to the temporal/upscale reads
+            // ---- Motion vectors: world-space reprojection (pass A's depth + guide -> gMotion).
+            //
+            // This is the ONLY producer of gMotion. The vector is rebuilt from this frame's linear
+            // depth guide and projected through the previous frame's view-projection, so it describes
+            // where the pixel's 3D surface point really was last frame instead of where the shaded
+            // sample's 2D projection landed. It runs after pass A (which writes the depth G-buffer and
+            // the correction guide) and before every consumer -- NRD, SVGF, DLSS-RR, FSR 3, XeSS and
+            // frame generation all read this buffer.
+            try (RtDebugLabels.Scope ignored = RtDebugLabels.scope(ctx, cmd, "world reprojection");
+                 RtFrameStats.Scope ignoredStats = RtFrameStats.FRAME.stage("frame.reproject")) {
+                reprojectPipeline.dispatch(cmd, renderW, renderH, pushConstants);
+            }
+            VulkanCommandEncoder.memoryBarrier(cmd, stack); // motion vectors visible to the temporal/upscale reads
             // A FOV change does NOT need to restart accumulation, so nothing here does.
             //
-            // The history is fetched through the motion vectors, and the tracer builds those with
+            // The history is fetched through the motion vectors, and the reprojection builds those with
             // prevViewProj -- the PREVIOUS frame's projection, carrying the previous frame's FOV.
             // A zoom therefore appears in the motion vector as the on-screen displacement it
             // actually is (a 1 degree step moves an edge pixel 5.9 px, a 7 degree step 38 px), the
@@ -2993,6 +3033,10 @@ public final class RtComposite {
         if (nrdCombinePipeline != null) {
             nrdCombinePipeline.destroy();
             nrdCombinePipeline = null;
+        }
+        if (reprojectPipeline != null) {
+            reprojectPipeline.destroy();
+            reprojectPipeline = null;
         }
         if (svgfDenoiser != null) {
             svgfDenoiser.destroy();

@@ -55,7 +55,6 @@ public PathSegment tracePrimary(PathSegment seg,
                 gv_albedo = SKY_DIFF_ALBEDO;
                 gv_rough = 1.0;
                 gv_hitCamRel = rd * 1.0e6;
-                gv_motionUseRefracted = false;
                 gv_motionObjDisp = float3(0.0, 0.0, 0.0);
                 gv_spec = makeSpecSurface(gv_hitCamRel, gv_normal, 1.0, SKY_SPEC_ALBEDO);
             }
@@ -77,7 +76,6 @@ public PathSegment tracePrimary(PathSegment seg,
             if (bounce == 0) {
                 gv_normal = n;
                 gv_hitCamRel = hitPos - worldPush.camOffset;
-                gv_motionUseRefracted = false;
                 gv_motionObjDisp = payload.motionPrev;
                 if (material == MATERIAL_PARTICLE) {
                     // Rain sheets are translucent droplets; guide them with the neutral droplet albedo
@@ -138,7 +136,6 @@ public PathSegment tracePrimary(PathSegment seg,
             gv_rough = 0.0;
             gv_albedo = float3(0.0, 0.0, 0.0);
             gv_hitCamRel = hitPos - worldPush.camOffset;
-            gv_motionUseRefracted = false;
             gv_motionObjDisp = isWater ? waterSurf.motionPrev : payload.motionPrev;
             gv_spec = makeSpecSurface(gv_hitCamRel, n, previousNormal, geometricNormal,
                                       isWater ? waterSurf.motionPrev : float3(payload.motionPrev),

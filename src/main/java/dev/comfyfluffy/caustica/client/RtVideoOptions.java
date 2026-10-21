@@ -1531,7 +1531,7 @@ public final class RtVideoOptions {
     /**
      * Generated-frame counts the ACTIVE backend can really produce. DLSS-G offers 1..driver MFG cap
      * (probed from NGX). The Caustica native engine (default on the FSR 3 / XeSS paths) offers
-     * 1..its cap — it interpolates with the tracer's own motion vectors, so every slot is a real
+     * 1..its cap — it interpolates with the renderer's own world-space motion vectors, so every slot is a real
      * frame. The FSR 3.1 runtime fallback offers exactly one: it only ever writes outputs[0] per
      * dispatch (see RtFsrFrameGen.MAX_GENERATED_FRAMES) — offering more there was presenting
      * never-written frames (the black blink + colorful corruption of the 3x+ era).

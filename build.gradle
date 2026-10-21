@@ -598,7 +598,7 @@ tasks.register("verifyModJar") {
 			}
 			["world.rgen.spv", "world.rchit.spv", "world.rahit.spv", "world.rmiss.spv",
 			 "world_primary.rgen.spv", "shadow.rmiss.spv", "display.comp.spv", "svgf_reproject.comp.spv",
-			 "exposure_hist.comp.spv", "sdr_present.comp.spv", "hdr_ui_composite.comp.spv",
+			 "world_reproject.comp.spv", "exposure_hist.comp.spv", "sdr_present.comp.spv", "hdr_ui_composite.comp.spv",
 			 "overlay_fullscreen_triangle.vert.spv", "block_outline.vert.spv"].each { shader ->
 				if (zip.getEntry("caustica/rt/${shader}") == null) {
 					throw new GradleException("Missing executable shader caustica/rt/${shader}")

@@ -144,12 +144,11 @@ public float4 blueNoiseTexel(uint2 pixel, uint salt) {
     return (levels + 0.5) * (1.0 / 256.0);
 }
 
+// The unprojection itself lives in world_common (cameraRayDir) so the reprojection compute pass can
+// share it without importing world_core's raygen bindings; this is the tracer-side spelling of the
+// same ray, against the same matrix, so the two can never disagree about where a pixel points.
 public float3 primaryRayDir(float2 ndc) {
-    float4 nearH = mul(worldPush.invViewProj, float4(ndc.x, ndc.y, 1.0, 1.0));
-    float4 farH = mul(worldPush.invViewProj, float4(ndc.x, ndc.y, 0.0, 1.0));
-    float3 nearP = nearH.xyz / nearH.w;
-    float3 farP = farH.xyz / farH.w;
-    return normalize(farP - nearP);
+    return cameraRayDir(ndc, worldPush.invViewProj);
 }
 
 public float primaryRayConeSpread(float2 ndc, float2 size, float3 dir) {

@@ -14,11 +14,21 @@ import world_common;
 [[vk::binding(3, 0)]] [format("rgba16f")] public RWTexture2D<float4> gNormal;     // xyz world normal, w linear roughness
 [[vk::binding(4, 0)]] [format("rgba16f")] public RWTexture2D<float4> gAlbedo;     // rgb diffuse albedo
 [[vk::binding(5, 0)]] [format("r32f")]    public RWTexture2D<float>  gDepth;      // HW reversed-Z depth
-[[vk::binding(6, 0)]] [format("rg16f")]   public RWTexture2D<float2> gMotion;     // screen-space motion (render px)
+// World-space reprojection correction (see guides.slang's writeGuides). xyz is the offset from the
+// point the DEPTH BUFFER describes to the point the pixel actually shows, already minus the surface's
+// own per-frame displacement: zero for static terrain and sky, nonzero only for dynamic geometry and
+// for transmitted content, which a depth-only scheme cannot recover.
+//
+// This is not a motion vector and it is not read as one. The vector itself is produced by
+// world_reproject.comp, which is a compute pass outside this pipeline — so the RT pipeline has no
+// motion-vector binding at all any more, and the old read-modify-write hazard (two writers racing on
+// the same texture) cannot come back by accident.
+[[vk::binding(6, 0)]] [format("rgba16f")] public RWTexture2D<float4> gReprojDelta;
 [[vk::binding(7, 0)]] [format("rgba16f")] public RWTexture2D<float4> gSpecAlbedo; // exact-mirror reflected diffuse × reflectance; material reflectance otherwise
 [[vk::binding(8, 0)]] [format("rg16f")]   public RWTexture2D<float2> gSpecMotion; // reflection MVs for RR
-// Denoiser signals: gViewZ in Pass A (NRD's IN_VIEWZ, and the guide SVGF validates its reprojection
-// against, so it is written whenever EITHER denoiser is active), plus the YCoCg-packed per-lobe
+// Denoiser signals: gViewZ in Pass A (NRD's IN_VIEWZ, the guide SVGF validates its reprojection
+// against, AND the depth G-buffer world_reproject.comp reconstructs every pixel's 3D position from,
+// so it is written unconditionally), plus the YCoCg-packed per-lobe
 // radiance + normalized hit distance in Pass B (NRD only). Formats are NRD's contract (IN_VIEWZ =
 // R16f+; IN_*_RADIANCE_HITDIST = RGBA16f with the REBLUR pack); the normal + roughness input is
 // gNormal itself (NRD is built with the RGBA16/SNORM normal encoding + LINEAR roughness, whose
@@ -77,7 +87,6 @@ public float payloadTransmission() { return unpackHalf2(payload.iorTransmission)
 public bool sssEnabled() { return worldFeature(worldPush, FEATURE_SSS); }
 public bool denoiserEnabled() { return worldFeature(worldPush, FEATURE_DENOISER); }
 public bool nrdEnabled() { return worldFeature(worldPush, FEATURE_NRD); }
-public bool viewZEnabled() { return worldFeature(worldPush, FEATURE_VIEWZ); }
 public bool restirEnabled() {
     // Use the explicit hot push uniform as the authoritative live toggle. The featureFlags copy remains
     // useful to diagnostics, but must not be able to leave the shading branch stuck on the RIS fallback.
