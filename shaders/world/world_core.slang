@@ -148,7 +148,9 @@ public static const float RAY_CONE_GLOSSY_SPREAD_SCALE = 0.35;
 public static const float MIRROR_ALPHA_MAX = 4.0e-4; // LabPBR perceptual smoothness >= 0.98
 // Above this the specular lobe is too broad for a single mirrored reprojection to describe, so the
 // reflection MV is left at zero and RR falls back to the ordinary MV.
-public static const float SPEC_MOTION_ALPHA_MAX = 0.25; // perceptual smoothness <= 0.5
+// Raised from 0.25 (smoothness 0.5) to 0.5 (smoothness ~0.29) to keep wet-film and light-gloss reflections
+// (roughness ~0.3-0.5) in the specular MV path instead of flickering between zero/primary fallback.
+public static const float SPEC_MOTION_ALPHA_MAX = 0.5; // perceptual smoothness <= 0.29
 
 public bool isDeltaAlpha(float roughness) {
     return clamp(roughness, 0.0, 1.0) <= MIRROR_ALPHA_MAX;

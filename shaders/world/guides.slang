@@ -97,7 +97,16 @@ public float2 resolveSpecularGuides(SpecSurface surface, float3 primaryDir,
     }
 
     float3 surfacePos = surface.camRel + worldPush.camOffset;
-    float3 n = normalize(surface.normal);
+    // Use the geometric (bias) normal for the specular MV when the shading normal is
+    // water-wave or rain-ripple perturbed. The waved normal jitters every frame with
+    // the wave phase, which makes a single-ray mirror reprojection unstable and
+    // produces scratch-like flicker in DLSS-RR's temporal history. The bias normal
+    // is the flat face the BLAS was built from, so it is temporally stable while
+    // still representing the reflector's plane.
+    bool useBiasForMotion = length(surface.biasNormal) >= 0.5
+            && (length(surface.normal - surface.biasNormal) > 0.02
+                || length(surface.previousNormal - surface.biasNormal) > 0.02);
+    float3 n = normalize(useBiasForMotion ? surface.biasNormal : surface.normal);
     float3 specDir = reflect(primaryDir, n);
 
     // Pass A stops radiance traversal at the first split, so reflection motion keeps one dedicated,
@@ -132,11 +141,34 @@ public float2 resolveSpecularGuides(SpecSurface surface, float3 primaryDir,
     }
     float3 previousN = length(surface.previousNormal) >= 0.5
             ? normalize(surface.previousNormal) : n;
+    // Keep the previous mirror plane consistent with the current frame's choice:
+    // if we used the bias for the current ray, also mirror against the bias
+    // plane for the previous frame to avoid a one-frame normal pop.
+    if (useBiasForMotion && length(surface.biasNormal) >= 0.5) {
+        previousN = normalize(surface.biasNormal);
+    }
     bool prevValid;
     float2 prevNdc = previousReflectionNdc(
             surfacePos, previousN, surface.motionPrev,
             reflectedHit, reflectedMotionPrev, prevValid);
-    return prevValid ? (prevNdc - currentNdc) * 0.5 * size : float2(0.0, 0.0);
+    float2 specMotion = prevValid ? (prevNdc - currentNdc) * 0.5 * size : float2(0.0, 0.0);
+    // Grazing reflections project to extreme screen deltas that amplify the
+    // single-ray error; clamp to a sane render-pixel range so DLSS-RR can
+    // fall back to primary MV instead of smearing a scratch across the frame.
+    if (abs(specMotion.x) > 4096.0 || abs(specMotion.y) > 4096.0
+            || any(isnan(specMotion)) || any(isinf(specMotion))) {
+        return float2(0.0, 0.0);
+    }
+    // Very rough reflections should not carry a sharp mirror MV; let them
+    // contribute via primary MV fallback to avoid shimmer against the
+    // denoiser's broad lobe.
+    if (surface.roughness > 0.35) {
+        float l = length(specMotion);
+        if (l > 48.0) {
+            specMotion *= 48.0 / l;
+        }
+    }
+    return specMotion;
 }
 
 public void setTransmissionGuide(float3 hitCamRel, float3 motionPrev, float3 normal,
