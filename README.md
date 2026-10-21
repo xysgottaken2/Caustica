@@ -6,13 +6,6 @@ Generation, FSR 3, XeSS, NRD, SVGF) while keeping Minecraft's UI and gameplay in
 
 ![Caustica ray-traced Minecraft scene](docs/gallery/2026-07-09_21.25.14.jpg)
 
-This repository carries Caustica ported to **Minecraft 26.3**. The renderer source was imported from
-[`xysgottaken2/testingcasutica`](https://github.com/xysgottaken2/testingcasutica) at the furthest
-26.3-ported state available there, and this repository's verification harness (Minecraft ABI
-contract + hook call-site contracts) was kept on top of it. See
-[Porting 26.2 → 26.3](docs/port-26.2-to-26.3.md) for exactly what changed and what is still
-unverified.
-
 ## Features
 
 - Vulkan hardware path-traced world rendering
@@ -23,7 +16,7 @@ unverified.
 - Dynamic entity rendering in the ray-traced scene
 - Opt-in ray-traced first-person viewmodel: the hand and held item move into the traced scene, with POM,
   emission and scene lighting on held geometry, while staying shadow-free and above the blocks it swings
-  through (`hand.ray-traced`, off by default — see [docs/viewmodel-ray-tracing.md](docs/viewmodel-ray-tracing.md))
+  through (`hand.ray-traced`, off by default)
 - LabPBR-style material support, including toggleable subsurface scattering
 - Deep settings UI: nearly every renderer feature has its own sub-screen with a "Reset to
   Defaults" button, plus a global one on the hub
@@ -68,25 +61,6 @@ Vendor upscaler runtimes (NGX/DLSS, FidelityFX, NRD, XeSS) are **not committed**
 from the official SDKs in CI into `build/native/<shim>/release/` and bundled from there; without
 them the build still succeeds and the corresponding option is simply not offered at runtime.
 
-## Verification status and limits
-
-`verifyMinecraftAbi` checks the 155 member signatures in
-[`docs/minecraft-26.3-abi.tsv`](docs/minecraft-26.3-abi.tsv) against resolved classfiles, and
-`verifyModJar` checks the packaged metadata, registered mixins, compiled shaders and bundled
-natives. `buildSrc` additionally asserts the bytecode call sites the terrain and entity hooks
-depend on.
-
-CI (`.github/workflows/ci.yml`) runs four jobs: a GPU-less JVM lane (buildSrc contract tests →
-compile against 26.3 → the renderer unit tests → the ABI contract and hook call sites → JAR
-metadata, mixin registration and shaders), the Windows and Linux shim builds, and a packaging job
-that rebuilds the JAR with those shim artifacts and asserts that every requested native platform is
-really inside it. A failing job publishes its trimmed Gradle diagnostics to a `ci-logs-*` ref,
-because Actions logs and artifacts expire long before the code does.
-
-**CI does not run the game.** A green build proves that the sources compile against 26.3, that the
-shaders validate as SPIR-V, and that the documented injection points still exist in the client
-bytecode. It cannot prove that a Mixin applies, that a hook is reached, or that the rendered image
-is correct. Visual validation still has to happen on a Vulkan ray-tracing GPU.
 
 ## Compatibility
 
