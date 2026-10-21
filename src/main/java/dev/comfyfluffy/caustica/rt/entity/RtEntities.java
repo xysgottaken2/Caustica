@@ -85,11 +85,24 @@ public final class RtEntities {
     /** Custom-index flag (bit 22) marking a particle billboard instance (shares the entity geom table). */
     public static final int PARTICLE_BIT = 0x400000;
     // TLAS visibility-mask bits, ANDed against the per-ray cull mask in world.rgen. Bit 0 = secondary rays
-    // (shadows / GI / reflections, CULL_SECONDARY); bit 1 = the primary camera ray (CULL_PRIMARY).
+    // (shadows / GI / reflections, CULL_SECONDARY); bit 1 = the primary camera ray (CULL_PRIMARY); bit 3 is
+    // reserved for the ray-traced first-person viewmodel, which the camera reaches through its own
+    // overlay trace (CULL_VIEWMODEL in trace.slang) — see MASK_ALL for why that reservation matters.
     private static final int MASK_SECONDARY = 0x01;
     private static final int MASK_PRIMARY = 0x02;
-    /** Default mask: visible to every ray (terrain and ordinary entities use this). */
-    private static final int MASK_ALL = 0xFF;
+    /**
+     * Default mask: visible to every ray (terrain and ordinary entities use this).
+     *
+     * <p>Not 0xFF: bit 3 has to stay clear so a viewmodel-only trace (mask {@code 0x08}) finds the hand and
+     * nothing else. Every cull mask the world shaders actually use (0x01 / 0x02 / 0xFC-ish) still matches
+     * 0xF7, so this is invisible to everything except the overlay pass it exists for.
+     */
+    private static final int MASK_ALL = 0xF7;
+    /**
+     * The first-person viewmodel: reachable only by the primary above-blocks overlay trace, so it is lit by
+     * and visible to the camera while no shadow, GI, reflection or held-item-light ray can ever hit it.
+     */
+    private static final int VIEWMODEL_MASK = 0x08;
     /** Particles are primary-ray-only: visible/lit by the camera path, invisible to shadows/GI/reflections. */
     private static final int PARTICLE_MASK = MASK_PRIMARY;
     public static boolean particlesEnabled() {
@@ -658,6 +671,11 @@ public final class RtEntities {
             try (RtFrameStats.Scope ignored = RtFrameStats.FRAME.stage("entity.particles")) {
                 captureParticles(ctx, build, mc, partial, rbx, rby, rbz, projection, viewRotation);
             }
+            // Last, so the shared capture accumulator is free and the hand's mesh cannot be mistaken for a
+            // refit-eligible entity mesh. Its capture was taken at the before-hand seam this composite runs in.
+            try (RtFrameStats.Scope ignored = RtFrameStats.FRAME.stage("entity.viewmodel")) {
+                captureViewmodel(ctx, build, rbx, rby, rbz);
+            }
         } catch (RuntimeException | Error t) {
             // A partially recorded frame may already have installed unbuilt BLAS into persistent slots.
             // Quiesce old frames and drop the entity cache before propagating the original failure.
@@ -973,6 +991,39 @@ public final class RtEntities {
      * texture slot comes from the layer's atlas (block/item/particle) via the bindless registry. One
      * {@code PARTICLE_BIT} instance with mask {@link #PARTICLE_MASK} (primary-ray only).
      */
+    /**
+     * Instance this frame's ray-traced first-person viewmodel. Deliberately the last capture of the frame:
+     * it reuses the entity upload path verbatim (mesh, BLAS, geom-table entry, motion arena) and differs
+     * only in where its geometry comes from, in the mask that keeps it out of every ray but the camera's,
+     * and in the kind flag that lets the hit shaders treat it as a viewmodel.
+     *
+     * <p>Never fatal: a missing, empty or over-budget capture just means vanilla keeps drawing the hand.
+     */
+    private void captureViewmodel(RtContext ctx, FrameBuild build, int rbx, int rby, int rbz) {
+        RtViewmodel viewmodel = RtViewmodel.INSTANCE;
+        if (!viewmodel.hasPendingCapture()) {
+            return;
+        }
+        // The geometry table is sized to maxEntities() and written by build.count, so one instance beyond it
+        // is a wild write. Unlike the entity and particle passes, this one has no logical budget to spend
+        // (it is a single instance) — the guard is purely the memory bound, and the hand yields to it.
+        if (build.count + 1 > tableCapacity) {
+            viewmodel.discardPendingCapture();
+            return;
+        }
+        RtEntityCapture cap = viewmodel.pendingCapture();
+        if (cap.isEmpty()) {
+            viewmodel.discardPendingCapture();
+            return;
+        }
+        float[] disp = viewmodel.motionDisplacements(rbx, rby, rbz);
+        appendCapture(ctx, build, cap, new Motion(uploadDisp(ctx, build, disp), 0f, 0f, 0f),
+                -1, ENTITY_BIT, VIEWMODEL_MASK, viewmodel.instanceTransform(rbx, rby, rbz),
+                RtViewmodel.GEOM_FLAG_VIEWMODEL);
+        viewmodel.markInstanced();
+        RtFrameStats.FRAME.count("viewmodelInstances", 1);
+    }
+
     private void captureParticles(RtContext ctx, FrameBuild build, Minecraft mc, float partial,
                                   int rbx, int rby, int rbz, Matrix4f projection, Matrix4f viewRotation) {
         int particleLimit = maxParticles();
@@ -1367,7 +1418,7 @@ public final class RtEntities {
         // Block-local mesh placed by a translate-only instance transform (blockPos − rebase), like terrain.
         float[] xform = {1, 0, 0, e.bx - rbx, 0, 1, 0, e.by - rby, 0, 0, 1, e.bz - rbz};
         build.instances.add(new RtAccel.Instance(xform, e.accel.deviceAddress,
-                ENTITY_BIT | (build.count & 0x7FFFFF), 0xFF, RtAccel.SBT_ENTITY_OFFSET));
+                ENTITY_BIT | (build.count & 0x7FFFFF), MASK_ALL, RtAccel.SBT_ENTITY_OFFSET));
         build.count++;
         build.lists.usedBlockEntities.add(e);
         build.logicalCount++;
@@ -1627,33 +1678,48 @@ public final class RtEntities {
      */
     private void appendCapture(RtContext ctx, FrameBuild build, float[] disp, int entityId, int instanceBit, int mask) {
         beginBuildIfNeeded(ctx, build);
-        appendCapture(ctx, build, new Motion(uploadDisp(ctx, build, disp), 0f, 0f, 0f),
-                entityId, instanceBit, mask, IDENTITY);
+        appendCapture(ctx, build, capture, new Motion(uploadDisp(ctx, build, disp), 0f, 0f, 0f),
+                entityId, instanceBit, mask, IDENTITY, 0);
     }
 
     private void appendCapture(RtContext ctx, FrameBuild build, Motion motion, int entityId, int instanceBit, int mask,
                                float[] instanceTransform) {
+        appendCapture(ctx, build, capture, motion, entityId, instanceBit, mask, instanceTransform, 0);
+    }
+
+    /**
+     * Upload {@code cap} as a per-object mesh + BLAS and instance it. The refit branch is keyed to the
+     * shared {@link #capture} accumulator (persistent slots diff against it), so only the transient path
+     * accepts another capture — that is the path the viewmodel uses, since its mesh changes every frame.
+     * {@code geomFlags} lands in the geometry-table entry's kind lane, where the hit shaders read it as
+     * {@code EntityGeom.flags}.
+     */
+    private void appendCapture(RtContext ctx, FrameBuild build, RtEntityCapture cap, Motion motion, int entityId,
+                               int instanceBit, int mask, float[] instanceTransform, int geomFlags) {
         beginBuildIfNeeded(ctx, build);
         if (entityId >= 0) {
+            if (cap != capture) {
+                throw new IllegalStateException("Entity refit only accepts the shared capture");
+            }
             appendPackedEntity(ctx, build, motion, entityId, instanceBit, mask, instanceTransform);
             return;
         }
         int asInput = org.lwjgl.vulkan.KHRAccelerationStructure.VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR;
         int storage = org.lwjgl.vulkan.VK10.VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
-        int vertCount = capture.verts.size() / 3;
-        RtEntityCapture.PackedGeometry packed = capture.packGeometry();
+        int vertCount = cap.verts.size() / 3;
+        RtEntityCapture.PackedGeometry packed = cap.packGeometry();
         int idxCount = packed.indices().size();
-        EntityGeometryLayout layout = EntityGeometryLayout.create(capture.verts.size(), idxCount,
-                capture.uvList.size(), packed.primitives().size());
+        EntityGeometryLayout layout = EntityGeometryLayout.create(cap.verts.size(), idxCount,
+                cap.uvList.size(), packed.primitives().size());
         long required = Math.addExact(layout.totalBytes, EntityGeometryLayout.REGION_ALIGNMENT - 1L);
         RtBuffer geometry = allocBuffer(ctx, required, asInput | storage, true, "particle geometry");
         layout = layout.shifted((-geometry.deviceAddress) & (EntityGeometryLayout.REGION_ALIGNMENT - 1L));
-        MemoryUtil.memFloatBuffer(geometry.mapped + layout.positionOffset, capture.verts.size())
-                .put(capture.verts.elements(), 0, capture.verts.size());
+        MemoryUtil.memFloatBuffer(geometry.mapped + layout.positionOffset, cap.verts.size())
+                .put(cap.verts.elements(), 0, cap.verts.size());
         MemoryUtil.memIntBuffer(geometry.mapped + layout.indexOffset, idxCount)
                 .put(packed.indices().elements(), 0, idxCount);
-        MemoryUtil.memFloatBuffer(geometry.mapped + layout.uvOffset, capture.uvList.size())
-                .put(capture.uvList.elements(), 0, capture.uvList.size());
+        MemoryUtil.memFloatBuffer(geometry.mapped + layout.uvOffset, cap.uvList.size())
+                .put(cap.uvList.elements(), 0, cap.uvList.size());
         MemoryUtil.memFloatBuffer(geometry.mapped + layout.primOffset, packed.primitives().size())
                 .put(packed.primitives().elements(), 0, packed.primitives().size());
         geometry.flush(layout.positionOffset, layout.totalBytes - layout.positionOffset);
@@ -1669,7 +1735,7 @@ public final class RtEntities {
         build.pooledBlas.add(blas);
 
         writeTableEntry(build, primAddr, indexAddr, uvAddr, motion.dispAddr,
-                motion.rigidX, motion.rigidY, motion.rigidZ, packed.bucketTris());
+                motion.rigidX, motion.rigidY, motion.rigidZ, packed.bucketTris(), geomFlags);
 
         build.instances.add(new RtAccel.Instance(instanceTransform, blas.accel.deviceAddress,
                 instanceBit | (build.count & 0x3FFFFF), mask, RtAccel.SBT_ENTITY_OFFSET));
@@ -1811,6 +1877,11 @@ public final class RtEntities {
     /** Write one std430 EntityGeom entry, including bases for the two packed BLAS geometries. */
     private void writeTableEntry(FrameBuild build, long primAddr, long idxAddr, long uvAddr, long dispAddr,
                                  float rigidX, float rigidY, float rigidZ, int[] bucketTris) {
+        writeTableEntry(build, primAddr, idxAddr, uvAddr, dispAddr, rigidX, rigidY, rigidZ, bucketTris, 0);
+    }
+
+    private void writeTableEntry(FrameBuild build, long primAddr, long idxAddr, long uvAddr, long dispAddr,
+                                 float rigidX, float rigidY, float rigidZ, int[] bucketTris, int geomFlags) {
         if (bucketTris == null || bucketTris.length != RtAccel.ENTITY_BUCKETS) {
             throw new IllegalArgumentException("Missing entity BLAS bucket counts");
         }
@@ -1825,7 +1896,8 @@ public final class RtEntities {
         MemoryUtil.memPutFloat(entry + 44, 0f);
         MemoryUtil.memPutInt(entry + 48, 0);
         MemoryUtil.memPutInt(entry + 52, bucketTris[RtAccel.ENTITY_BUCKET_OPAQUE]);
-        MemoryUtil.memPutInt(entry + 56, 0);
+        // +56 is EntityGeom.flags (the geometry kind lane; ENTITY_GEOM_VIEWMODEL today), +60 stays reserved.
+        MemoryUtil.memPutInt(entry + 56, geomFlags);
         MemoryUtil.memPutInt(entry + 60, 0);
     }
 

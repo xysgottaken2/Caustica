@@ -8,14 +8,30 @@ import world_core;
 
 public static const uint CULL_SECONDARY = 0x01u;
 public static const uint CULL_PRIMARY = 0x02u;
+// Bit 3 belongs to the ray-traced first-person viewmodel and to nothing else: every other instance mask in
+// the world starts at 0xF7 (see RtEntities.MASK_ALL / RtAccel.Instance's default), so a trace with exactly
+// this mask finds the hand and no terrain, entity, particle or LOD geometry. That reservation is what makes
+// the viewmodel a viewmodel: the camera reaches it only through traceViewmodelOverlay below, and shadow, GI,
+// reflection and held-light rays — which never carry this bit — cannot hit it at all, so it casts no shadow
+// and never hides what is behind it.
+public static const uint CULL_VIEWMODEL = 0x08u;
 // Shadow-ray mask for the analytic held-item light: ordinary occluders MINUS the first-person
-// viewmodel. Instance masks in play: terrain/entities/block entities 0xFF, DH LOD 0x03, particles
-// 0x02, the first-person player 0x01. Bits 2..7 keep every 0xFF occluder while matching neither
+// viewmodel. Instance masks in play: terrain/entities/block entities 0xF7, DH LOD 0x03, particles
+// 0x02, the first-person player 0x01. Bits 2 and 4..7 keep every 0xF7 occluder while matching neither
 // the viewmodel (0x01) nor particles (0x02); DH LOD drops out too, but that geometry sits beyond
 // the vanilla render distance, where the short-range held light neither reaches nor gets blocked
 // by it. Without the exclusion the captured arm/item floats a phantom shadow inside the very beam
-// it casts (the visible hand is vanilla's screen-space overlay, not the captured pose).
-public static const uint CULL_HAND_LIGHT = 0xFCu;
+// it casts (the visible hand is vanilla's screen-space overlay, not the captured pose). Bit 3 joins that
+// exclusion list for free: it is the ray-traced viewmodel's own bit, and a held block must not shade the
+// hand holding it either.
+public static const uint CULL_HAND_LIGHT = 0xF4u;
+// Shadow rays fired from a viewmodel surface. Terrain and ordinary entities still occlude (0xF7 matches),
+// but the first-person body (0x01), particles (0x02), the hand's own geometry (0x08) and DH LODs (0x03) do
+// not — otherwise the arm the camera is sitting inside throws a hard shadow across the item in it, and the
+// held block shadows the fingers holding it. Selected by visibility() whenever the surface being shaded
+// carries PAYLOAD_VIEWMODEL, which is how "ignore the player's own shadow when shading the viewmodel" is
+// enforced without threading a flag through every lighting and fog call site.
+public static const uint CULL_VIEWMODEL_SHADOW = 0xF0u;
 public static const uint TERRAIN_BUCKETS = 4u;
 public static const uint SBT_RADIANCE = 0u;
 public static const uint SBT_SHADOW = TERRAIN_BUCKETS;
@@ -83,6 +99,49 @@ public void traceGuide(uint cullMask, float3 ro, float tmin, float3 rd, float tm
             MISS_GUIDE, makeRay(ro, tmin, rd, tmax), payload);
 }
 
+// Above-blocks layer for the ray-traced first-person viewmodel, called on primary rays only.
+//
+// Vanilla's hand pass gets "always in front of the world" from a depth clear; a closest-hit shader has no
+// such lever, so a block the arm is swinging through — or a wall the camera is pressed against, or the floor
+// you look down at, which is most of gameplay — would win the hit and punch a hole in the hand. So every
+// primary ray is re-run against viewmodel geometry only. A hit there replaces the world result unconditionally
+// — the hand's shading, its motion vector and its material all come from the traced surface now — and a miss
+// restores exactly what the world trace had written.
+//
+// Deliberately, the world hit's distance is not consulted. It cannot rank the two layers: the viewmodel is an
+// overlay, so the hand wins even where the block in front of it is nearer, and a gate of the form "only
+// re-trace when the world stopped far away" would do the exact inverse of the rule — it would show the hand
+// against the sky and hide it behind every wall. What bounds the cost instead is direction: the capture
+// publishes the cone that encloses the direction of every one of its vertices, and because a triangle's
+// directions from the eye are positive combinations of its vertices' directions, a ray outside that cone
+// cannot touch the hand at all and skips the trace. Inside it, the trace is bounded by tmax = the reach, so
+// no BVH work happens beyond the near field, and the mask admits a single small instance.
+//
+// It ends in MISS_GUIDE rather than MISS_RADIANCE because the atmosphere march's result would be discarded on
+// a miss anyway, and because the guide miss leaves the hitT sentinel negative — which is precisely how the
+// restore below detects "no hand along this ray".
+public void traceViewmodelOverlay(float3 ro, float3 rd) {
+    float reach = worldPush.viewmodel.x;
+    if (reach <= 0.0 || (payload.flags & PAYLOAD_VIEWMODEL) != 0u) {
+        return;
+    }
+    float4 viewmodelCull = worldPush.viewmodelCull;
+    // cos(halfAngle) <= -1 means the capture declined to bound itself (a degenerate or wrap-around pose, or
+    // geometry around the eye), in which case every direction is a candidate. Scaled by |rd| so the test
+    // compares angles rather than trusting the caller's normalisation.
+    if (viewmodelCull.w > -1.0 && dot(rd, viewmodelCull.xyz) < viewmodelCull.w * length(rd)) {
+        return;
+    }
+    Payload worldHit = payload;
+    uint rayCone = worldHit.rayCone;
+    payload = makeRadiancePayload(0u, rayCone);
+    TraceRay(topLevelAS, RAY_FLAG_NONE, CULL_VIEWMODEL, SBT_RADIANCE, SBT_STRIDE_BUCKET,
+            MISS_GUIDE, makeRay(ro, 0.0, rd, reach), payload);
+    if (payload.hitT < 0.0) {
+        payload = worldHit;
+    }
+}
+
 public Payload makeShadowPayload() {
     Payload shadowPayload;
     shadowPayload.albedo = half3(1.0h, 1.0h, 1.0h);
@@ -101,7 +160,13 @@ public Payload makeShadowPayload() {
 }
 
 public VisibilityResult visibility(float3 origin, float3 dir, float tmax) {
-    return visibilityCulled(origin, dir, tmax, CULL_SECONDARY);
+    // The payload still describes the surface currently being shaded: shadow traces use their own local
+    // payload (see makeShadowPayload), so the caller's copy survives every occlusion query in this shading
+    // pass. That is what lets one line here cover the sun NEE, RIS emitters, the held-item light's
+    // occlusion, fog and the above-blocks shadow in both raygens: a viewmodel surface asks for the
+    // player-free mask, everything else keeps the ordinary one.
+    return visibilityCulled(origin, dir, tmax,
+            (payload.flags & PAYLOAD_VIEWMODEL) != 0u ? CULL_VIEWMODEL_SHADOW : CULL_SECONDARY);
 }
 
 // Explicit instance-cull variant of visibility(); the held-item light uses CULL_HAND_LIGHT so the

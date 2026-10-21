@@ -100,6 +100,8 @@
 	"caustica.options.rt.denoiser.tooltip": "Applica il filtro di riduzione del rumore di DLSS Ray Reconstruction all'immagine in path tracing. Disattivato, mostra il tracciamento grezzo e rumoroso a piena risoluzione: utile come vista di riferimento, ma molto più granuloso con pochi campioni. Richiede il supporto a DLSS Ray Reconstruction.",
 	"caustica.options.rt.handFov": "FOV della mano",
 	"caustica.options.rt.handFov.tooltip": "Fa seguire alla mano e all'oggetto in prima persona il FOV del gioco. Attivo, un FOV più ampio allontana il braccio e uno più stretto lo avvicina. Disattivo, ripristina il FOV fisso della mano originale.",
+	"caustica.options.rt.viewmodelRayTraced": "Viewmodel con ray tracing",
+	"caustica.options.rt.viewmodelRayTraced.tooltip": "Disegna la mano e l'oggetto tenuto dentro la scena tracciata invece che sopra di essa: un blocco tenuto ottiene rilievo reale con POM, gli oggetti luminosi illuminano il mondo e il braccio riceve l'illuminazione della scena. Non proietta ombre, ignora l'ombra del giocatore e resta sopra i blocchi con cui collide. Richiede il path tracer del mondo e costa un upload della mesh più una build BLAS per frame; la mano vive nell'immagine del mondo (a volte scalata), quindi può risultare leggermente più morbida che in vanilla. Disattivato per impostazione predefinita.",
 	"caustica.options.rt.hdr": "Uscita HDR",
 	"caustica.options.rt.hdr.tooltip": "Presenta in HDR (ST.2084/PQ) invece che in SDR, quando il display lo supporta. Ha effetto dopo il riavvio del gioco.",
 	"caustica.options.rt.hdrPaperWhite": "Bianco carta HDR",

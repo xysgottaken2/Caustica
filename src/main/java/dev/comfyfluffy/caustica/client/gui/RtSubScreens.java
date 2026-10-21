@@ -300,7 +300,8 @@ public final class RtSubScreens {
                 CausticaConfig.Rt.Composite.SUN_ANGULAR_RADIUS,
                 CausticaConfig.Rt.Composite.MOON_ANGULAR_RADIUS,
                 CausticaConfig.Rt.Composite.SUN_NOON_SOUTH_TILT,
-                CausticaConfig.Rt.Hand.FOV_FOLLOWS_CAMERA);
+                CausticaConfig.Rt.Hand.FOV_FOLLOWS_CAMERA,
+                CausticaConfig.Rt.Hand.PATH_TRACED);
     }
 
     private static List<CausticaConfig.RuntimeSetting<?>> worldSettings() {

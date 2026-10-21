@@ -100,6 +100,8 @@
 	"caustica.options.rt.denoiser.tooltip": "Applique le filtre de débruitage DLSS Ray Reconstruction à l'image en path tracing. Désactivé, affiche le rendu brut et bruité en pleine résolution — utile comme vue de référence, mais bien plus granuleux à faible nombre d'échantillons. Nécessite la prise en charge de DLSS Ray Reconstruction.",
 	"caustica.options.rt.handFov": "Champ de vision de la main",
 	"caustica.options.rt.handFov.tooltip": "Fait suivre au bras et à l'objet en première personne le champ de vision du jeu. Activé, un champ de vision plus large éloigne le bras et un champ plus étroit le rapproche. Désactivé, rétablit le champ de vision fixe d'origine.",
+	"caustica.options.rt.viewmodelRayTraced": "Viewmodel en ray tracing",
+	"caustica.options.rt.viewmodelRayTraced.tooltip": "Dessine la main et l'objet tenu dans la scène tracée au lieu de la superposer : un bloc tenu gagne un vrai relief via POM, les objets lumineux éclairent le monde et le bras reçoit l'éclairage de la scène. Il ne projette aucune ombre, ignore l'ombre du joueur et reste au-dessus des blocs traversés. Nécessite le path tracer du monde et coûte un envoi de maillage plus une construction de BLAS par image ; la main vit aussi dans l'image du monde (parfois mise à l'échelle) et peut donc être un peu plus douce qu'avec vanilla. Désactivé par défaut.",
 	"caustica.options.rt.hdr": "Sortie HDR",
 	"caustica.options.rt.hdr.tooltip": "Présente en HDR (ST.2084/PQ) au lieu du SDR lorsque l'écran le prend en charge. Prend effet après le redémarrage du jeu.",
 	"caustica.options.rt.hdrPaperWhite": "Blanc papier HDR",

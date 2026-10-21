@@ -156,10 +156,14 @@ scoping; nenhum atlas, material ou tesselação paralelo é criado. A textura e
 o material continuam sendo os objetos vanilla e o caminho de textura RT,
 quando aplicável, permanece `textureSampling=texel`.
 
-A captura permanece deliberadamente isolada: o RT do mundo é gravado antes do
+A captura permanece isolada **por padrão**: o RT do mundo é gravado antes do
 passo vanilla `Item in hand`, o viewmodel não é adicionado ao `EntityGeometryManager`,
 não vira entidade/BLAS/TLAS mundial e não é presumido como bloqueador de
-sombras. O resultado mostrado pelos receipts de `ViewmodelCapture` é CPU/
+sombras. Essa é exatamente a fronteira que `caustica.rt.viewmodelRayTracing`
+(opt-in, desligado por padrão) atravessa: quando ligada, a mesma submissão
+replayada vira geometria traçada, com máscara própria para não projetar sombra,
+com a sombra do jogador ignorada ao ser sombreada e com um re-trace acima dos
+blocos. Ver [Viewmodel em path tracing](viewmodel-ray-tracing.md). O resultado mostrado pelos receipts de `ViewmodelCapture` é CPU/
 enqueue/draw vanilla, não um hit GPU; a composição visual final das mãos e
 itens continua sendo feita pelo pass vanilla. Isso evita gerar sombra mundial
 sem uma confirmação de integração do comportamento vanilla, preservando FOV,

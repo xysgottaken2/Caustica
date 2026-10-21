@@ -59,6 +59,7 @@ import dev.comfyfluffy.caustica.rt.accel.RtAccel;
 import dev.comfyfluffy.caustica.rt.accel.RtBuffer;
 import dev.comfyfluffy.caustica.rt.accel.RtImage;
 import dev.comfyfluffy.caustica.rt.entity.RtEntities;
+import dev.comfyfluffy.caustica.rt.entity.RtViewmodel;
 import dev.comfyfluffy.caustica.rt.entity.RtEntityTextures;
 import dev.comfyfluffy.caustica.rt.material.RtBlockMaterials;
 import dev.comfyfluffy.caustica.rt.material.RtEmissionSemantics;
@@ -1894,7 +1895,15 @@ public final class RtComposite {
                     // Lightning's trailing lane: strike position rebased into the same space as camOffset.
                     new Float4((float) (lightning.x() - terrain.blockX),
                             (float) (lightning.y() - terrain.blockY),
-                            (float) (lightning.z() - terrain.blockZ), lightning.intensity())
+                            (float) (lightning.z() - terrain.blockZ), lightning.intensity()),
+                    // The ray-traced viewmodel's trailing lane, written after RtEntities.beginFrame has
+                    // instanced this frame's capture: x = how far the hand reaches from the eye, which bounds
+                    // the shaders' above-blocks re-trace's tmax. Zero when the entity frame did not take the
+                    // capture, so the overlay pass switches itself off.
+                    new Float4(RtViewmodel.INSTANCE.frameOverlayReach(), 0.0f, 0.0f, 0.0f),
+                    // ...and the cone that decides which pixels are even candidates for it, so the re-trace
+                    // stays off the majority of the screen instead of off "pixels where the world is far".
+                    RtViewmodel.INSTANCE.frameOverlayCull()
             ).write(push);
             int flushBytes = Math.max(WORLD_PUSH_SIZE, READY_MASK_OFFSET + readyMaskBytes);
             if (cloudCellsAddress != 0L) {

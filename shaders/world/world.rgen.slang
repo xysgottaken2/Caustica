@@ -188,6 +188,14 @@ public float3 tracePath(PathSegment seg, uint2 pix, uint sampleIndex,
                       showCelestial, medium.current.water, rayConeWidth, rayConeSpread);
 #endif
 
+        if (bounce == 0) {
+            // Camera rays only: the viewmodel is masked out of every other ray type, so only the primary
+            // hit can need re-layering above the blocks it clips into (traceViewmodelOverlay, trace.slang).
+            // Placed before the REBLUR hit-distance capture and the miss branch below so both see the layer
+            // that will actually be shaded.
+            traceViewmodelOverlay(ro, rd);
+        }
+
         // First-bounce hit distance capture: the trace we just ran is the continuation hop whose
         // distance REBLUR wants for the lobe that spawned it. A miss leaves the distance at 0 —
         // REBLUR's "no data" value, which it treats as a skipped lobe rather than zero distance.

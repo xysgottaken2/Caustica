@@ -21,6 +21,9 @@ unverified.
 - Blue-noise (void-and-cluster) dithering for the path tracer's per-vertex sampling decisions
 - HDR output, SDR/HDR presentation paths and exposure control
 - Dynamic entity rendering in the ray-traced scene
+- Opt-in ray-traced first-person viewmodel: the hand and held item move into the traced scene, with POM,
+  emission and scene lighting on held geometry, while staying shadow-free and above the blocks it swings
+  through (`hand.ray-traced`, off by default — see [docs/viewmodel-ray-tracing.md](docs/viewmodel-ray-tracing.md))
 - LabPBR-style material support, including toggleable subsurface scattering
 - Deep settings UI: nearly every renderer feature has its own sub-screen with a "Reset to
   Defaults" button, plus a global one on the hub

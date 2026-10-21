@@ -100,6 +100,8 @@
 	"caustica.options.rt.denoiser.tooltip": "경로 추적 이미지에 DLSS Ray Reconstruction 노이즈 제거 필터를 적용합니다. 끄면 노이즈가 있는 원본 추적 결과를 전체 해상도로 표시합니다. 기준 화면으로는 유용하지만 샘플 수가 적으면 훨씬 거칠어집니다. DLSS Ray Reconstruction 지원이 필요합니다.",
 	"caustica.options.rt.handFov": "손 시야각",
 	"caustica.options.rt.handFov.tooltip": "1인칭 손과 든 아이템이 게임 시야각을 따르도록 합니다. 켜면 시야각이 높을수록 팔이 멀어지고 낮을수록 가까워집니다. 끄면 기본 고정 손 시야각으로 돌아갑니다.",
+	"caustica.options.rt.viewmodelRayTraced": "뷰모델 레이트레이싱",
+	"caustica.options.rt.viewmodelRayTraced.tooltip": "손과 들고 있는 아이템을 화면 위에 얹지 않고 레이스된 장면 안에서 그립니다. POM으로 블록의 입체감이 살아나고, 발광 아이템은 세계를 비추며, 팔은 장면의 조명을 받습니다. 그림자를 만들지 않고 플레이어 자신의 그림자도 받지 않으며, 부딪히는 블록 위에 항상 표시됩니다. 월드 패스 트레이서가 필요하고 매 프레임 메시 업로드와 BLAS 빌드가 발생합니다. 손이 (업스케일링될 수 있는) 월드 이미지의 일부가 되므로 배니라보다 약간 부드럽게 보일 수 있습니다. 기본적으로 꺼져 있습니다.",
 	"caustica.options.rt.hdr": "HDR 출력",
 	"caustica.options.rt.hdr.tooltip": "디스플레이가 지원하는 경우 SDR 대신 HDR(ST.2084/PQ)로 표시합니다. 게임을 다시 시작한 뒤 적용됩니다.",
 	"caustica.options.rt.hdrPaperWhite": "HDR 페이퍼 화이트",

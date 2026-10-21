@@ -81,7 +81,7 @@ public final class CausticaConfig {
             Rt.Sharc.FRAME_LIFETIME, Rt.Sharc.NORMAL_THRESHOLD, Rt.Sharc.STABLE_FRAMES, Rt.Sharc.DEBUG,
             Rt.Reflex.ENABLED, Rt.Lights.HELD_ITEM_LIGHT, Rt.Lights.DYNAMIC_INTENSITY, Rt.Lights.BLOCK_INTENSITY,
             Rt.Lights.RESTIR_SAMPLING, Rt.Lights.RESTIR_TEMPORAL_HISTORY, Rt.Lights.RESTIR_SPATIAL_NEIGHBOURS,
-            Rt.Lights.RESTIR_MAX_AGE, Rt.Hand.FOV_FOLLOWS_CAMERA,
+            Rt.Lights.RESTIR_MAX_AGE, Rt.Hand.FOV_FOLLOWS_CAMERA, Rt.Hand.PATH_TRACED,
             Rt.Exposure.MODE, Rt.Tonemapping.OPERATOR, Rt.Bloom.ENABLED,
             Rt.Dof.ENABLED, Rt.Dof.FOCUS_MODE, Rt.Dof.FOCAL_DISTANCE, Rt.Dof.APERTURE,
             Rt.Dof.FOCAL_LENGTH, Rt.Dof.MAX_BLUR,
@@ -173,7 +173,14 @@ public final class CausticaConfig {
                         + " fov-follows-camera: false (vanilla) renders the hand through its own fixed 70-degree\n"
                         + " projection, isolated from the FOV setting. true scales that projection to the\n"
                         + " configured FOV instead, so raising the FOV pushes the arm away and lowering it pulls\n"
-                        + " the arm closer, the way the rest of the scene reacts.");
+                        + " the arm closer, the way the rest of the scene reacts.\n"
+                        + " ray-traced: draw the viewmodel inside the traced scene as real geometry (vanilla's own\n"
+                        + " submission, replayed into the entity capture) instead of rastering it over the frame,\n"
+                        + " so held blocks get POM, held lights glow and the arm picks up scene lighting. It casts\n"
+                        + " no shadow, is ignored by its own shadow rays, and still layers above the blocks it\n"
+                        + " clips into. Default off. The traced hand is world-scaled, so it grows and shrinks\n"
+                        + " with the level FOV like anything else held in it: fov-follows-camera above is the\n"
+                        + " knob that keeps that consistent with the hand's own projection.");
         FILE.setComment("lights",
                 " Direct lighting controls. held-item-light toggles the analytic light a luminous held\n"
                         + " item casts (torch in hand lighting up a cave); each item casts its own colour.\n"
@@ -1159,6 +1166,33 @@ public final class CausticaConfig {
         public static final class Hand {
             public static final BooleanSetting FOV_FOLLOWS_CAMERA =
                     bool("caustica.rt.handFov", "hand.fov-follows-camera", false);
+            /**
+             * Ray-trace the first-person viewmodel (arm + held item / block) as real world-space geometry
+             * instead of letting vanilla raster it on top of the frame.
+             *
+             * <p>The mesh is not a re-implementation: vanilla's own
+             * {@code FirstPersonHandsAndItemsRenderer.submitHandsWithItems} is replayed once per frame into
+             * the RT entity capture, so the pose, hurt/view bobbing, swing, item swap, eating jiggle,
+             * off-hand selection, scoping suppression, tints and glint all stay exactly the game's. The
+             * captured vertices already live in the camera-relative space the tracer traces in, so the
+             * instance that places them is a pure translation by the camera position — the viewmodel is
+             * welded to the camera and every material path a world entity has applies to it (LabPBR
+             * textures, cutouts, POM on a held block, emissive held items, enchantment glint). Because it is
+             * then projected by the level projection like any other world object, its size follows the FOV
+             * setting, which is what {@link #FOV_FOLLOWS_CAMERA} exists to keep coherent.
+             *
+             * <p>Three instance-mask rules make it behave like a viewmodel and not like a second player
+             * standing in front of the eye: it is visible to the primary camera ray only, so it casts no
+             * shadow and does not appear in reflections or GI (the first-person body already does all of
+             * that); and shadow rays fired from a viewmodel surface run with their own cull mask, so the
+             * body, the held geometry and particles can never shade the hand into blackness.
+             *
+             * <p>Off by default: vanilla's screen-space hand is drawn at display resolution and needs no
+             * denoiser, while the ray-traced one lives inside the world image (so an upscaler softens it a
+             * little) and every frame pays a capture, a mesh upload and a BLAS build.
+             */
+            public static final BooleanSetting PATH_TRACED =
+                    bool("caustica.rt.viewmodelRayTracing", "hand.ray-traced", false);
 
             private Hand() {
             }

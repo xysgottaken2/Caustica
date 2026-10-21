@@ -944,7 +944,10 @@ public final class RtAccel {
      */
     public record Instance(float[] transform3x4, long blasDeviceAddress, int customIndex, int mask, int sbtRecordOffset) {
         public Instance(float[] transform3x4, long blasDeviceAddress, int customIndex) {
-            this(transform3x4, blasDeviceAddress, customIndex, 0xFF, 0);
+            // 0xF7, not 0xFF: bit 3 is reserved for the ray-traced first-person viewmodel's own cull mask
+            // (CULL_VIEWMODEL in shaders/world/trace.slang), so terrain must not answer a viewmodel-only
+            // trace. Every mask the world shaders actually trace with still matches this.
+            this(transform3x4, blasDeviceAddress, customIndex, 0xF7, 0);
         }
 
         public Instance(float[] transform3x4, long blasDeviceAddress, int customIndex, int mask) {
