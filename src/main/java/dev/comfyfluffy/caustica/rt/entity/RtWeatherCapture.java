@@ -242,12 +242,13 @@ public final class RtWeatherCapture {
         // Tag every emitted sheet (PRIM_WEATHER) so raygen applies the weather coverage rules instead of
         // shading a blue billboard. The sheets stay real geometry — terrain occlusion and the heightmap
         // clip are kept — and their alpha is stochastic coverage.
-        capture.currentPrimFlags = RtEntityCapture.PRIM_FLAG_WEATHER;
-        capture.currentGlintArmorSlot = 0; // weather never carries a glint armour context
-        // Measure the sheets' apparent motion BEFORE emitting: the displacement every rain vertex gets
-        // is this frame's texture scroll, not a vertex delta (see prevRainScroll).
+        // The sheets' apparent motion: the displacement every rain vertex gets is this frame's texture
+        // scroll, not a vertex delta (see prevRainScroll). Measured before the tagging below so the
+        // flags stay adjacent to the capture call they describe.
         rainDispY = scrollDisplacementY(state.rainColumns, prevRainScroll);
         snowDispY = scrollDisplacementY(state.snowColumns, prevSnowScroll);
+        capture.currentPrimFlags = RtEntityCapture.PRIM_FLAG_WEATHER;
+        capture.currentGlintArmorSlot = 0; // weather never carries a glint armour context
         try {
             // Rain is a water droplet and gets the refractive branch in raygen.
             int rainVertexStart = capture.verts.size() / 3;
