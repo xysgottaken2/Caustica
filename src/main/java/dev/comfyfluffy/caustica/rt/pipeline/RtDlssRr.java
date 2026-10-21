@@ -84,6 +84,20 @@ public final class RtDlssRr {
     }
 
     /**
+     * Ask RR to throw away its temporal history once, at the next {@link #evaluate}.
+     *
+     * <p>RR only ever rejects history through a soft depth/normal weight, so a piece of geometry that
+     * did not exist last frame (a block or sign the player just placed) is blended in against a
+     * confident, fully-converged history and can take dozens of frames to reach full strength. The
+     * renderer cannot express "this pixel is new" to NGX, but it can tell RR that the scene changed,
+     * which costs one noisier frame and puts the new content on screen immediately. Callers fire this
+     * only for genuine geometry edits under a still camera — see RtComposite's DLSS-RR call site.
+     */
+    public void requestHistoryReset() {
+        resetHistory = true;
+    }
+
+    /**
      * Record a DLSS-RR evaluation: denoise + upscale the noisy path-traced color (at render res) using
      * the guide buffers, writing the display-res result into {@code out}. {@code jitterX/jitterY} is the
      * sub-pixel camera jitter applied to the primary ray this frame, in render pixels. Returns false

@@ -301,71 +301,74 @@ public void writeGuides(int2 pix, float3 primaryDir, float2 jndc, float2 size, f
     float guideViewZ = isSky ? 1.0e6 : (curClip.w > 0.0 ? min(curClip.w, 1.0e6) : 1.0e6);
     gViewZ[pix] = guideViewZ;
 
-    // ---- World-space reprojection guide. This pass no longer computes a screen-space motion vector.
+    // ---- World-space reprojection guides. This pass no longer computes a screen-space motion vector.
     //
-    // What used to happen here: the shaded point was pushed through prevViewProj and the difference to
-    // the pixel's own NDC became the motion vector — a 2D delta derived from a 1-spp ray hit. That is
-    // the vector DLSS-RR / NRD / SVGF / frame generation reprojected their history with. Deriving it
-    // from the shading sample means the vector inherits that sample's whole error budget (the jittered
-    // hit, per-vertex motion interpolation on entities and particles, the analytic wave surface,
-    // half-precision motionPrev) and lands it in a texture whose entire job is to be a smooth,
-    // sub-pixel-accurate displacement field — a field a temporal filter reads as real surface motion
-    // and a frame generator reads as real fractional-pixel travel between frames.
+    // The vector itself is built by world_reproject.comp from the depth G-buffer. What this pass owes it
+    // are the two things depth cannot know, as two separate WORLD-SPACE vectors — not one, because the
+    // vector's two ends need different information:
     //
-    // world_reproject.comp now owns the vector: it rebuilds the pixel's 3D position from THIS frame's
-    // depth G-buffer (gViewZ, which is exactly the clip .w of the visible layer) and projects that
-    // through prevViewProj. A static surface therefore reprojects to exactly where it was, no matter
-    // how the sample happened to land inside the pixel, and the vector is consistent with the depth and
-    // normal the denoisers validate the same history against — they can no longer disagree.
+    //   lateral  = shown point - point on this pixel's ray at guideViewZ   (for the CURRENT end)
+    //   ownMove  = the surface's per-frame world displacement              (for the PREVIOUS end)
     //
-    // What is left for this pass is the part the depth buffer cannot know: the offset between the point
-    // depth describes and the point the pixel actually shows, minus the surface's own world-space
-    // displacement. Concretely, with `jndc` the pixel's (jittered) NDC and `guideViewZ` its linear view
-    // depth — the exact value world_reproject.comp reads back out of gViewZ:
+    // so that the reprojection computes
     //
-    //   depthPoint = point on THIS pixel's ray at guideViewZ (what world_reproject reconstructs)
-    //   delta      = gv_hitCamRel - gv_motionObjDisp - depthPoint
+    //   shown     = depthPoint + lateral
+    //   curNdc    = proj_cur(shown)
+    //   prevNdc   = proj_prev(shown - ownMove + camDelta)
+    //   motion    = prevNdc - curNdc        (in render pixels)
     //
-    //   * static terrain / sky: the visible point IS on the ray, so delta is zero to within fp32 and the
-    //     reprojection is pure depth reprojection;
-    //   * dynamic geometry (entities, particles, animated water): delta carries the per-frame world
-    //     displacement only, so the reprojection moves with the surface instead of standing still;
-    //   * transmitted content: the visible destination is OFF the pixel's ray, so delta carries the
-    //     lateral refraction offset and the reprojection lands where that destination really was. This
-    //     is why the guide is a world-space correction and not a 2D vector: a depth-based scheme has no
-    //     way to recover a point seen through glass, and guessing would smear every water surface.
+    // Both ends are real 3D points. That is the whole difference from the old code, which subtracted the
+    // pixel's own NDC (or, for transmission, a second ad-hoc projection) from a single shaded-point
+    // subtraction — a 2D delta that inherited every bit of the sample's sub-pixel scatter.
     //
-    // The correction is zero for the overwhelming majority of the screen, which is exactly the point:
-    // the per-pixel information the reprojection depends on is now the depth buffer, not this guide.
+    // Why they cannot be merged into one vector: an earlier version folded them together as
+    // (shown - ownMove - depthPoint), which is exact for the previous end but leaves the current end
+    // wrong by (proj_cur(shown) - jndc). That term is zero for anything the ray actually hit, and it is
+    // LARGE for transmitted content, whose visible destination is deliberately off the ray — so water
+    // and glass acquired a fake constant motion every frame and shook. Keeping the lateral offset
+    // separable is what makes one formula correct for both.
     //
-    // guideViewZ (not curClip.w) is load-bearing: this must be the value world_reproject.comp will read
-    // back out of gViewZ, not merely the one this pass would have preferred. The two differ only for
-    // sky — zeroed below — and for a hit behind the camera plane, which a primary ray cannot produce.
+    // Cases, and what they put in each vector:
+    //   * static terrain / sky .... lateral 0, ownMove 0 -> pure depth reprojection;
+    //   * dynamic opaque ......... lateral 0, ownMove = the entity's per-frame displacement;
+    //   * particles .............. lateral 0, ownMove = the particle's per-frame displacement. That
+    //                              includes precipitation, whose capture hands the sheets the TEXTURE
+    //                              SCROLL as their displacement — their quads never move, but the pattern
+    //                              does (see RtWeatherCapture.scrollDisplacementY);
+    //   * water / glass / ice .... lateral = the lateral refraction offset, ownMove = wave motion.
     float3 depthPoint = cameraRelativePointAtViewDepth(jndc, guideViewZ, worldPush.invViewProj);
-    float3 reprojDelta = gv_hitCamRel - gv_motionObjDisp - depthPoint;
-    // Sky sits at a fixed |hitCamRel| = 1e6 but gViewZ is forced to exactly 1e6 for every sky pixel, so
-    // the two reconstructions are the same point only up to the ray's cosine with the view axis. The
-    // difference is meaningless at 1e6 blocks (it is a pure scale along one ray, and the projected
-    // screen position is identical), and it does not fit in fp16 — writing it would overflow the guide
-    // to Inf. Report zero: sky then reprojects as the rotation-only, effectively infinite point it is.
+    float3 lateral = gv_hitCamRel - depthPoint;
+    float3 ownMove = gv_motionObjDisp;
+
     if (isSky) {
-        reprojDelta = float3(0.0, 0.0, 0.0);
+        // Sky sits at a fixed |hitCamRel| = 1e6 while gViewZ is forced to exactly 1e6 for every sky pixel,
+        // so the two reconstructions agree only up to the ray's cosine with the view axis. That difference
+        // is a pure scale along one ray (identical projected position, so it would cancel anyway) and it
+        // is meaningless at 1e6 blocks. Sky reprojects as the rotation-only, effectively infinite point
+        // it is.
+        lateral = float3(0.0, 0.0, 0.0);
+        ownMove = float3(0.0, 0.0, 0.0);
     }
-    // fp16 headroom guard: a legitimate correction is at most a few blocks (one frame of entity travel
-    // or the lateral spread of a refraction); anything larger is a NaN/Inf artefact of a degenerate
-    // projection and must not reach the reprojection as a teleport.
-    if (any(isnan(reprojDelta)) || any(isinf(reprojDelta))) {
-        reprojDelta = float3(0.0, 0.0, 0.0);
+    // Headroom guards. A legitimate lateral offset is at most a few blocks (the spread of a refraction);
+    // a legitimate per-frame displacement is at most a few blocks per frame. Anything larger is a
+    // NaN/Inf artefact of a degenerate projection and must not reach the reprojection as a teleport.
+    if (any(isnan(lateral)) || any(isinf(lateral))) {
+        lateral = float3(0.0, 0.0, 0.0);
     }
-    reprojDelta = clamp(reprojDelta, -4096.0, 4096.0);
+    if (any(isnan(ownMove)) || any(isinf(ownMove))) {
+        ownMove = float3(0.0, 0.0, 0.0);
+    }
+    lateral = clamp(lateral, -4096.0, 4096.0);
+    ownMove = clamp(ownMove, -4096.0, 4096.0);
 
     // Guide buffers: first-hit or coherently replaced attributes consumed by the denoiser/DLSS-RR.
-    // gReprojDelta occupies the slot the motion vector used to fill, and is the only guide written
-    // here that this pipeline does not consume: world_reproject.comp (a compute pass outside it) does.
+    // gReprojDelta/gReprojDisp occupy the slot the motion vector used to fill (plus one new slot) and are
+    // the only guides written here that this pipeline does not consume: world_reproject.comp does.
     gNormal[pix] = float4(gv_normal, gv_rough);
     gAlbedo[pix] = float4(gv_albedo, 1.0);
     gDepth[pix] = depth;
-    gReprojDelta[pix] = float4(reprojDelta, 0.0);
+    gReprojDelta[pix] = float4(lateral, 0.0);
+    gReprojDisp[pix] = float4(ownMove, 0.0);
     gSpecAlbedo[pix] = float4(specAlbedo, 1.0);
     gSpecMotion[pix] = specMotion;
 }

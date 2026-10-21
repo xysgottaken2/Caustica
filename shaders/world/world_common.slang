@@ -95,8 +95,7 @@ public struct WorldPush {
     // The two strengths drive the look (overcast sky, hidden discs/stars); the two multipliers are the
     // single source of truth for how much the weather dims things, so Java's NEE radiance and the sky
     // shader can never disagree about how dark a storm is.
-    public float4   weather;          // x rain 0..1, y thunder 0..1, z sky darkening, w light attenuation
-    // Flat vanilla-style cloud deck (clouds.slang). Coverage already folds in the weather on the Java
+    public float4   weather;          // x rain 0..1, y thunder 0..1, z sky darkening, w light attenuation    // Flat vanilla-style cloud deck (clouds.slang). Coverage already folds in the weather on the Java
     // side (RtComposite.cloudState), so the shader reads one resolved state rather than re-deriving the
     // storm ramp the sky darkening also depends on. The two slider lanes (shadow strength, opacity) are
     // pushed raw so a mid-frame change takes effect on the next frame like every other RT option.

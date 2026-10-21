@@ -12,7 +12,7 @@ import clouds;
 // this one: RtCloudShaderRegressionTest.skyAtlasBindingFollowsGuideCount parses GUIDE_COUNT from
 // RtComposite and the binding from this line every CI run, so the two sides failing to agree is
 // a red build, not a sky without celestials.
-[[vk::binding(12, 0)]] Sampler2D celestialsAtlas;
+[[vk::binding(13, 0)]] Sampler2D celestialsAtlas;
 
 static const float PI = 3.14159265359;
 float pow2(float x) { return x * x; }

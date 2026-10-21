@@ -24,54 +24,59 @@
 //
 // How it works
 // ------------
-// Reconstruct the pixel's exact 3D position from THIS frame's depth G-buffer, then project that same
-// world point through the PREVIOUS frame's view-projection:
+// Reconstruct the pixel's exact 3D position from THIS frame's depth G-buffer, then project the point
+// the pixel actually shows through both the CURRENT and the PREVIOUS view-projection:
 //
 //   1. jndc    = the NDC the primary ray was actually cast through (pixel centre + this frame's
 //                jitter, exactly as world_primary.rgen builds it);
-//   2. w       = viewZ[pix], the linear view depth of the visible layer (the projection's clip .w);
-//   3. camRel  = the point on that ray at depth w, in camera-relative world space
+//   2. depth   = viewZ[pix], the linear view depth of the visible layer (the projection's clip .w);
+//   3. depthP  = the point on that ray at that depth, camera-relative world space
 //                (world_common.cameraRelativePointAtViewDepth);
-//   4. prevPos = camRel + camDelta + reprojDelta  — camDelta moves the point into the PREVIOUS
-//                camera's frame, reprojDelta carries the one thing depth cannot know (see below);
-//   5. mv      = (project(prevPos, prevViewProj) - jndc) * 0.5 * size, in render pixels.
+//   4. shown   = depthP + lateral   — the 3D point the pixel really shows;
+//   5. prev    = shown - ownMove + camDelta — the same point one frame earlier, in the previous
+//                camera's frame;
+//   6. mv      = project(prev, prevViewProj) - project(shown, curViewProj), in render pixels.
 //
-// For static geometry this is exact by construction: the depth buffer holds the surface, projecting
-// it with the previous camera lands on the pixel it occupied last frame, and a still camera yields
-// exactly zero — no per-sample scatter to amplify, because the position is derived from the depth
-// buffer rather than from the shading sample. It is also the same geometry the denoisers validate
-// the reprojected history against (gViewZ / gNormal / their previous-frame copies), so the vector and
-// the validation can no longer disagree about where a surface was.
+// BOTH ends are real world points and both are projected. That is what makes one formula correct for
+// a static landscape, a walking mob, a falling raindrop and a fish seen through water:
 //
-// The guide (`gReprojDelta`)
-// --------------------------
+//   * static geometry: lateral and ownMove are zero, so `shown` is on the pixel's ray at its depth,
+//     proj_cur(shown) IS jndc, and the difference is exactly the depth reprojection (identically zero
+//     for a still camera);
+//   * dynamic geometry: ownMove moves the previous end along with the surface;
+//   * precipitation: the sheets are static geometry whose fall lives in the sampled V coordinate, so
+//     RtWeatherCapture hands them the texture scroll as their own motion (world blocks along y);
+//   * transmitted content: `lateral` carries the refraction offset, so BOTH ends follow the visible
+//     destination instead of assuming it sits on this pixel's ray. Subtracting jndc there (an earlier
+//     version) added the destination's own screen offset as fake motion — the shaking water/glass.
+//
+// The guides (`gReprojDelta`, `gReprojDisp`)
+// ------------------------------------------
 // A depth-only scheme cannot express two things, and both are real in this renderer:
 //
-//   * dynamic geometry — the depth buffer says where an entity IS, never where it was, so a moving
-//     entity would reproject as if it were static and smear;
+//   * dynamic geometry — the depth buffer says where an entity IS, never where it was;
 //   * transmitted content — for water, glass and ice the guide tuple describes the refracted
-//     DESTINATION, which is deliberately off the pixel's own ray, so reconstructing along the ray at
-//     its depth lands on a different point than the one the pixel shows.
+//     DESTINATION, which is deliberately off the pixel's own ray.
 //
-// The guide pass therefore publishes the world-space correction between "the point depth describes"
-// and "the point the pixel shows", already minus the surface's own per-frame displacement. It is
-// zero to within fp32 for static terrain and sky, the per-frame displacement for dynamic surfaces,
-// and the lateral refraction offset for transmitted ones — a few blocks at most, which is why fp16
-// is enough. This pass then reprojects a 3D point in every case; the correction never becomes an
-// independent 2D vector.
+// guides.slang publishes those as two separate WORLD-SPACE vectors (see world_core.slang). They stay
+// world-space corrections; neither ever becomes an independent 2D vector, and every pixel — static,
+// moving or refracted — is reprojected as a 3D point.
 //
-// Units and sign are what the consumers already expect: (previous - current) in RENDER pixels,
-// jitter subtracted from both sides (so a static surface is exactly zero, matching the MVJittered
-// flag being unset), y in the same direction as the texture rows.
+// Units and sign are what the consumers already expect: (previous - current) in RENDER pixels, with
+// both ends projected from the same 3D point so the frame's sub-pixel jitter cancels between them
+// rather than being double-counted. A static surface under a still camera is therefore exactly zero,
+// which is what the consumers assume with the MVJittered flag unset. Y runs in the same direction as
+// the texture rows.
 
 import world_common;
 
 [[vk::push_constant]] WorldPushConstants pc;
 
 [[vk::binding(0, 0)]] [format("r32f")]    public RWTexture2D<float>  viewZ;       // this frame's linear view depth (G-buffer)
-[[vk::binding(1, 0)]] [format("rgba16f")] public RWTexture2D<float4> reprojDelta; // per-pixel world-space correction
-[[vk::binding(2, 0)]] [format("rg16f")]   public RWTexture2D<float2> motion;      // OUT: previous - current, render px
-[[vk::binding(3, 0)]] [format("rgba16f")] public RWTexture2D<float4> outImage;    // debug view 5 ("Motion")
+[[vk::binding(1, 0)]] [format("rgba32f")] public RWTexture2D<float4> reprojDelta; // lateral offset: shown point - depth point
+[[vk::binding(2, 0)]] [format("rgba16f")] public RWTexture2D<float4> reprojDisp;  // the surface's own frame displacement
+[[vk::binding(3, 0)]] [format("rg16f")]   public RWTexture2D<float2> motion;      // OUT: previous - current, render px
+[[vk::binding(4, 0)]] [format("rgba16f")] public RWTexture2D<float4> outImage;    // debug view 5 ("Motion")
 
 [shader("compute")]
 [numthreads(16, 16, 1)]
@@ -96,23 +101,31 @@ void main(uint3 tid : SV_DispatchThreadID) {
     // eye, or a degenerate projection). Report no motion rather than a teleport: every consumer
     // treats a zero vector as "history unavailable here".
     if (depth > 0.0 && !isinf(depth) && !isnan(depth)) {
-        float3 camRel = cameraRelativePointAtViewDepth(jndc, depth, worldPush.invViewProj);
+        float3 depthPoint = cameraRelativePointAtViewDepth(jndc, depth, worldPush.invViewProj);
 
-        float4 guide = reprojDelta[pix];
-        float3 delta = guide.xyz;
-        if (any(isnan(delta)) || any(isinf(delta))) {
-            delta = float3(0.0, 0.0, 0.0);
+        float3 lateral = reprojDelta[pix].xyz;
+        float3 ownMove = reprojDisp[pix].xyz;
+        if (any(isnan(lateral)) || any(isinf(lateral))) {
+            lateral = float3(0.0, 0.0, 0.0);
+        }
+        if (any(isnan(ownMove)) || any(isinf(ownMove))) {
+            ownMove = float3(0.0, 0.0, 0.0);
         }
 
-        // camDelta is (current camera - previous camera), so adding it expresses the same world point
-        // in the PREVIOUS camera's frame; prevViewProj then projects it the way the previous frame saw
-        // it. Terrain rebases are invisible here: both sides are camera-relative.
-        float3 prevCamRel = camRel + worldPush.camDelta + delta;
-        float4 prevClip = mul(worldPush.prevViewProj, float4(prevCamRel, 1.0));
-        // w <= 0 means the point was behind the previous camera (or on its plane): no valid previous
-        // position exists, so report no motion and let the consumer fall back.
-        if (prevClip.w > 0.0) {
-            mv = (prevClip.xy / prevClip.w - jndc) * 0.5 * size;
+        // The point this pixel shows, and the same point one frame earlier.
+        float3 shown = depthPoint + lateral;
+        float3 prev = shown - ownMove + worldPush.camDelta;
+
+        // Both ends are projected: the current one describes where the shown point is NOW (it is the
+        // pixel centre for anything the ray hit, and the refracted destination's own screen position
+        // otherwise), the previous one where it was. Only then does the difference mean "screen
+        // displacement of the same surface point".
+        float4 curClip = mul(worldPush.curViewProj, float4(shown, 1.0));
+        float4 prevClip = mul(worldPush.prevViewProj, float4(prev, 1.0));
+        // w <= 0 means the point is behind (or on the plane of) that camera: no valid projection
+        // exists, so report no motion and let the consumer fall back instead of handing it garbage.
+        if (curClip.w > 0.0 && prevClip.w > 0.0) {
+            mv = (prevClip.xy / prevClip.w - curClip.xy / curClip.w) * 0.5 * size;
             if (any(isnan(mv)) || any(isinf(mv))) {
                 mv = float2(0.0, 0.0);
             }

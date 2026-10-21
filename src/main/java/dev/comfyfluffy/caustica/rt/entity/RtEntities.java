@@ -1068,11 +1068,19 @@ public final class RtEntities {
         int weatherColumns = weatherBudget > 0
                 ? RtWeatherCapture.INSTANCE.capture(capture, particleCapture, camPos, weatherBudget) : 0;
         int weatherVertAfter = capture.verts.size() / 3;
-        // Weather columns are pinned in world X/Z and animate only through their scrolling UVs.
-        // They therefore use zero motion vectors, then ordinary particle MVs append after them.
+        // Weather columns are pinned in world X/Z and animate only through their scrolling UVs, so their
+        // vertex positions never change — but the PATTERN does, and that is the motion the reprojection
+        // needs. RtWeatherCapture diffs the columns' vOffset and reports the equivalent world-space fall
+        // (negative Y, in blocks), which goes in as the per-vertex displacement. Leaving it at zero is
+        // what froze the streaks into static lines whenever the camera stopped: with no motion vector the
+        // temporal filter keeps whatever it accumulated at that pixel, forever.
+        int rainEnd = weatherVertBefore + Math.clamp(RtWeatherCapture.INSTANCE.lastRainVertices(),
+                0, weatherVertAfter - weatherVertBefore);
+        float rainDisp = RtWeatherCapture.INSTANCE.frameRainDispY();
+        float snowDisp = RtWeatherCapture.INSTANCE.frameSnowDispY();
         for (int i = weatherVertBefore; i < weatherVertAfter; i++) {
             particleDisp.add(0f);
-            particleDisp.add(0f);
+            particleDisp.add(i < rainEnd ? rainDisp : snowDisp);
             particleDisp.add(0f);
             particleDisp.add(0f);
         }

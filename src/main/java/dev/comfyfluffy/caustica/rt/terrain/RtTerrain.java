@@ -349,6 +349,21 @@ public final class RtTerrain {
     }
 
     /**
+     * Monotonic count of block-edit groups requested so far, or 0 before the first one.
+     *
+     * <p>Used by the denoiser path to notice that the world's GEOMETRY changed (a block or block entity
+     * was placed/broken) without the camera moving. That is precisely the case a temporal denoiser
+     * cannot detect on its own at one sample per pixel — it sees a depth step only through its soft
+     * rejection weight — so DLSS-RR is asked to drop its history for that frame. Read on the render
+     * thread; the counter is bumped under {@code dirtyLock} by the (possibly off-thread) edit hooks.
+     */
+    public static long geometryRevision() {
+        synchronized (INSTANCE.dirtyLock) {
+            return INSTANCE.dirtyGroupSeq;
+        }
+    }
+
+    /**
      * Mark every section overlapping a dirty block area — <em>plus the bordering neighbour sections</em>
      * — for re-extraction. Fed by the LevelExtractor hook (vanilla's block-change signal). Thread-safe;
      * drained on the next {@link #tick}.

@@ -51,8 +51,10 @@ final class RtWorldReprojectionTest {
                 "guides.slang must not write gMotion: world_reproject.comp is its only producer");
         assertFalse(guides.contains("prevClip"),
                 "the old 2D reprojection (prevViewProj on the shaded point) must stay removed");
-        assertTrue(guides.contains("gReprojDelta[pix] = float4(reprojDelta, 0.0);"),
-                "the guide pass must publish the world-space correction instead");
+        assertTrue(guides.contains("gReprojDelta[pix] = float4(lateral, 0.0);"),
+                "the guide pass must publish the lateral world-space offset");
+        assertTrue(guides.contains("gReprojDisp[pix] = float4(ownMove, 0.0);"),
+                "the guide pass must publish the surface's own motion separately");
         assertTrue(guides.contains("float guideViewZ = isSky ? 1.0e6 :"),
                 "gViewZ must keep its sky sentinel: it is the reprojection's depth buffer now");
         assertTrue(guides.contains("gViewZ[pix] = guideViewZ;"),
@@ -73,14 +75,19 @@ final class RtWorldReprojectionTest {
                 "the depth G-buffer must be a bound input of the reprojection");
         assertTrue(shader.contains("cameraRelativePointAtViewDepth(jndc, depth, worldPush.invViewProj)"),
                 "the 3D position must come from the shared camera-relative reconstruction");
-        assertTrue(shader.contains("float3 prevCamRel = camRel + worldPush.camDelta + delta;"),
-                "the same world point must be moved into the previous camera's frame");
-        assertTrue(shader.contains("mul(worldPush.prevViewProj, float4(prevCamRel, 1.0))"),
+        assertTrue(shader.contains("float3 shown = depthPoint + lateral;"),
+                "the CURRENT end must be the world point the pixel shows, not the pixel's own ndc");
+        assertTrue(shader.contains("float3 prev = shown - ownMove + worldPush.camDelta;"),
+                "the same world point must be moved into the previous camera's frame by its own motion");
+        assertTrue(shader.contains("mul(worldPush.prevViewProj, float4(prev, 1.0))"),
                 "the previous position must be projected with the PREVIOUS view-projection");
-        assertTrue(shader.contains("mv = (prevClip.xy / prevClip.w - jndc) * 0.5 * size;"),
-                "output convention: (previous - current) in render pixels, jitter subtracted from both");
-        assertTrue(shader.contains("if (prevClip.w > 0.0) {"),
-                "a point behind the previous camera has no valid previous position; report no motion");
+        assertTrue(shader.contains("float4 curClip = mul(worldPush.curViewProj, float4(shown, 1.0));"),
+                "the current position must be projected too: subtracting the pixel's ndc instead makes "
+                        + "every refracted pixel carry its whole refraction offset as fake motion");
+        assertTrue(shader.contains("mv = (prevClip.xy / prevClip.w - curClip.xy / curClip.w) * 0.5 * size;"),
+                "output convention: (previous - current) in render pixels, both ends projected");
+        assertTrue(shader.contains("if (curClip.w > 0.0 && prevClip.w > 0.0) {"),
+                "a point behind either camera has no valid projection; report no motion");
     }
 
     /**
@@ -103,7 +110,7 @@ final class RtWorldReprojectionTest {
                 "the compute pass must import the shared module, not world_core's raygen bindings");
         assertFalse(shader.contains("import world_core;"),
                 "world_core declares the RT guide bindings; importing it would pull them into the "
-                        + "compute pipeline layout, which only has the reprojection's four images");
+                        + "compute pipeline layout, which only has the reprojection's five images");
     }
 
     /** The host must run the reprojection between the trace and every consumer of gMotion. */
@@ -113,7 +120,8 @@ final class RtWorldReprojectionTest {
 
         List<String> needles = List.of(
                 "reprojectPipeline = RtWorldReprojectPipeline.create(ctx);",
-                "reprojectPipeline.setImages(gViewZ.view, gReprojDelta.view, gMotion.view, output.view);",
+                "reprojectPipeline.setImages(gViewZ.view, gReprojDelta.view, gReprojDisp.view,",
+                "                gMotion.view, output.view);",
                 "reprojectPipeline.dispatch(cmd, renderW, renderH, pushConstants);");
         for (String needle : needles) {
             assertTrue(composite.contains(needle), "RtComposite must wire the reprojection: " + needle);

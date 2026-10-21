@@ -40,8 +40,10 @@ import static dev.comfyfluffy.caustica.rt.RtContext.check;
  * consumer — SVGF, NRD, DLSS-RR, FSR 3 / XeSS and both frame generators all read the same buffer.
  *
  * <p>Bindings, matching {@code shaders/world/world_reproject.comp.slang}: 0 this frame's linear view
- * depth ({@code gViewZ}), 1 the per-pixel world-space correction guide ({@code gReprojDelta}),
- * 2 the motion output ({@code gMotion}), 3 the HDR trace target (debug view 5 only).
+ * depth ({@code gViewZ}), 1 the lateral-offset guide ({@code gReprojDelta}: shown point minus the
+ * point the depth buffer describes — nonzero only for transmitted content), 2 the surface's own
+ * per-frame displacement ({@code gReprojDisp}), 3 the motion output ({@code gMotion}), 4 the HDR
+ * trace target (debug view 5 only).
  *
  * <p>Push constants are the shared {@link WorldPushConstantsData} block the world trace already
  * builds each frame — no separate serialization, so the matrices the reprojection uses are literally
@@ -51,7 +53,7 @@ import static dev.comfyfluffy.caustica.rt.RtContext.check;
 public final class RtWorldReprojectPipeline {
     private static final String SHADER_DIR = "/caustica/rt/";
     /** Storage images the reprojection shader binds; see the class docs for the slot order. */
-    private static final int BINDINGS = 4;
+    private static final int BINDINGS = 5;
 
     private final RtContext ctx;
     private final long descriptorSetLayout;
@@ -134,8 +136,9 @@ public final class RtWorldReprojectPipeline {
         Arrays.fill(boundViews, 0L);
     }
 
-    public void setImages(long viewZView, long reprojDeltaView, long motionView, long traceColorView) {
-        long[] views = {viewZView, reprojDeltaView, motionView, traceColorView};
+    public void setImages(long viewZView, long reprojDeltaView, long reprojDispView,
+                          long motionView, long traceColorView) {
+        long[] views = {viewZView, reprojDeltaView, reprojDispView, motionView, traceColorView};
         if (Arrays.equals(views, boundViews)) {
             return;
         }

@@ -14,16 +14,34 @@ import world_common;
 [[vk::binding(3, 0)]] [format("rgba16f")] public RWTexture2D<float4> gNormal;     // xyz world normal, w linear roughness
 [[vk::binding(4, 0)]] [format("rgba16f")] public RWTexture2D<float4> gAlbedo;     // rgb diffuse albedo
 [[vk::binding(5, 0)]] [format("r32f")]    public RWTexture2D<float>  gDepth;      // HW reversed-Z depth
-// World-space reprojection correction (see guides.slang's writeGuides). xyz is the offset from the
-// point the DEPTH BUFFER describes to the point the pixel actually shows, already minus the surface's
-// own per-frame displacement: zero for static terrain and sky, nonzero only for dynamic geometry and
-// for transmitted content, which a depth-only scheme cannot recover.
+// ---- World-space reprojection guides (see guides.slang's writeGuides) ---------------------------
 //
-// This is not a motion vector and it is not read as one. The vector itself is produced by
-// world_reproject.comp, which is a compute pass outside this pipeline — so the RT pipeline has no
+// The depth G-buffer says where the surface AT THIS PIXEL'S RAY is. The pixel may show something else,
+// and that something may have moved, so the reprojection needs two independent world-space vectors:
+//
+//   gReprojDelta.xyz  "lateral offset": the shown point minus the point the depth buffer describes.
+//                     Zero for anything hit by the primary ray (terrain, entities, particles) to
+//                     within fp32; nonzero only for TRANSMITTED content, where the guide tuple is the
+//                     refracted destination — deliberately off the ray, and unrecoverable from depth.
+//   gReprojDisp.xyz   "own motion": the surface's per-frame world displacement (rigid entity motion,
+//                     per-vertex deformation, wave height change, precipitation scroll).
+//
+// world_reproject.comp combines them with the depth: it rebuilds the shown point, projects it with the
+// CURRENT view-projection for the vector's "current" end and with the PREVIOUS one for its "previous"
+// end. Both ends are real 3D points; neither is a screen-space guess.
+//
+// fp32 on the lateral offset is load-bearing: the reprojection's CURRENT end is this offset added to
+// the depth-reconstructed point, so its absolute error lands straight in the motion vector. In fp16 a
+// distant or grazing water/glass surface (where the offset is metres of world space) would put ~1 ULP
+// of rounding noise into that vector every frame — invisible for one pixel, visible as shimmer across
+// a lake. The own-motion vector feeds the PREVIOUS end alone and stays fp16: one frame of travel is a
+// couple of blocks at most, where half precision is far below a pixel.
+//
+// These are not motion vectors and they are not read as such. The vector itself is produced by
+// world_reproject.comp, a compute pass outside this pipeline — so the RT pipeline has no
 // motion-vector binding at all any more, and the old read-modify-write hazard (two writers racing on
 // the same texture) cannot come back by accident.
-[[vk::binding(6, 0)]] [format("rgba16f")] public RWTexture2D<float4> gReprojDelta;
+[[vk::binding(6, 0)]] [format("rgba32f")] public RWTexture2D<float4> gReprojDelta;
 [[vk::binding(7, 0)]] [format("rgba16f")] public RWTexture2D<float4> gSpecAlbedo; // exact-mirror reflected diffuse × reflectance; material reflectance otherwise
 [[vk::binding(8, 0)]] [format("rg16f")]   public RWTexture2D<float2> gSpecMotion; // reflection MVs for RR
 // Denoiser signals: gViewZ in Pass A (NRD's IN_VIEWZ, the guide SVGF validates its reprojection
@@ -36,6 +54,7 @@ import world_common;
 [[vk::binding(9, 0)]]  [format("r32f")]    public RWTexture2D<float>  gViewZ;    // linear view depth, primary hit (sky = large)
 [[vk::binding(10, 0)]] [format("rgba16f")] public RWTexture2D<float4> gNrdDiff;  // YCoCg diffuse radiance, w = normalized hit distance
 [[vk::binding(11, 0)]] [format("rgba16f")] public RWTexture2D<float4> gNrdSpec;  // YCoCg specular radiance, w = normalized hit distance
+[[vk::binding(12, 0)]] [format("rgba16f")] public RWTexture2D<float4> gReprojDisp;
 
 // Per-frame push data loaded once from the BDA buffer at the top of main() (same pattern as the GLSL
 // `worldPush` global). Layout constants generated from this module's SPIR-V — see world_common.WorldPush.

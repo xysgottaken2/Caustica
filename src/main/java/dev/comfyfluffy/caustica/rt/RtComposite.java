@@ -136,11 +136,15 @@ public final class RtComposite {
     // Hot addresses/frameIndex and raygen's debugView avoid unnecessary global-memory dereferences;
     // WorldPushConstantsData is generated from the same Slang module and owns this second ABI as well.
     // RR guide buffers (bindings 3..8) + NRD signals (bindings 9..11: viewZ + per-lobe radiance/hit
-    // distance). The NRD images are only written when FEATURE_NRD is on, but the bindings always
-    // exist. Slot 3 used to hold the screen-space motion vector; it now carries the world-space
-    // reprojection correction, so the count is unchanged and the celestials atlas stays at
+    // distance) + the reprojection's own-motion guide (binding 12). The NRD images are only written
+    // when FEATURE_NRD is on, but the bindings always exist, and the celestials atlas stays at
     // 3 + GUIDE_COUNT (RtCloudShaderRegressionTest enforces that).
-    private static final int GUIDE_COUNT = 9;
+    //
+    // Slot 3 used to hold the tracer-written screen-space motion vector. It now carries the world-space
+    // reprojection's lateral offset, and slot 9 carries the surface's own per-frame displacement: the
+    // reprojection needs them as two separate vectors because the vector's two ends consume different
+    // information (see world_core.slang).
+    private static final int GUIDE_COUNT = 10;
     private static final long PATH_RECORD_BYTES = 48L;
     // Reflected from PackedRestirReservoir's std430 array stride (world_layout_probe.slang).
     private static final long RESTIR_RECORD_BYTES = RestirReservoirData.BYTE_SIZE;
@@ -703,8 +707,14 @@ public final class RtComposite {
     // that class for why the vector is rebuilt from the depth G-buffer instead of the shaded point.
     private RtImage gMotion;
     // Per-pixel world-space correction fed to the reprojection: zero for static terrain/sky, the
-    // per-frame displacement for dynamic surfaces, the lateral refraction offset for transmitted ones.
+    // lateral refraction offset for transmitted ones. FP32 on purpose: the reprojection's CURRENT end
+    // is this offset added to the depth-reconstructed point, so a half-precision round trip would put
+    // sub-fp16 rounding noise straight into the motion vector of every water and glass pixel.
     private RtImage gReprojDelta;
+    // The same surface's own per-frame world displacement (rigid entity motion, per-vertex deformation,
+    // a particle's travel, the rain sheets' UV scroll). Feeds the PREVIOUS end alone, so half precision
+    // is plenty: one frame of motion is a couple of blocks at most.
+    private RtImage gReprojDisp;
     private RtImage gSpecAlbedo;
     private RtImage gSpecMotion;
     // Primary-hit linear view depth (the denoisers' sky cutoff + NRD's IN_VIEWZ), plus the tracer's
@@ -784,6 +794,11 @@ public final class RtComposite {
     // position, read into the push constant each frame then advanced at frame end. RtWorldReprojectPipeline
     // consumes exactly these values, so the vector it builds describes the frame that actually rendered.
     private final Matrix4f mvPrevProjView = new Matrix4f();
+    // DLSS-RR history invalidation for geometry edits under a still camera (see the RR call site):
+    // the last terrain edit revision we acted on, and the view rotation it was compared against.
+    private long rrSeenGeometryRevision;
+    private final Matrix4f rrPrevViewRotation = new Matrix4f();
+    private boolean rrViewRotationValid;
     private final Matrix4f mvCurProjView = new Matrix4f();
     private final Matrix4f mvPushMatrix = new Matrix4f();
     private final Matrix4f frameInvViewProj = new Matrix4f();
@@ -1232,6 +1247,9 @@ public final class RtComposite {
         worldPipeline.setExtraStorageImage(6, gViewZ.view);
         worldPipeline.setExtraStorageImage(7, gNrdDiff.view);
         worldPipeline.setExtraStorageImage(8, gNrdSpec.view);
+        // Slot 9 is the reprojection's own-motion guide. It is bound here (rather than to the compute
+        // pass alone) because the guide pass is what produces both reprojection vectors.
+        worldPipeline.setExtraStorageImage(9, gReprojDisp.view);
     }
 
     private void destroyGuideImages() {
@@ -1254,6 +1272,10 @@ public final class RtComposite {
         if (gReprojDelta != null) {
             gReprojDelta.destroy();
             gReprojDelta = null;
+        }
+        if (gReprojDisp != null) {
+            gReprojDisp.destroy();
+            gReprojDisp = null;
         }
         if (gSpecAlbedo != null) {
             gSpecAlbedo.destroy();
@@ -1506,7 +1528,8 @@ public final class RtComposite {
         // gMotion is an OUTPUT of the world-space reprojection pass; its input guide is gReprojDelta,
         // which occupies the guide slot the tracer-written motion vector used to fill.
         gMotion = ctx.createStorageImage(renderW, renderH, VK10.VK_FORMAT_R16G16_SFLOAT, "guide motion " + renderW + "x" + renderH);
-        gReprojDelta = ctx.createStorageImage(renderW, renderH, VK10.VK_FORMAT_R16G16B16A16_SFLOAT, "guide reprojection delta " + renderW + "x" + renderH);
+        gReprojDelta = ctx.createStorageImage(renderW, renderH, VK10.VK_FORMAT_R32G32B32A32_SFLOAT, "guide reprojection delta " + renderW + "x" + renderH);
+        gReprojDisp = ctx.createStorageImage(renderW, renderH, VK10.VK_FORMAT_R16G16B16A16_SFLOAT, "guide reprojection displacement " + renderW + "x" + renderH);
         gSpecAlbedo = ctx.createStorageImage(renderW, renderH, VK10.VK_FORMAT_R16G16B16A16_SFLOAT, "guide specular albedo " + renderW + "x" + renderH);
         gSpecMotion = ctx.createStorageImage(renderW, renderH, VK10.VK_FORMAT_R16G16_SFLOAT, "guide specular motion " + renderW + "x" + renderH);
         // gViewZ is live on EVERY path: it is NRD's IN_VIEWZ and SVGF's validation guide, and it is
@@ -1573,7 +1596,8 @@ public final class RtComposite {
         } else {
             reprojectPipeline.invalidateBindings(); // same recycled-handle hazard as SVGF/NRD above
         }
-        reprojectPipeline.setImages(gViewZ.view, gReprojDelta.view, gMotion.view, output.view);
+        reprojectPipeline.setImages(gViewZ.view, gReprojDelta.view, gReprojDisp.view,
+                gMotion.view, output.view);
         // Display-res RT image the display mapper reads. Always present (DLSS-RR target, or blit-upscale fallback).
         rrOutput = ctx.createStorageImage(width, height, VK10.VK_FORMAT_R16G16B16A16_SFLOAT, "DLSS-RR output " + width + "x" + height);
         exposure.ensureResources(ctx);
@@ -1617,6 +1641,35 @@ public final class RtComposite {
         mvPrevCamY = camY;
         mvPrevCamZ = camZ;
         mvHasPrev = true;
+    }
+
+    /**
+     * Drop DLSS-RR's history for one frame when the world's geometry changed while the camera did not.
+     *
+     * <p>This is the block/sign latency fix. With correct (static) motion vectors RR's history is fully
+     * trustworthy, so new geometry is only let through by its soft depth weight — a block placed on a
+     * wall can then take dozens of frames to reach full strength, while the image everywhere else keeps
+     * accumulating. The renderer knows something RR cannot: a block edit happened this frame. When the
+     * camera is still, that edit is the only thing that could have changed the picture, so one history
+     * reset makes the new content appear immediately at the cost of a single noisier frame. While the
+     * camera moves the reset is skipped on purpose: RR is already refreshing the image, and building
+     * continuously would otherwise cost a reset every time a block lands.
+     */
+    private void maybeInvalidateRrHistoryForEdits() {
+        if (RtTerrain.currentOrNull() == null) {
+            rrViewRotationValid = false;
+            return;
+        }
+        long revision = RtTerrain.geometryRevision();
+        boolean changed = revision != rrSeenGeometryRevision;
+        rrSeenGeometryRevision = revision;
+        boolean rotated = !rrViewRotationValid || !rrPrevViewRotation.equals(frameViewRotation);
+        rrPrevViewRotation.set(frameViewRotation);
+        rrViewRotationValid = true;
+        boolean moved = mvCamDeltaX != 0f || mvCamDeltaY != 0f || mvCamDeltaZ != 0f;
+        if (changed && !moved && !rotated) {
+            RtDlssRr.INSTANCE.requestHistoryReset();
+        }
     }
 
     private void recordFrame(RtContext ctx, RtPipeline active, GpuTexture nativeColor) {
@@ -1987,14 +2040,14 @@ public final class RtComposite {
                 active.trace(cmd, renderW, renderH, pushConstants, 1);
             }
             VulkanCommandEncoder.memoryBarrier(cmd, stack); // RT writes visible to the temporal/upscale reads
-            // ---- Motion vectors: world-space reprojection (pass A's depth + guide -> gMotion).
+            // ---- Motion vectors: world-space reprojection (depth + the two guides -> gMotion).
             //
             // This is the ONLY producer of gMotion. The vector is rebuilt from this frame's linear
-            // depth guide and projected through the previous frame's view-projection, so it describes
-            // where the pixel's 3D surface point really was last frame instead of where the shaded
-            // sample's 2D projection landed. It runs after pass A (which writes the depth G-buffer and
-            // the correction guide) and before every consumer -- NRD, SVGF, DLSS-RR, FSR 3, XeSS and
-            // frame generation all read this buffer.
+            // depth guide, moved onto the point the pixel actually shows by the lateral offset guide,
+            // moved back one frame by its own-motion guide, and projected at BOTH ends -- current and
+            // previous -- so the two describe the same 3D point. It runs after pass A (which writes the
+            // depth G-buffer and the guides) and before every consumer: NRD, SVGF, DLSS-RR, FSR 3, XeSS
+            // and frame generation all read this buffer.
             try (RtDebugLabels.Scope ignored = RtDebugLabels.scope(ctx, cmd, "world reprojection");
                  RtFrameStats.Scope ignoredStats = RtFrameStats.FRAME.stage("frame.reproject")) {
                 reprojectPipeline.dispatch(cmd, renderW, renderH, pushConstants);
@@ -2062,6 +2115,9 @@ public final class RtComposite {
 
             // DLSS-RR denoise + upscale. The RT pass wrote noisy color (render res) + guides;
             // RR reads them and writes the display-res denoised result straight into rrOutput.
+            if (rrPath) {
+                maybeInvalidateRrHistoryForEdits();
+            }
             if (rrPath && RtDlssRr.INSTANCE.ensureFeature(cmd.address(), renderW, renderH, displayW, displayH)) {
                 try (RtDebugLabels.Scope ignored = RtDebugLabels.scope(ctx, cmd, "DLSS-RR evaluate");
                      RtFrameStats.Scope ignoredStats = RtFrameStats.FRAME.stage("frame.dlssRr")) {

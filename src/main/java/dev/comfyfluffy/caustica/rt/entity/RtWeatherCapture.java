@@ -10,7 +10,9 @@ import net.minecraft.util.ARGB;
 import net.minecraft.util.Mth;
 import net.minecraft.world.phys.Vec3;
 
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 
 /**
  * Vanilla rain/snow columns, captured as real ray-traced geometry.
@@ -137,6 +139,31 @@ public final class RtWeatherCapture {
 
     private boolean loggedFailure;
 
+    /**
+     * Vanilla's scrolling {@code vOffset}, remembered per column so the next frame can diff it.
+     *
+     * <p>The scroll is the ONLY thing that moves the rain: the sheets are pinned in world X/Z and their
+     * vertices never change, while {@code WeatherEffectRenderer} advances the sampled V coordinate
+     * ({@code v = y * 0.25 + vOffset}). A capture that only diffs vertex positions therefore reports a
+     * zero displacement — which is exactly why the streaks froze into static lines the moment the camera
+     * stopped, because a zero motion vector tells every temporal filter that the pattern is still there.
+     * Diffing the columns' own vOffset yields the apparent motion in the units the renderer needs.
+     */
+    private final Map<Long, Float> prevRainScroll = new HashMap<>();
+    private final Map<Long, Float> prevSnowScroll = new HashMap<>();
+    /** Apparent world-space fall of this frame's sheets, in blocks (negative = downward). */
+    private float rainDispY;
+    private float snowDispY;
+    /** Vertices the rain pass emitted in the last {@link #capture} call; the rest of the range is snow. */
+    private int lastRainVertices;
+
+    /**
+     * Blocks of world space covered by one unit of texture V. Vanilla samples
+     * {@code v = y * 0.25 + vOffset}, so a full V unit of scroll is four blocks of vertical travel —
+     * the constant that turns the UV animation into a world-space displacement.
+     */
+    private static final float BLOCKS_PER_V = 4.0f;
+
     private RtWeatherCapture() {
         for (int z = 0; z < RAIN_TABLE_SIZE; z++) {
             for (int x = 0; x < RAIN_TABLE_SIZE; x++) {
@@ -217,10 +244,16 @@ public final class RtWeatherCapture {
         // clip are kept — and their alpha is stochastic coverage.
         capture.currentPrimFlags = RtEntityCapture.PRIM_FLAG_WEATHER;
         capture.currentGlintArmorSlot = 0; // weather never carries a glint armour context
+        // Measure the sheets' apparent motion BEFORE emitting: the displacement every rain vertex gets
+        // is this frame's texture scroll, not a vertex delta (see prevRainScroll).
+        rainDispY = scrollDisplacementY(state.rainColumns, prevRainScroll);
+        snowDispY = scrollDisplacementY(state.snowColumns, prevSnowScroll);
         try {
             // Rain is a water droplet and gets the refractive branch in raygen.
+            int rainVertexStart = capture.verts.size() / 3;
             captured += captureColumns(capture, out, state.rainColumns, camPos, RAIN_MAX_ALPHA,
                     state.radius, intensity, RAIN_LOCATION, budget - captured);
+            lastRainVertices = capture.verts.size() / 3 - rainVertexStart;
             // Snow shares the capture and coverage rules but not the optics: the extra tag keeps raygen
             // out of the droplet branch, because a flake scatters light diffusely instead of bending it.
             capture.currentPrimFlags = RtEntityCapture.PRIM_FLAG_WEATHER
@@ -296,6 +329,74 @@ public final class RtWeatherCapture {
             return null;
         }
         return mc.gameRenderer.gameRenderState().levelRenderState.weatherRenderState;
+    }
+
+    /**
+     * This frame's apparent world-space fall of the RAIN sheets, in blocks (negative = downward).
+     *
+     * <p>Written per vertex into the particle displacement buffer by {@code RtEntities}, which is what
+     * turns the UV scroll into the motion vector the reprojection consumes. Zero when the scroll could
+     * not be measured this frame (first frame of a storm, a dimension change, a long pause), which
+     * degrades to the old stationary behaviour instead of inventing a teleport.
+     */
+    public float frameRainDispY() {
+        return rainDispY;
+    }
+
+    /** Same as {@link #frameRainDispY} for the snow sheets. */
+    public float frameSnowDispY() {
+        return snowDispY;
+    }
+
+    /** Vertices the rain pass emitted in the last {@link #capture} call; the rest of the range is snow. */
+    public int lastRainVertices() {
+        return lastRainVertices;
+    }
+
+    /**
+     * Turn the columns' V scroll into the world-space vertical displacement of the pattern.
+     *
+     * <p>With {@code v = y * 0.25 + vOffset}, a feature pinned at texture coordinate {@code V0} sits at
+     * {@code y = 4 * (V0 - vOffset)}. So one unit of scroll is four blocks of travel, and an increasing
+     * vOffset moves the pattern DOWN (negative Y) — which is the direction rain actually falls.
+     *
+     * <p>Columns are keyed by their (x, z) so the diff survives the camera crossing a chunk border (the
+     * list is rebuilt with new coordinates every frame, and neighbouring columns are not comparable).
+     * A jump larger than a quarter tile is not a scroll: vanilla wraps vOffset, and a pause or dimension
+     * change restarts it. Those report zero rather than a one-frame teleport.
+     */
+    private static float scrollDisplacementY(List<WeatherEffectRenderer.ColumnInstance> columns,
+                                             Map<Long, Float> prev) {
+        if (columns == null || columns.isEmpty()) {
+            prev.clear();
+            return 0.0f;
+        }
+        float delta = 0.0f;
+        boolean measured = false;
+        Map<Long, Float> cur = new HashMap<>(Math.max(16, columns.size() * 2));
+        for (WeatherEffectRenderer.ColumnInstance column : columns) {
+            long key = ((long) column.x() << 32) ^ (column.z() & 0xFFFFFFFFL);
+            float v = column.vOffset();
+            Float previous = prev.get(key);
+            if (!measured && previous != null) {
+                float d = v - previous;
+                // Vanilla keeps vOffset in [0, 1); an unwrapped negative step is the wrap, not motion.
+                if (d < -0.5f) {
+                    d += 1.0f;
+                } else if (d > 0.5f) {
+                    d -= 1.0f;
+                }
+                if (Math.abs(d) <= 0.25f) {
+                    delta = d;
+                    measured = true;
+                }
+            }
+            cur.put(key, v);
+        }
+        prev.clear();
+        prev.putAll(cur);
+        // Downward is negative Y: the pattern moves toward -Y as vOffset advances.
+        return measured ? -BLOCKS_PER_V * delta : 0.0f;
     }
 
     /**
