@@ -133,15 +133,33 @@ O raster escapa disso com um depth clear; um closest-hit não tem alavanca equiv
 do qual o braço passa ganharia o hit e abriria um buraco na mão. `traceViewmodelOverlay(ro, rd)` em
 `trace.slang` roda **depois** do trace primário dos dois raygens (no `world.rgen` com `bounce == 0`) e:
 
-- não faz nada se `worldPush.viewmodel.x == 0` (nenhum viewmodel neste frame) ou se o hit do mundo está
-  além do alcance da mão;
+- não faz nada se `worldPush.viewmodel.x == 0` (nenhum viewmodel neste frame), nem se o hit já é do
+  viewmodel (guarda de recursão), nem se a direção do raio está fora do cone do capture (abaixo);
 - senão re-traça o mesmo raio com máscara `0x08` e `tmax = reach` contra a geometria da mão, e nada mais;
-- se errar, **restaura** o payload salvo antes (inclusive a radiância do céu), para que um pixel de céu
-  sem mão não pague nem perca nada.
+- um hit **substitui** o resultado do mundo sem nenhuma comparação de distância;
+- se errar, **restaura** o payload salvo antes (inclusive a radiância do céu), para que um pixel sem mão
+  não pague nada a mais nem perca nada.
 
-`reach` é a maior distância ao olho de um vértice **posicionado** (após a transformada, então o dolly
-conta) mais uma folga de 0.02, publicada no WorldPush pelo `RtComposite` depois de
-`RtEntities.beginFrame` — ou seja, é o alcance do mesh que está de fato no TLAS deste frame.
+### Por que a distância do hit do mundo não entra na decisão
+
+Parece óbvio economizar: "se o mundo parou longe da mão, a mão não pode estar aqui". É o inverso da regra.
+O hit do mundo estar **além** do alcance da mão é justamente o caso comum em que a mão cobre a tela — céu,
+chão, parede a dois blocos. Um portão assim faria a mão aparecer só contra o céu e sumrir diante de tudo
+que está perto, que é o que o raster **nunca** fez: com o depth clear a mão ganha sempre que cobre um
+pixel, e um bloco a 0,3 do olho não tem prioridade sobre ela. Então a ordenação por distância está fora;
+`RtViewmodelRayTracingTest` fixa isso como asserção negativa (o código correto tem a forma "não existe esse
+teste").
+
+O que paga a conta é **direção**, não distância: `reach` continua sendo a maior distância ao olho de um
+vértice **posicionado** (após o dolly, então a malha dolliada conta) mais uma folga de 0.02, e o cone que
+contém a direção de todos os vértices do capture vai em `worldPush.viewmodelCull` (`xyz` = eixo unitário,
+`w` = cosseno do semi-ângulo). Um raio fora do cone não pode tocar a mão — o cone é construído como o
+fechamento das direções dos vértices em torno da média delas, triângulos são combinações positivas dessas
+direções e um cone convexo é fechado sob combinação positiva, então a conservatividade é garantida e só
+falha para mais (há ~2° de folga para não comer a silhueta). Se o capture não consegue se limitar — sem
+vértices utilizáveis, uma pose que wraps ao redor do olho, um resultado não-finito — ele publica `w = -1`,
+que o shader lê como "sem limite, traça sempre". O `RtComposite` publica os dois depois de
+`RtEntities.beginFrame`, do mesh que está de fato no TLAS deste frame.
 
 ## Identidade por geometria, não por tipo de instância
 

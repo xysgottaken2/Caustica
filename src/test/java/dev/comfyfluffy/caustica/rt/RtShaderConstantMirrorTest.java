@@ -148,7 +148,8 @@ final class RtShaderConstantMirrorTest {
         // the rain/underwater feature set travel in. Removing one would still compile (the generated
         // record just loses a component) but would silently drop a feature, so pin them here.
         for (String field : new String[] {"weather", "dimension", "featureFlags",
-                "surfaceWetness", "rainEffects", "underwaterEffects", "lightning", "viewmodel"}) {
+                "surfaceWetness", "rainEffects", "underwaterEffects", "lightning", "viewmodel",
+                "viewmodelCull"}) {
             assertTrue(Pattern.compile("^\\s*public\\s+\\S+\\s+" + field + "\\s*;", Pattern.MULTILINE)
                             .matcher(slang).find(),
                     "WorldPush is missing the '" + field + "' field");

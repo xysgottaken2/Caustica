@@ -1897,10 +1897,13 @@ public final class RtComposite {
                             (float) (lightning.y() - terrain.blockY),
                             (float) (lightning.z() - terrain.blockZ), lightning.intensity()),
                     // The ray-traced viewmodel's trailing lane, written after RtEntities.beginFrame has
-                    // instanced this frame's capture: x = how far the hand reaches from the eye, which is
-                    // what bounds (and cheapens) the shaders' above-blocks re-trace. Zero when the entity
-                    // frame did not take the capture, so the overlay pass switches itself off.
-                    new Float4(RtViewmodel.INSTANCE.frameOverlayReach(), 0.0f, 0.0f, 0.0f)
+                    // instanced this frame's capture: x = how far the hand reaches from the eye, which bounds
+                    // the shaders' above-blocks re-trace's tmax. Zero when the entity frame did not take the
+                    // capture, so the overlay pass switches itself off.
+                    new Float4(RtViewmodel.INSTANCE.frameOverlayReach(), 0.0f, 0.0f, 0.0f),
+                    // ...and the cone that decides which pixels are even candidates for it, so the re-trace
+                    // stays off the majority of the screen instead of off "pixels where the world is far".
+                    RtViewmodel.INSTANCE.frameOverlayCull()
             ).write(push);
             int flushBytes = Math.max(WORLD_PUSH_SIZE, READY_MASK_OFFSET + readyMaskBytes);
             if (cloudCellsAddress != 0L) {

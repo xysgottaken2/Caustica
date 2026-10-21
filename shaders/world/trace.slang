@@ -102,24 +102,34 @@ public void traceGuide(uint cullMask, float3 ro, float tmin, float3 rd, float tm
 // Above-blocks layer for the ray-traced first-person viewmodel, called on primary rays only.
 //
 // Vanilla's hand pass gets "always in front of the world" from a depth clear; a closest-hit shader has no
-// such lever, so a block the arm is swinging through would win the hit and punch a hole in the hand.
-// Instead, any primary ray that stopped nearer than the viewmodel's own reach (or missed entirely, which is
-// where the hand is most visible) is re-run against viewmodel geometry only. A hit there replaces the world
-// result — the hand's shading, its motion vector and its material all come from the traced surface now —
-// and a miss restores exactly what the world trace had written, so pixels without the hand pay nothing but
-// this check.
+// such lever, so a block the arm is swinging through — or a wall the camera is pressed against, or the floor
+// you look down at, which is most of gameplay — would win the hit and punch a hole in the hand. So every
+// primary ray is re-run against viewmodel geometry only. A hit there replaces the world result unconditionally
+// — the hand's shading, its motion vector and its material all come from the traced surface now — and a miss
+// restores exactly what the world trace had written.
 //
-// The trace is bounded by the reach in both directions: tmax is the reach itself, so no BVH work happens
-// beyond it, and the mask admits a single small instance. It ends in MISS_GUIDE rather than MISS_RADIANCE
-// because the atmosphere march's result would be discarded on a miss, and because the guide miss leaves the
-// hitT sentinel negative — which is precisely how the restore below detects "no hand along this ray".
+// Deliberately, the world hit's distance is not consulted. It cannot rank the two layers: the viewmodel is an
+// overlay, so the hand wins even where the block in front of it is nearer, and a gate of the form "only
+// re-trace when the world stopped far away" would do the exact inverse of the rule — it would show the hand
+// against the sky and hide it behind every wall. What bounds the cost instead is direction: the capture
+// publishes the cone that encloses the direction of every one of its vertices, and because a triangle's
+// directions from the eye are positive combinations of its vertices' directions, a ray outside that cone
+// cannot touch the hand at all and skips the trace. Inside it, the trace is bounded by tmax = the reach, so
+// no BVH work happens beyond the near field, and the mask admits a single small instance.
+//
+// It ends in MISS_GUIDE rather than MISS_RADIANCE because the atmosphere march's result would be discarded on
+// a miss anyway, and because the guide miss leaves the hitT sentinel negative — which is precisely how the
+// restore below detects "no hand along this ray".
 public void traceViewmodelOverlay(float3 ro, float3 rd) {
     float reach = worldPush.viewmodel.x;
     if (reach <= 0.0 || (payload.flags & PAYLOAD_VIEWMODEL) != 0u) {
         return;
     }
-    float hitT = payload.hitT;
-    if (hitT >= reach) {
+    float4 viewmodelCull = worldPush.viewmodelCull;
+    // cos(halfAngle) <= -1 means the capture declined to bound itself (a degenerate or wrap-around pose, or
+    // geometry around the eye), in which case every direction is a candidate. Scaled by |rd| so the test
+    // compares angles rather than trusting the caller's normalisation.
+    if (viewmodelCull.w > -1.0 && dot(rd, viewmodelCull.xyz) < viewmodelCull.w * length(rd)) {
         return;
     }
     Payload worldHit = payload;

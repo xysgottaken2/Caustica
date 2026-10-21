@@ -204,11 +204,15 @@ public struct WorldPush {
     // in terrain-rebased world blocks, w = momentary flash intensity (0 when inactive).
     public float4   lightning;
     // Ray-traced first-person viewmodel overlay. x = the largest distance from the eye any captured hand
-    // vertex reached this frame in blocks (0 = no viewmodel geometry in this frame's TLAS), which is what
-    // lets traceViewmodelOverlay skip its extra trace on every pixel that cannot possibly contain the hand,
-    // and to bound that trace's tmax. yzw are reserved for the viewmodel's own controls (fade, per-eye
-    // offset) so adding them costs no offset shift. Trailing lane; the generated WorldPushData appends it.
+    // vertex reached this frame in blocks, which is what bounds the overlay trace's tmax; 0 = no viewmodel
+    // geometry in this frame's TLAS, which switches the pass off entirely. yzw are reserved for the
+    // viewmodel's own controls (fade, per-eye offset) so adding them costs no offset shift.
     public float4   viewmodel;
+    // Conservative directional bound for that same overlay: xyz = a unit axis, w = the cosine of the half
+    // angle of the cone around it that contains the direction of every captured vertex. A primary ray outside
+    // it cannot hit the hand and skips the trace; -1 (or lower) means "no bound this frame, always trace".
+    // Trailing lanes; the generated WorldPushData appends them, so nothing above shifts.
+    public float4   viewmodelCull;
 };
 
 // worldPush.dimension: the sky/lighting model this frame renders with. The Overworld runs the full

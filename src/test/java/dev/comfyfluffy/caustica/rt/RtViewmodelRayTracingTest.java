@@ -10,6 +10,7 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -132,16 +133,28 @@ final class RtViewmodelRayTracingTest {
     }
 
     /**
-     * Above-blocks layering: primary rays only, bounded by the reach the frame published, and rolled back
-     * when the extra trace finds nothing.
+     * Above-blocks layering: primary rays only, never ranked against the world hit's distance (the hand wins
+     * where it covers, as it does in vanilla), bounded by the reach and the cone the frame published, and
+     * rolled back when the extra trace finds nothing.
      */
     @Test
     void aboveBlocksLayerRunsOnPrimaryRaysOnly() throws IOException {
         String trace = Files.readString(TRACE);
         String overlay = slice(trace, "public void traceViewmodelOverlay(float3 ro, float3 rd)", "\n}\n");
         assertTrue(overlay.contains("worldPush.viewmodel.x"), "the pass must switch itself off at reach 0");
-        assertTrue(overlay.contains("if (hitT >= reach)"),
-                "pixels whose world hit is beyond the hand must not pay for the extra trace");
+        // The viewmodel is an overlay, so the hand wins wherever it covers a primary ray no matter how near the
+        // block in front of it was — a gate on the world hit's distance inverts that (it shows the hand against
+        // the sky and hides it behind every wall and every floor you look down at). Pinned as a negative
+        // because the shape of the correct code is "there is no such test".
+        assertFalse(overlay.contains("payload.hitT") && overlay.indexOf("payload.hitT") < overlay.indexOf("TraceRay"),
+                "the overlay must not rank itself against the world hit before tracing");
+        for (String forbidden : new String[] {"hitT >= reach", "hitT < reach", "hitT > reach"}) {
+            assertFalse(overlay.contains(forbidden), "distance gate reappeared: " + forbidden);
+        }
+        // Cost is instead bounded by direction, and only ever conservatively: a cosine of -1 always traces.
+        assertTrue(overlay.contains("worldPush.viewmodelCull") && overlay.contains("viewmodelCull.w > -1.0"),
+                "the extra trace must be gated by the capture's own directional bound, with the permissive "
+                        + "sentinel favouring tracing over culling");
         assertTrue(overlay.contains("Payload worldHit = payload;") && overlay.contains("payload = worldHit;"),
                 "a viewmodel miss must restore the world/sky payload, not leave the ray traced at sky radiance");
         assertTrue(overlay.contains("MISS_GUIDE"),
@@ -162,10 +175,19 @@ final class RtViewmodelRayTracingTest {
         String composite = Files.readString(COMPOSITE);
         assertTrue(composite.contains("new Float4(RtViewmodel.INSTANCE.frameOverlayReach(), 0.0f, 0.0f, 0.0f)"),
                 "worldPush.viewmodel must carry the reach, and only when the frame really instanced the hand");
+        assertTrue(composite.contains("RtViewmodel.INSTANCE.frameOverlayCull()"),
+                "worldPush.viewmodelCull must come from the same frame's capture, or a stale cone would cull a "
+                        + "new pose off the screen");
+        String viewmodel = Files.readString(VIEWMODEL);
+        assertTrue(viewmodel.contains("cullCos = -1.0f;"),
+                "a capture that cannot bound itself must publish the always-trace sentinel");
+        assertInOrder(viewmodel, "applyHudDolly(cameraState.viewRotationMatrix, hudDepthScale(cameraState));",
+                "overlayBounds(vertices);", "pending = true;");
         assertInOrder(composite, "RtEntities.INSTANCE.beginFrame(ctx, staticInstances,",
                 "new WorldPushData(");
         String common = Files.readString(WORLD_COMMON);
-        assertInOrder(common, "public float4   lightning;", "public float4   viewmodel;", "};");
+        assertInOrder(common, "public float4   lightning;", "public float4   viewmodel;",
+                "public float4   viewmodelCull;", "};");
     }
 
     /** Vanilla's hand is cancelled only for the one submission we replaced, and only with the mesh on screen. */

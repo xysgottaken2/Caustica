@@ -45,8 +45,8 @@ public PathSegment tracePrimary(PathSegment seg,
         traceRadiance(CULL_PRIMARY, ro, 0.0, rd, 10000.0,
                       showCelestial, medium.current.water, rayConeWidth, rayConeSpread);
         // The hand has to be layered over the world here, before the miss/guide branches below read the
-        // hit: a ray that stopped inside the viewmodel's reach (or found only sky) may really be a viewmodel
-        // pixel. See traceViewmodelOverlay in trace.slang.
+        // hit: any primary ray may really be a viewmodel pixel — including one that hit a block nearer than
+        // the arm, which the hand still draws over. See traceViewmodelOverlay in trace.slang.
         traceViewmodelOverlay(ro, rd);
 
         if (payload.hitT < 0.0) {

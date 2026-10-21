@@ -5,6 +5,7 @@ import dev.comfyfluffy.caustica.CausticaConfig;
 import dev.comfyfluffy.caustica.CausticaMod;
 import dev.comfyfluffy.caustica.rt.RtComposite;
 import dev.comfyfluffy.caustica.rt.RtFrameStats;
+import dev.comfyfluffy.caustica.rt.gen.WorldPushData.Float4;
 import it.unimi.dsi.fastutil.floats.FloatArrayList;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.renderer.FirstPersonHandsAndItemsRenderer;
@@ -64,11 +65,14 @@ import org.joml.Matrix4f;
  *       inside would throw a hard shadow across the item it holds.
  *   <li><b>It layers above the blocks it clips into.</b> The raster pass gets away with a depth clear; a
  *       closest-hit shader has no such thing, so a block the arm swings through would win the hit and punch a
- *       hole in the hand. {@code traceViewmodelOverlay} in {@code trace.slang} re-traces a primary ray that
- *       stopped nearer than the viewmodel's own reach against viewmodel geometry only, and a hit there
- *       replaces the world hit. {@link #frameOverlayReach()} publishes that bound through
- *       {@code worldPush.viewmodel.x}, so the extra trace costs nothing on the pixels where nothing is that
- *       close, and is skipped entirely on frames without a hand.
+ *       hole in the hand. {@code traceViewmodelOverlay} in {@code trace.slang} therefore re-traces <em>every
+ *       primary ray</em> against viewmodel geometry only, and a hit there replaces the world hit however near
+ *       the block in front of it was: ranking the two by distance would invert the rule, because it is exactly
+ *       the close blocks (a wall you are facing, the floor you are looking down at) that would otherwise eat
+ *       the hand. What makes that affordable is direction, not distance — {@link #frameOverlayCull()}
+ *       publishes the cone enclosing every captured vertex direction ({@code worldPush.viewmodelCull}) and a
+ *       ray outside it cannot touch the hand — while {@link #frameOverlayReach()} both bounds the trace's tmax
+ *       and switches the pass off on frames without a hand ({@code worldPush.viewmodel}).
  * </ul>
  *
  * <h2>Failure policy</h2>
@@ -136,6 +140,14 @@ public final class RtViewmodel {
     private boolean loggedFailure;
     private int consecutiveFailures;
     private float overlayReach;
+    /**
+     * Enclosing cone of this capture's vertex directions, in world space (and therefore independent of
+     * rebasing, which translates rays' origins but not their directions): axis plus the cosine of the half
+     * angle, {@code -1} when the capture declined to bound itself. Consumed by {@code traceViewmodelOverlay}
+     * as the one cheap test allowed to skip a hand pixel — see {@link #frameOverlayCull()}.
+     */
+    private float cullX, cullY, cullZ;
+    private float cullCos = -1.0f;
     private double camX, camY, camZ;
 
     private RtViewmodel() {
@@ -230,7 +242,7 @@ public final class RtViewmodel {
         camY = cameraState.pos.y;
         camZ = cameraState.pos.z;
         applyHudDolly(cameraState.viewRotationMatrix, hudDepthScale(cameraState));
-        overlayReach = overlayReach(vertices);
+        overlayBounds(vertices);
         pending = true;
         consecutiveFailures = 0;
         // Only the very next submission is ours to suppress — the one renderItemInHand is about to make.
@@ -296,6 +308,20 @@ public final class RtViewmodel {
     }
 
     /**
+     * The directional bound that goes with {@link #frameOverlayReach()}: {@code xyz} a unit axis, {@code w} the
+     * cosine of the half angle of the cone enclosing every vertex direction of the instanced capture. Frames
+     * that did not instance a capture publish {@code (0, 0, 0, -1)} — a zero-length axis with a permissive
+     * cosine, so the worst a mismatch could ever do is trace for a hand that is not there, never cull one that
+     * is.
+     */
+    public Float4 frameOverlayCull() {
+        if (!instancedThisFrame) {
+            return new Float4(0.0f, 0.0f, 0.0f, -1.0f);
+        }
+        return new Float4(cullX, cullY, cullZ, cullCos);
+    }
+
+    /**
      * Per-vertex motion vectors for the captured mesh, in one atomic step: the world displacement of each
      * vertex since the previous frame, in the <em>current</em> frame's rebased space, then the history is
      * rotated so the next frame can diff against it. A viewmodel is camera-locked, so its screen position
@@ -340,22 +366,66 @@ public final class RtViewmodel {
     }
 
     /**
-     * The largest distance from the eye any vertex of this capture reaches, plus slack. Computed after
-     * {@link #applyHudDolly} so the bound describes what the tracer will actually see: the dollied mesh is
-     * nearer or further depending on where the camera is looking, and a reach measured on the raw capture
-     * would let the overlay pass miss the hand it exists to find.
+     * Publishes the two bounds {@code traceViewmodelOverlay} runs on: how far the capture reaches from the eye
+     * (its tmax, and the "there is a hand this frame" flag) and the cone enclosing all of its vertex
+     * directions (the test that lets the rest of the screen skip the trace entirely). Both are measured after
+     * {@link #applyHudDolly}, so they describe the mesh the tracer will actually see, not the one vanilla
+     * emitted.
+     *
+     * <p>The cone is conservative and only ever widens: the axis is the mean vertex direction and the half
+     * angle the widest direction from it, so every vertex is inside by construction, and a triangle's directions
+     * from the eye are positive combinations of its three vertices' directions, which a convex cone is closed
+     * under — so whole triangles are inside too. Any degeneracy (no usable vertices, a pose wrapped around the
+     * eye whose mean cancels, a non-finite result) leaves the cosine at {@code -1}, which the shader reads as
+     * "no bound, always trace".
      */
-    private float overlayReach(int vertices) {
+    private void overlayBounds(int vertices) {
         float[] p = capture.verts.elements();
+        cullCos = -1.0f;
         float max = 0.0f;
+        float sx = 0.0f;
+        float sy = 0.0f;
+        float sz = 0.0f;
         for (int i = 0; i < vertices; i++) {
             float x = p[i * 3], y = p[i * 3 + 1], z = p[i * 3 + 2];
             float d = (float) Math.sqrt(x * x + y * y + z * z);
             if (d > max) {
                 max = d;
             }
+            if (d > 1.0e-4f) {
+                sx += x / d;
+                sy += y / d;
+                sz += z / d;
+            }
         }
-        return max <= 0.0f ? 0.0f : max + REACH_EPSILON;
+        overlayReach = max <= 0.0f ? 0.0f : max + REACH_EPSILON;
+        float axisLength = (float) Math.sqrt(sx * sx + sy * sy + sz * sz);
+        if (axisLength < 0.5f) {
+            return; // too few usable directions, or they cancel: bound nothing rather than bound wrongly
+        }
+        float inv = 1.0f / axisLength;
+        cullX = sx * inv;
+        cullY = sy * inv;
+        cullZ = sz * inv;
+        float minDot = 1.0f;
+        for (int i = 0; i < vertices; i++) {
+            float x = p[i * 3], y = p[i * 3 + 1], z = p[i * 3 + 2];
+            float d = (float) Math.sqrt(x * x + y * y + z * z);
+            if (d <= 1.0e-4f) {
+                continue;
+            }
+            float dot = (x * cullX + y * cullY + z * cullZ) / d;
+            if (dot < minDot) {
+                minDot = dot;
+            }
+        }
+        if (!Float.isFinite(minDot)) {
+            cullCos = -1.0f;
+            return;
+        }
+        // Slack of about two degrees: the bound is tested against ray directions, and a silhouette pixel just
+        // outside would clip the hand's own edge.
+        cullCos = Math.clamp(minDot * 0.999f - 0.03f, -1.0f, 1.0f);
     }
 
     /**
