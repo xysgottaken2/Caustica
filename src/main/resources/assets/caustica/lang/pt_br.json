@@ -102,8 +102,6 @@
 	"caustica.options.rt.handFov.tooltip": "Faz a mão e o item em primeira pessoa seguirem o FOV do jogo. Ativado, um FOV maior afasta o braço e um FOV menor o aproxima. Desativado, retorna ao FOV fixo da mão do Minecraft original.",
 	"caustica.options.rt.viewmodelRayTraced": "Modelo de visão com ray tracing",
 	"caustica.options.rt.viewmodelRayTraced.tooltip": "Desenha a mão e o item segurado dentro da cena traçada, em vez de por cima dela: um bloco segurado ganha relevo com POM, itens luminosos iluminam o mundo e o braço recebe a iluminação do cenário. Ele não projeta sombra, ignora a sombra do próprio jogador e continua acima dos blocos com que esbarra. Requer o path tracer do mundo e custa um upload de malha e uma compilação de BLAS a cada quadro; a mão também passa a viver na imagem do mundo (que pode estar escalada), então pode ficar um pouco mais suave que a do vanilla. Desligado por padrão.",
-	"caustica.options.rt.viewmodelMatchHudFov": "Corresponder ao FOV da mão",
-	"caustica.options.rt.viewmodelMatchHudFov.tooltip": "Mantém a mão traçada do tamanho que o vanilla desenha. A mão costuma ser rasterizada pela sua própria projeção fixa de 70 graus, enquanto a geometria traçada segue o FOV do jogo — com um FOV maior o braço encolheria. Isso aproxima ou afasta a mão para compensar, o mesmo compromisso de um controle de FOV do viewmodel. Desativado, a mão escala com o mundo como qualquer item segurado.",
 	"caustica.options.rt.hdr": "Saída HDR",
 	"caustica.options.rt.hdr.tooltip": "Apresenta em HDR (ST.2084/PQ) em vez de SDR quando a tela oferece suporte. Entra em vigor após reiniciar o jogo.",
 	"caustica.options.rt.hdrPaperWhite": "Branco de papel HDR",

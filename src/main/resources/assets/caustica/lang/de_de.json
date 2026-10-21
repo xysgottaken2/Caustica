@@ -102,8 +102,6 @@
 	"caustica.options.rt.handFov.tooltip": "Lässt die Hand und das gehaltene Item in der Ego-Perspektive dem Sichtfeld des Spiels folgen. An: Ein größeres Sichtfeld schiebt den Arm weiter weg, ein kleineres holt ihn näher heran. Aus: stellt das feste Sichtfeld der Hand wieder her.",
 	"caustica.options.rt.viewmodelRayTraced": "Raytraced-Viewmodel",
 	"caustica.options.rt.viewmodelRayTraced.tooltip": "Zeichnet Hand und gehaltener Gegenstand innerhalb der geraytraceten Szene statt darüber: Ein gehaltener Block erhält Relief durch POM, leuchtende Gegenstände beleuchten die Welt, und der Arm nimmt die Szenenbeleuchtung an. Er wirft keine Schatten, ignoriert den Schatten des Spielers und liegt weiterhin über den Blöcken, durch die er schwingt. Benötigt den Welt-Pfadtracer und kostet pro Bild einen Mesh-Upload sowie eine Beschleunigungsstruktur-Erzeugung; die Hand lebt zudem im (ggf. skalierten) Weltbild und kann etwas weicher wirken als in Vanilla. Standardmäßig aus.",
-	"caustica.options.rt.viewmodelMatchHudFov": "Hand-FOV angleichen",
-	"caustica.options.rt.viewmodelMatchHudFov.tooltip": "Hält die geraytracete Hand so groß wie Vanilla sie zeichnet. Die Hand wird normalerweise durch eine eigene feste 70-Grad-Projektion gerastert, die geraytracete Geometrie folgt dagegen dem Spiel-FOV – bei größerem FOV würde der Arm schrumpfen. Diese Option rückt die Hand näher oder weiter weg, um das auszugleichen. Aus: die Hand skaliert mit der Welt wie jeder gehaltene Gegenstand.",
 	"caustica.options.rt.hdr": "HDR-Ausgabe",
 	"caustica.options.rt.hdr.tooltip": "Gibt, wenn der Bildschirm es unterstützt, in HDR (ST.2084/PQ) statt SDR aus. Wird nach einem Neustart des Spiels wirksam.",
 	"caustica.options.rt.hdrPaperWhite": "HDR Paper White",

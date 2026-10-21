@@ -6,13 +6,9 @@ import dev.comfyfluffy.caustica.CausticaMod;
 import dev.comfyfluffy.caustica.rt.RtComposite;
 import dev.comfyfluffy.caustica.rt.RtFrameStats;
 import dev.comfyfluffy.caustica.rt.gen.WorldPushData.Float4;
-import it.unimi.dsi.fastutil.floats.FloatArrayList;
-import net.minecraft.client.Minecraft;
 import net.minecraft.client.renderer.FirstPersonHandsAndItemsRenderer;
 import net.minecraft.client.renderer.state.level.CameraRenderState;
 import net.minecraft.client.renderer.state.level.PlayerRenderState;
-import net.minecraft.util.Mth;
-import org.joml.Matrix4f;
 
 /**
  * The first-person viewmodel — the arm plus whatever is held in it — as real ray-traced geometry.
@@ -43,14 +39,14 @@ import org.joml.Matrix4f;
  * space the tracer works in. The TLAS instance is therefore a pure translation by
  * {@code camera − rebaseOrigin}, and no rotation is baked into geometry that the hit shaders also rotate.
  *
- * <p>The one remaining difference from vanilla is the projection: the hand is rastered through a fixed
- * 70-degree 3d-HUD projection (modulated by {@code hand.fov-follows-camera}) while the traced world uses the
- * level projection. Two projections that differ only in vertical scale agree on the image of a point iff its
- * view depth is scaled by the ratio of their tangents — a dolly, i.e. the same trade between apparent size
- * and distance a viewmodel-FOV slider makes. {@link #applyHudDolly} bakes that into the captured positions
- * (and, with the inverse-transpose, the captured normals) rather than into the instance transform: under a
- * non-uniform scale the correct normal transform is not the position transform, and the hit shaders apply
- * the position one. Keeping the instance a translation dodges the question entirely and keeps
+ * <p>The hand's <em>size</em> is left to the world's own projection, which is what an object held in the world
+ * does: the traced hand scales with the level FOV exactly as the terrain behind it does, and reconciling that
+ * with vanilla's separate 3d-HUD projection is the job of the existing {@code hand.fov-follows-camera} toggle
+ * rather than a second one here. An earlier revision additionally dollied the capture's view depth by the
+ * ratio of the two projections' tangents, and it is gone on purpose: at the default 70-degree FOV it was a
+ * no-op, and away from the default it "fixed" apparent size by compressing one axis of the mesh — which
+ * stretches parallax relief, moves the surface the fog and the focal plane measure, and makes the arm read as
+ * a different object every time the player sprints. Keeping the instance a pure translation also keeps
  * {@code entityO2w} the no-op it is for every other per-frame-built entity.
  *
  * <h2>The three rules that make it a viewmodel instead of a second player</h2>
@@ -97,27 +93,11 @@ public final class RtViewmodel {
     /** Slack on the published reach so a hit at the hand's own surface depth never ties past it. */
     private static final float REACH_EPSILON = 0.02f;
 
-    /**
-     * Bounds on the HUD dolly. A positive scale can never move a vertex across the eye plane (it shrinks or
-     * grows |view depth| without changing its sign), so this is not a clipping guard but a taste guard: below
-     * 0.35 the arm is uncomfortably close to the face and above 2.5 the compensation has warped it into
-     * something that no longer reads as a hand. Outside the bound the compensation is dropped and the
-     * geometry keeps vanilla's world scale.
-     */
-    private static final float MIN_DOLLY = 0.35f;
-    private static final float MAX_DOLLY = 2.5f;
-
-    /** Below this the dolly is a no-op and the capture is left exactly as vanilla emitted it. */
-    private static final float DOLLY_EPSILON = 1.0e-4f;
-
     /** Consecutive capture failures after which the feature stays off for the rest of the session. */
     private static final int FAILURE_LATCH_THRESHOLD = 3;
 
     /** Mirrors world_common.slang's ENTITY_GEOM_VIEWMODEL: the entity geometry-table entry's kind lane. */
     public static final int GEOM_FLAG_VIEWMODEL = 1;
-
-    /** Vanilla's fixed viewmodel FOV, per {@code Camera.calculateHudFov()} — see GameRendererMixin. */
-    private static final float VANILLA_HAND_FOV = 70.0f;
 
     private final RtEntityCapture capture = new RtEntityCapture();
     private final RtEntityCollector collector = new RtEntityCollector();
@@ -241,7 +221,6 @@ public final class RtViewmodel {
         camX = cameraState.pos.x;
         camY = cameraState.pos.y;
         camZ = cameraState.pos.z;
-        applyHudDolly(cameraState.viewRotationMatrix, hudDepthScale(cameraState));
         overlayBounds(vertices);
         pending = true;
         consecutiveFailures = 0;
@@ -368,9 +347,9 @@ public final class RtViewmodel {
     /**
      * Publishes the two bounds {@code traceViewmodelOverlay} runs on: how far the capture reaches from the eye
      * (its tmax, and the "there is a hand this frame" flag) and the cone enclosing all of its vertex
-     * directions (the test that lets the rest of the screen skip the trace entirely). Both are measured after
-     * {@link #applyHudDolly}, so they describe the mesh the tracer will actually see, not the one vanilla
-     * emitted.
+     * directions (the test that lets the rest of the screen skip the trace entirely). Both are measured on the
+     * mesh exactly as it is instanced, so they describe what the tracer will see rather than what some other
+     * frame emitted.
      *
      * <p>The cone is conservative and only ever widens: the axis is the mean vertex direction and the half
      * angle the widest direction from it, so every vertex is inside by construction, and a triangle's directions
@@ -426,97 +405,6 @@ public final class RtViewmodel {
         // Slack of about two degrees: the bound is tested against ray directions, and a silhouette pixel just
         // outside would clip the hand's own edge.
         cullCos = Math.clamp(minDot * 0.999f - 0.03f, -1.0f, 1.0f);
-    }
-
-    /**
-     * Scale the capture along the camera's forward axis by {@code dolly}, in place: positions by
-     * {@code V⁻¹ · diag(1,1,dolly) · V} and normals by its inverse-transpose, which for the orthonormal
-     * rotation V is the same conjugation with {@code 1/dolly}. Doing this to the mesh instead of to the
-     * instance transform is what keeps the instance a translation, keeps the shading frames (TBN from
-     * positions and UVs, the captured prim normal) mutually consistent under a non-uniform scale, and costs
-     * nothing at all when {@code dolly == 1} — the case whenever the FOV match is off or the level and HUD
-     * projections already agree.
-     */
-    private void applyHudDolly(Matrix4f viewRotation, float dolly) {
-        if (Float.compare(dolly, 1.0f) == 0) {
-            return;
-        }
-        // Rows of V are the camera's basis in world space; V is a pure rotation, so V⁻¹ is its transpose.
-        float r00 = viewRotation.m00(), r01 = viewRotation.m01(), r02 = viewRotation.m02();
-        float r10 = viewRotation.m10(), r11 = viewRotation.m11(), r12 = viewRotation.m12();
-        float r20 = viewRotation.m20(), r21 = viewRotation.m21(), r22 = viewRotation.m22();
-        float inv = 1.0f / dolly;
-        FloatArrayList verts = capture.verts;
-        float[] v = verts.elements();
-        int vertices = verts.size() / 3;
-        for (int i = 0; i < vertices; i++) {
-            float x = v[i * 3], y = v[i * 3 + 1], z = v[i * 3 + 2];
-            // view = V · p ; view.z *= dolly ; p' = Vᵀ · view
-            float vx = r00 * x + r01 * y + r02 * z;
-            float vy = r10 * x + r11 * y + r12 * z;
-            float vz = (r20 * x + r21 * y + r22 * z) * dolly;
-            v[i * 3] = r00 * vx + r10 * vy + r20 * vz;
-            v[i * 3 + 1] = r01 * vx + r11 * vy + r21 * vz;
-            v[i * 3 + 2] = r02 * vx + r12 * vy + r22 * vz;
-        }
-        // Prim normals live in the same space as the positions (lane 0..2 of each 12-float record; lane 3 is
-        // a packed float the dolly must not touch).
-        FloatArrayList prim = capture.prim;
-        float[] p = prim.elements();
-        int prims = prim.size() / 12;
-        for (int i = 0; i < prims; i++) {
-            int base = i * 12;
-            float x = p[base], y = p[base + 1], z = p[base + 2];
-            float nx = r00 * x + r01 * y + r02 * z;
-            float ny = r10 * x + r11 * y + r12 * z;
-            float nz = (r20 * x + r21 * y + r22 * z) * inv;
-            float length = (float) Math.sqrt(nx * nx + ny * ny + nz * nz);
-            if (length <= 1.0e-6f) {
-                continue; // a degenerate captured normal stays degenerate rather than becoming NaN
-            }
-            float scale = 1.0f / length;
-            p[base] = (r00 * nx + r10 * ny + r20 * nz) * scale;
-            p[base + 1] = (r01 * nx + r11 * ny + r21 * nz) * scale;
-            p[base + 2] = (r02 * nx + r12 * ny + r22 * nz) * scale;
-        }
-    }
-
-    /**
-     * The view-depth scale that keeps the hand the size vanilla rasterizes it:
-     * {@code m11_level / m11_hud}, both read as the projection scales they really are
-     * ({@code m11 == 1/tan(fovY/2)}, aspect-independent). A wider level projection than the 3d-HUD one
-     * shrinks the scale below 1, dollying the arm closer until the projected image matches again.
-     */
-    private static float hudDepthScale(CameraRenderState cameraState) {
-        if (!CausticaConfig.Rt.Hand.PATH_TRACED_MATCHES_HUD_FOV.value()) {
-            return 1.0f;
-        }
-        float hudFov = cameraState.hudFov;
-        Minecraft mc = Minecraft.getInstance();
-        if (mc == null || mc.options == null || hudFov <= 0.0f) {
-            return 1.0f;
-        }
-        // The same rescale GameRendererMixin applies to the 3d-HUD projection itself, so the two agree by
-        // construction: with that toggle off the hand keeps vanilla's fixed FOV, with it on it follows the
-        // slider. The level side is read off the matrix the rays are actually projected by, so the sprint and
-        // zoom multiplier, the spyglass and the death/fluid factor need no separate accounting here — whatever
-        // they do to the world, the ratio already undoes for the hand.
-        if (CausticaConfig.Rt.Hand.FOV_FOLLOWS_CAMERA.value()) {
-            Integer sliderFov = mc.options.fov().get();
-            if (sliderFov != null && sliderFov > 0) {
-                hudFov = Math.clamp(hudFov * (sliderFov / VANILLA_HAND_FOV), 1.0f, 179.0f);
-            }
-        }
-        float levelScale = cameraState.projectionMatrix.m11();
-        if (!Float.isFinite(levelScale) || levelScale <= 1.0e-4f) {
-            return 1.0f;
-        }
-        float hudScale = 1.0f / (float) Math.tan(Mth.DEG_TO_RAD * hudFov * 0.5f);
-        float ratio = levelScale / hudScale;
-        if (!Float.isFinite(ratio) || ratio < MIN_DOLLY || ratio > MAX_DOLLY) {
-            return 1.0f;
-        }
-        return Math.abs(ratio - 1.0f) < DOLLY_EPSILON ? 1.0f : ratio;
     }
 
     /** Diagnostic: whether the capture failure latch tripped (feature off until the game restarts). */

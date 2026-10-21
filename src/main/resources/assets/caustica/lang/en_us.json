@@ -102,8 +102,6 @@
 	"caustica.options.rt.handFov.tooltip": "Make the first-person hand and held item follow the game's FOV setting. On, a higher FOV pushes the arm further away and a lower FOV brings it closer. Off restores vanilla's fixed hand FOV.",
 	"caustica.options.rt.viewmodelRayTraced": "Ray-Traced Viewmodel",
 	"caustica.options.rt.viewmodelRayTraced.tooltip": "Draws the first-person hand and held item inside the traced scene instead of over it, so a held block gets real parallax relief, held lights illuminate the world and the arm picks up the scene's lighting. It casts no shadow, ignores the player's own shadow and still layers above the blocks it swings through. Requires the world path tracer, and costs a mesh upload plus an acceleration-structure build every frame; the hand also lives in the (sometimes upscaled) world image, so it can be slightly softer than vanilla's. Off by default.",
-	"caustica.options.rt.viewmodelMatchHudFov": "Match Hand FOV",
-	"caustica.options.rt.viewmodelMatchHudFov.tooltip": "Keeps the ray-traced hand the size vanilla draws it. The hand is normally rastered through its own fixed 70-degree projection while traced geometry follows the game's FOV, so a wider FOV would shrink the arm. This dollies the hand closer or further away to compensate — the same trade a viewmodel-FOV slider makes. Disabled, the hand scales with the world like any held object.",
 	"caustica.options.rt.hdr": "HDR Output",
 	"caustica.options.rt.hdr.tooltip": "Present in HDR (ST.2084/PQ) instead of SDR, when the display supports it. Takes effect after restarting the game.",
 	"caustica.options.rt.hdrPaperWhite": "HDR Paper White",

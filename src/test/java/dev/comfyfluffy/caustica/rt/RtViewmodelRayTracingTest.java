@@ -181,8 +181,7 @@ final class RtViewmodelRayTracingTest {
         String viewmodel = Files.readString(VIEWMODEL);
         assertTrue(viewmodel.contains("cullCos = -1.0f;"),
                 "a capture that cannot bound itself must publish the always-trace sentinel");
-        assertInOrder(viewmodel, "applyHudDolly(cameraState.viewRotationMatrix, hudDepthScale(cameraState));",
-                "overlayBounds(vertices);", "pending = true;");
+        assertInOrder(viewmodel, "renderer.submitHandsWithItems(", "overlayBounds(vertices);", "pending = true;");
         assertInOrder(composite, "RtEntities.INSTANCE.beginFrame(ctx, staticInstances,",
                 "new WorldPushData(");
         String common = Files.readString(WORLD_COMMON);
@@ -239,14 +238,12 @@ final class RtViewmodelRayTracingTest {
         assertTrue(abi.contains("GameRenderer\tM\tbobHurt") && abi.contains("GameRenderer\tM\tbobView"),
                 "the pose transforms the seam borrows through @Invoker are ABI dependencies now");
         assertTrue(abi.contains("CameraRenderState\tF\thudFov"),
-                "the HUD-FOV match reads a render-state field, so its name is pinned too");
+                "hand.fov-follows-camera, the only FOV knob the traced hand has, reads this field");
         assertEquals("hand.ray-traced", CausticaConfig.Rt.Hand.PATH_TRACED.tomlPath());
         assertEquals(Boolean.FALSE, CausticaConfig.Rt.Hand.PATH_TRACED.defaultValue(),
                 "the viewmodel toggle must default to off");
         assertTrue(CausticaConfig.settings().contains(CausticaConfig.Rt.Hand.PATH_TRACED),
                 "an unregistered setting never reaches the config file or the reset-to-defaults list");
-        assertTrue(CausticaConfig.settings().contains(CausticaConfig.Rt.Hand.PATH_TRACED_MATCHES_HUD_FOV),
-                "the FOV-match toggle must be registered too");
     }
 
     // ---- helpers ----

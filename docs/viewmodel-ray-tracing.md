@@ -62,35 +62,35 @@ espaço em que o tracer trabalha. A instância TLAS é, portanto, **só uma tran
 [0 0 1 | cameraPosition.z − rebase.z]
 ```
 
-Parte linear identidade importa por dois motivos: o `entityO2w` do hit shader (que gira normais de
-entidades reutilizadas via transformada da instância) continua sendo o no-op documentado para qualquer
-geometria construída no próprio frame, e a mão rasterizada pelo vanilla e a mão traçada diferem por
-nada além dessa translação quando a compensação de FOV está desligada.
+Parte linear identidade importa: o `entityO2w` do hit shader (que gira as normais de entidades
+reutilizadas via transformada da instância) continua sendo o no-op documentado para qualquer geometria
+construída no próprio frame, e a mão traçada é a malha que o vanilla rasterizaria, transladada e mais nada.
 
-### `k`: por que o FOV da mão importa
+### O tamanho da mão e o FOV do nível
 
-O mundo traçado usa a projeção do nível; a mão do vanilla usa a projeção do 3d-HUD, construída a
-partir de `CameraRenderState.hudFov` (fixado em 70°, modulado por `hand.fov-follows-camera` e pelo
-fator de morte/líquido). Duas projeções que diferem só na escala vertical produzem a mesma imagem de um
-ponto se — e somente se — a profundidade de view for escalada pela razão das tangentes:
+A mão traçada é um objeto de mundo: quem a projeta é a projeção do nível, então o tamanho aparente dela
+segue o FOV como o de qualquer coisa segurada. A mão rasterizada do vanilla passa por uma projeção
+própria, a do 3d-HUD, montada a partir de `CameraRenderState.hudFov` (70° fixo, modulado pelo fator de
+morte/líquido). **`hand.fov-follows-camera`** é a alavanca que reconcilia as duas — ela já existia, já é
+onde as pessoas ajustam o tamanho do viewmodel, e continua sendo a única.
 
-```
-k = m11_world / m11_hud        (m11 = 1/tan(fovY/2))
-```
+Uma revisão anterior tinha um segundo controle: dolava a profundidade de view do capture por
+`k = m11_nível / m11_hud` (`m11 = 1/tan(fovY/2)`), que é a condição exata para duas projeções que diferem
+só na escala vertical produzirem a imagem uma da outra. Ele saiu de propósito, por três motivos:
 
-`m11_world` é lido de `cameraState.projectionMatrix` — a matriz com que os raios realmente são
-projetados — e `m11_hud` de `cameraState.hudFov`, reaplicando o mesmo escalonamento que o mixin aplica
-ao `Projection.setupPerspective` para que os dois lados concordem por construção. Um `k` positivo nunca
-cruza um vértice com o plano do olho (só escala `|z|`), então isso não é proteção de clipping: é
-recato. Fora de `[0.35, 2.5]` a compensação é abandonada e a mão mantém a escala de mundo.
+- com o FOV em 70° (o padrão) `k == 1`, ou seja, o controle só fazia algo fora do padrão — onde o
+  `fov-follows-camera` já está mexendo no mesmo efeito, e dois controles brigando pelo mesmo parâmetro é o
+  pior caso;
+- escalar um único eixo é uma transformação anisotrópica. As posições iriam por `V⁻¹·Z(k)·V`, mas as
+  normais capturadas precisariam do **inverso-transposto** — e o hit shader gira as normais pela parte linear
+  da transformada da instância, então o relevo do POM e o especular saíam inclinados. A escala teria de ser
+  assada na malha, e não na instância, só para a sombra ser a certa;
+- o dolly também move a superfície que a névoa, o plano de foco e o motion vector medem: a mão ganhava o
+  tamanho certo com a distância errada, mudando a cada sprint.
 
-É a mesma troca "tamanho aparente ↔ distância" de um slider de FOV de viewmodel. A diferença é *onde*
-ela acontece: `RtViewmodel.applyHudDolly` aplica `V⁻¹·Z(k)·V` aos vértices do capture e — com o
-**inverso-transposto**, ou seja `V⁻¹·Z(1/k)·V` re-normalizado — às normais dos prims. Colocar a escala
-na malha em vez da instância não é gosto: sob um escalonamento anisotrópico a transformada correta de
-normais não é a de posições, e o hit shader usa a de posições. Assim o TBN derivado de posições+UV, a
-normal do prim e o POM permanecem no mesmo frame consistente. UVs, cores, tintas e buckets não são
-tocados, e com `k == 1` a função retorna imediatamente — o capture fica bit-idêntico ao do vanilla.
+O que resta é a diferença honesta: longe de 70° sem `fov-follows-camera`, a mão traçada tem escala de mundo
+e a do vanilla tem escala de HUD. Isso vale para qualquer objeto segurado, e é o comportamento que o
+recurso escolheu ter.
 
 ## As três regras
 
@@ -151,7 +151,7 @@ pixel, e um bloco a 0,3 do olho não tem prioridade sobre ela. Então a ordenaç
 teste").
 
 O que paga a conta é **direção**, não distância: `reach` continua sendo a maior distância ao olho de um
-vértice **posicionado** (após o dolly, então a malha dolliada conta) mais uma folga de 0.02, e o cone que
+vértice da malha exatamente como ela é instanciada, mais uma folga de 0.02, e o cone que
 contém a direção de todos os vértices do capture vai em `worldPush.viewmodelCull` (`xyz` = eixo unitário,
 `w` = cosseno do semi-ângulo). Um raio fora do cone não pode tocar a mão — o cone é construído como o
 fechamento das direções dos vértices em torno da média delas, triângulos são combinações positivas dessas
@@ -188,11 +188,11 @@ como uma entidade nova: o denoiser re-estima em vez de arrastar cor do item ante
 | chave TOML | opção de vídeo | padrão |
 |---|---|---|
 | `hand.ray-traced` | Ray-Traced Viewmodel | **off** |
-| `hand.ray-traced-matches-hud-fov` | Match Hand FOV | on |
 
-Ambas entram em `CausticaConfig.Rt.Hand`, aparecem na sub-tela de céu/viewmodel e são cobertas pelo
-"Reset to Defaults" (via `RtSubScreens.skySettings()`); `RtConfigDefaultsTest` as valida
-automaticamente por iterar o registro.
+A chave entra em `CausticaConfig.Rt.Hand`, aparece na sub-tela de céu/viewmodel (junto de
+`hand.fov-follows-camera`, que é a alavanca de tamanho) e é coberta pelo "Reset to Defaults" via
+`RtSubScreens.skySettings()`; `RtConfigDefaultsTest` a valida automaticamente por iterar o registro.
+Não há segunda chave para o FOV da mão de propósito: ver *O tamanho da mão e o FOV do nível*.
 
 A captura roda fora do try/catch protetor do composite, então ela falha mole por conta própria: um
 throw descarta aquele frame, três seguidos desligam o recurso pela sessão com uma linha de log, e
@@ -205,8 +205,9 @@ buffers de capture.
 ## O que fica diferente do vanilla (de propósito)
 
 - **Resolução.** A mão passa a viver na imagem do mundo. Com upscaling (FSR/XeSS/DLSS-RR) abaixo do
-  nativo ela é desenhada na resolução interna e fica um pouco mais suave que o decal em resolução
-  nativa. `hand.ray-traced-matches-hud-fov` não muda isso; muda tamanho, não nitidez.
+  nativo ela é desenhada na resolução interna e fica um pouco mais suave que o decal em resolução nativa.
+- **Escala.** A mão tem escala de mundo, não de HUD: veja *O tamanho da mão e o FOV do nível* para por que
+  isso é preferido a um segundo controle de FOV e o que `hand.fov-follows-camera` cobre.
 - **Frame Generation** pode criar artefatos num objeto colado à tela enquanto o mundo atrás varre.
 - **Efeitos de tela** (fogo, submersão, bloqueio de visão) compõem **sobre** a mão traçada — o inverso
   do vanilla, onde a mão é desenhada antes deles.
@@ -221,7 +222,7 @@ buffers de capture.
 
 ## Arquivos tocados
 
-`CausticaConfig` (duas chaves) · `rt/entity/RtViewmodel` (novo) · `rt/entity/RtEntities` (stage,
+`CausticaConfig` (uma chave) · `rt/entity/RtViewmodel` (novo) · `rt/entity/RtEntities` (stage,
 máscaras, `geomFlags`) · `rt/entity/RtEntityCollector` (contador de descartes) · `rt/accel/RtAccel`
 (máscara padrão) · `rt/RtComposite` (lane do WorldPush) · `mixin/GameRendererMixin` (seam +
 `@Invoker`) · `mixin/FirstPersonHandsAndItemsRendererMixin` (novo) · `client/WorldRenderScaler`
@@ -231,8 +232,15 @@ máscaras, `geomFlags`) · `rt/entity/RtEntityCollector` (contador de descartes)
 
 ## O que ainda não foi verificado
 
-Nada disso foi executado: o ambiente de desenvolvimento do repositório não tem JDK/Gradle nem o
-cliente do Minecraft resolvido, então `compileJava`, `verifyMinecraftAbi`, `verifyModJar`, a
-compilação dos shaders e o comportamento em jogo estão **em aberto**. As suposições de ABI mais
-frágeis (`bobHurt`/`bobView` privados, `hudFov`, os campos de render state) foram pinadas no TSV para
-que a CI as confirme no bytecode real, e o `verifyModJar` confere o registro do mixin novo.
+O que a CI cobre está coberto: `compileJava`, `test` (incluindo os testes de contrato deste
+recurso), `verifyMinecraftAbi` contra o bytecode real do 26.3 — que é o que confere as suposições mais
+frágeis, `bobHurt`/`bobView` privados, `hudFov` e os campos de render state —, `compileShaders` com
+`-warnings-as-errors all` + `spirv-val`, `generateShaderRecords` (o registro `WorldPushData` gerado a
+partir do novo lane) e `verifyModJar`.
+
+O que não está: **o comportamento em jogo**, que precisa de GPU Vulkan com ray tracing. Especificamente — a
+mão bit a bit igual à do vanilla em pose/bobbing/swing; o recorte de silhueta no limite do cone de
+direção; estabilidade com denoiser/Frame Generation e com upscalers ligados; e os dois detalhes de mixin
+que só resolvem quando os mixins são aplicados (`@Invoker` para `bobHurt`/`bobView` e o nome do campo
+`firstPersonHandsAndItemsRenderer`), porque o verificador de ABI confere assinaturas do Minecraft, não o
+endereço de um `@Shadow`.
