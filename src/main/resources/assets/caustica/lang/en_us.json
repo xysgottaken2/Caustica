@@ -400,5 +400,15 @@
 	"caustica.options.rt.lightningSoundEnabled": "Lightning Thunder Sound",
 	"caustica.options.rt.lightningSoundEnabled.tooltip": "Play a positional vanilla thunder sound for each procedural strike. The game's weather volume also applies.",
 	"caustica.options.rt.lightningSoundVolume": "Thunder Volume",
-	"caustica.options.rt.lightningSoundVolume.tooltip": "Volume multiplier for the procedural thunder."
+	"caustica.options.rt.lightningSoundVolume.tooltip": "Volume multiplier for the procedural thunder.",
+	"caustica.options.value.blocks": "%s blocks",
+	"caustica.options.value.entries": "%s entries",
+	"caustica.options.value.frames": "%s frames",
+	"caustica.options.value.samples": "%s samples",
+	"caustica.options.value.seconds": "%s s",
+	"caustica.options.value.perMinute": "%s/min",
+	"caustica.options.value.millimetres": "%s mm",
+	"caustica.options.value.pixels": "%s px",
+	"caustica.options.value.microseconds": "%s us",
+	"caustica.options.value.nits": "%s nits"
 }
