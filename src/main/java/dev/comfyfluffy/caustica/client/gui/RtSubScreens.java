@@ -209,6 +209,14 @@ public final class RtSubScreens {
                 reopen -> List.of(RtSettingsSubScreen.Section.of(null, RtVideoOptions.bloomOptions())));
     }
 
+    /** Depth of field: focus mode, focal distance, aperture, focal length and max blur. */
+    public static RtSettingsSubScreen dof(Screen parent) {
+        return new RtSettingsSubScreen(parent, options(),
+                Component.translatable("caustica.options.rt.dofHeader"),
+                dofSettings(), RtSubScreens::dof,
+                reopen -> List.of(RtSettingsSubScreen.Section.of(null, RtVideoOptions.dofOptions())));
+    }
+
     /** HDR output and the scene-to-display nit mapping. */
     public static RtSettingsSubScreen hdr(Screen parent) {
         return new RtSettingsSubScreen(parent, options(),
@@ -430,6 +438,16 @@ public final class RtSubScreens {
                 CausticaConfig.Rt.Bloom.COLOR_INFLUENCE);
     }
 
+    private static List<CausticaConfig.RuntimeSetting<?>> dofSettings() {
+        return List.of(
+                CausticaConfig.Rt.Dof.ENABLED,
+                CausticaConfig.Rt.Dof.FOCUS_MODE,
+                CausticaConfig.Rt.Dof.FOCAL_DISTANCE,
+                CausticaConfig.Rt.Dof.APERTURE,
+                CausticaConfig.Rt.Dof.FOCAL_LENGTH,
+                CausticaConfig.Rt.Dof.MAX_BLUR);
+    }
+
     private static List<CausticaConfig.RuntimeSetting<?>> hdrSettings() {
         return List.of(
                 CausticaConfig.Rt.Hdr.ENABLED,
@@ -480,6 +498,7 @@ public final class RtSubScreens {
                 exposureSettings(),
                 tonemapSettings(),
                 bloomSettings(),
+                dofSettings(),
                 hdrSettings(),
                 streamingSettings(),
                 debugSettings(),

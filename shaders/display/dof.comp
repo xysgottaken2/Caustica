@@ -1,0 +1,126 @@
+#version 460
+
+// Depth of Field post-process compute shader.
+//
+// Reads the HDR scene image (already bloomed) and the linear depth guide, computes a per-pixel
+// Circle of Confusion from the configured focal distance / aperture / focal length, applies a
+// cross-shaped variable-width Gaussian blur whose radius is the pixel's CoC, and blends the
+// blurred result back onto the sharp image. Pixels at the focal distance are untouched; the
+// further from the focal plane, the heavier the blur (capped by max-blur).
+//
+// Supports two focus modes:
+//   manual  - the focal distance is the configured focal-distance slider (blocks)
+//   auto    - the focal distance is read from the depth at screen centre each frame
+//
+// When DLSS-RR (or another upscaler) is active the depth guide lives at render resolution while
+// this pass runs at display resolution, so the shader maps display UVs back to render UVs before
+// sampling depth.
+
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+
+layout(binding = 0, rgba16f) readonly uniform image2D sceneImage;   // HDR scene input (bloomed rrOutput)
+layout(binding = 1, r32f)   readonly uniform image2D depthImage;    // linear view depth (gDepth)
+layout(binding = 2, rgba16f) writeonly uniform image2D outputImage; // HDR scene output (written back to rrOutput)
+
+layout(push_constant) uniform Push {
+    int displayWidth;     // output / scene resolution
+    int displayHeight;
+    int renderWidth;      // depth guide resolution (= display when no upscaler)
+    int renderHeight;
+    float focalDistance;  // manual focal distance, blocks
+    float aperture;       // lens f-stop
+    float focalLengthMm;  // lens focal length, mm
+    float maxBlur;        // maximum blur radius, screen pixels
+    int focusMode;        // 0 = manual, 1 = auto (centre of screen)
+    float pad0;
+} pc;
+
+// Standard Gaussian weight.
+float gaussian(float x, float sigma) {
+    return exp(-0.5 * x * x / max(sigma * sigma, 1.0e-6));
+}
+
+void main() {
+    ivec2 pix = ivec2(gl_GlobalInvocationID.xy);
+    if (pix.x >= pc.displayWidth || pix.y >= pc.displayHeight) {
+        return;
+    }
+
+    // --- Resolve the depth for this pixel (depth guide may be at render res) ---
+    vec2 depthScale = vec2(pc.renderWidth) / vec2(max(pc.displayWidth, 1));
+    ivec2 depthPix = ivec2(vec2(pix) * depthScale);
+    depthPix.x = clamp(depthPix.x, 0, max(pc.renderWidth, 1) - 1);
+    depthPix.y = clamp(depthPix.y, 0, max(pc.renderHeight, 1) - 1);
+
+    float depth = imageLoad(depthImage, depthPix).r;
+    // Background / sky / miss pixels have no usable depth: leave them untouched.
+    if (depth <= 0.0 || depth > 100000.0) {
+        imageStore(outputImage, pix, imageLoad(sceneImage, pix));
+        return;
+    }
+
+    // --- Focal distance: manual slider, or auto from screen centre ---
+    float focusDistance = pc.focalDistance;
+    if (pc.focusMode == 1) {
+        ivec2 centre = ivec2(pc.displayWidth / 2, pc.displayHeight / 2);
+        ivec2 centreDepthPix = ivec2(vec2(centre) * depthScale);
+        centreDepthPix.x = clamp(centreDepthPix.x, 0, max(pc.renderWidth, 1) - 1);
+        centreDepthPix.y = clamp(centreDepthPix.y, 0, max(pc.renderHeight, 1) - 1);
+        float centreDepth = imageLoad(depthImage, centreDepthPix).r;
+        if (centreDepth > 0.0 && centreDepth <= 100000.0) {
+            focusDistance = centreDepth;
+        }
+    }
+
+    // --- Circle of Confusion in screen pixels (thin-lens model, simplified) ---
+    // coc ~= |focusDistance - depth| * aperture * focalLength / (depth * focusDistance)
+    // focalLengthMm is converted to "blocks" by the 0.001 factor so the units line up with Minecraft's
+    // metre-scale world; the product with aperture yields a blur radius in screen pixels.
+    float coc = abs(focusDistance - depth) * pc.aperture * pc.focalLengthMm * 0.001
+            / max(depth * max(focusDistance, 0.001), 0.001);
+    coc = clamp(coc, 0.0, pc.maxBlur);
+
+    // Nothing to do when the pixel is essentially on the focal plane.
+    if (coc < 0.5) {
+        imageStore(outputImage, pix, imageLoad(sceneImage, pix));
+        return;
+    }
+
+    // --- Variable-width Gaussian blur in a cross (horizontal + vertical taps) ---
+    vec3 centreColour = imageLoad(sceneImage, pix).rgb;
+    vec3 accum = vec3(0.0);
+    float weightSum = 0.0;
+
+    const int MAX_TAPS = 12;
+    int taps = int(clamp(coc, 1.0, float(MAX_TAPS)));
+    // Wider blur -> wider Gaussian, so distant out-of-focus areas blur more smoothly.
+    float sigma = coc * 0.4;
+
+    for (int i = -taps; i <= taps; i++) {
+        if (i == 0) {
+            continue;
+        }
+        float w = gaussian(float(i), sigma);
+
+        // Horizontal tap.
+        ivec2 hPix = pix + ivec2(i, 0);
+        hPix.x = clamp(hPix.x, 0, pc.displayWidth - 1);
+        accum += imageLoad(sceneImage, hPix).rgb * w;
+        weightSum += w;
+
+        // Vertical tap.
+        ivec2 vPix = pix + ivec2(0, i);
+        vPix.y = clamp(vPix.y, 0, pc.displayHeight - 1);
+        accum += imageLoad(sceneImage, vPix).rgb * w;
+        weightSum += w;
+    }
+
+    vec3 blurred = accum / max(weightSum, 1.0e-5);
+
+    // --- Blend: quadratic falloff so the transition in and out of focus is smooth ---
+    float blurFactor = coc / pc.maxBlur;
+    blurFactor = blurFactor * blurFactor;
+    vec3 result = mix(centreColour, blurred, blurFactor);
+
+    imageStore(outputImage, pix, vec4(result, 1.0));
+}

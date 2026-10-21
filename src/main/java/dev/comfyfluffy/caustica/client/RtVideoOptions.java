@@ -376,6 +376,83 @@ public final class RtVideoOptions {
         };
     }
 
+    /** Depth of field options: the focus mode plus the thin-lens circle-of-confusion knobs. */
+    public static OptionInstance<?>[] dofOptions() {
+        return new OptionInstance<?>[] {
+            dofEnabled(),
+            dofFocusMode(),
+            dofFocalDistance(),
+            dofAperture(),
+            dofFocalLength(),
+            dofMaxBlur(),
+        };
+    }
+
+    private static OptionInstance<Boolean> dofEnabled() {
+        return bool("caustica.options.rt.dof", CausticaConfig.Rt.Dof.ENABLED);
+    }
+
+    private static final List<String> DOF_FOCUS_MODES = List.of("manual", "auto");
+
+    private static OptionInstance<String> dofFocusMode() {
+        StringSetting setting = CausticaConfig.Rt.Dof.FOCUS_MODE;
+        return new OptionInstance<>(
+            "caustica.options.rt.dofFocusMode",
+            OptionInstance.cachedConstantTooltip(Component.translatable("caustica.options.rt.dofFocusMode.tooltip")),
+            (caption, value) -> Component.translatable("caustica.options.rt.dofFocusMode." + value),
+            new OptionInstance.Enum<>(DOF_FOCUS_MODES, Codec.STRING),
+            DOF_FOCUS_MODES.contains(setting.get()) ? setting.get() : "manual",
+            setting::set);
+    }
+
+    /** Distance to the focal plane, in blocks (manual focus mode). */
+    private static OptionInstance<Integer> dofFocalDistance() {
+        FloatSetting setting = CausticaConfig.Rt.Dof.FOCAL_DISTANCE;
+        return new OptionInstance<>(
+            "caustica.options.rt.dofFocalDistance",
+            OptionInstance.cachedConstantTooltip(Component.translatable("caustica.options.rt.dofFocalDistance.tooltip")),
+            (caption, blocks) -> Options.genericValueLabel(caption, Component.literal(blocks + " blocks")),
+            new OptionInstance.IntRange(2, 512),
+            Math.clamp(Math.round(setting.value()), 2, 512),
+            blocks -> setting.set(blocks.floatValue()));
+    }
+
+    /** Lens aperture (f-stop): smaller numbers give stronger foreground/background blur. */
+    private static OptionInstance<Integer> dofAperture() {
+        FloatSetting setting = CausticaConfig.Rt.Dof.APERTURE;
+        return new OptionInstance<>(
+            "caustica.options.rt.dofAperture",
+            OptionInstance.cachedConstantTooltip(Component.translatable("caustica.options.rt.dofAperture.tooltip")),
+            (caption, tenths) -> Options.genericValueLabel(caption, Component.literal("f/" + String.format(Locale.ROOT, "%.1f", tenths / 10.0f))),
+            new OptionInstance.IntRange(5, 320),
+            Math.clamp(Math.round(setting.value() * 10.0f), 5, 320),
+            tenths -> setting.set(tenths / 10.0f));
+    }
+
+    /** Lens focal length, in mm: longer lenses give stronger blur. */
+    private static OptionInstance<Integer> dofFocalLength() {
+        FloatSetting setting = CausticaConfig.Rt.Dof.FOCAL_LENGTH;
+        return new OptionInstance<>(
+            "caustica.options.rt.dofFocalLength",
+            OptionInstance.cachedConstantTooltip(Component.translatable("caustica.options.rt.dofFocalLength.tooltip")),
+            (caption, mm) -> Options.genericValueLabel(caption, Component.literal(mm + " mm")),
+            new OptionInstance.IntRange(12, 400),
+            Math.clamp(Math.round(setting.value()), 12, 400),
+            mm -> setting.set(mm.floatValue()));
+    }
+
+    /** Maximum blur radius, in screen pixels. Caps how far the blur can spread. */
+    private static OptionInstance<Integer> dofMaxBlur() {
+        FloatSetting setting = CausticaConfig.Rt.Dof.MAX_BLUR;
+        return new OptionInstance<>(
+            "caustica.options.rt.dofMaxBlur",
+            OptionInstance.cachedConstantTooltip(Component.translatable("caustica.options.rt.dofMaxBlur.tooltip")),
+            (caption, px) -> Options.genericValueLabel(caption, Component.literal(px + " px")),
+            new OptionInstance.IntRange(1, 96),
+            Math.clamp(Math.round(setting.value()), 1, 96),
+            px -> setting.set(px.floatValue()));
+    }
+
     /** Reflex advanced rows for the Frame Generation & Latency sub-screen (Reflex ≤ 20000 µs cap). */
     public static OptionInstance<?>[] reflexOptions() {
         return new OptionInstance<?>[] {
