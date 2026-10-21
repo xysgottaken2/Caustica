@@ -1,0 +1,83 @@
+To honour the JVM settings for this build a single-use Daemon process will be forked. For more on this, please refer to https://docs.gradle.org/9.7.0/userguide/gradle_daemon.html#sec:disabling_the_daemon in the Gradle documentation.
+Daemon will be stopped at the end of the build 
+> Task :buildSrc:compileJava NO-SOURCE
+> Task :buildSrc:compileGroovy FROM-CACHE
+> Task :buildSrc:processResources NO-SOURCE
+> Task :buildSrc:classes UP-TO-DATE
+> Task :buildSrc:jar
+
+> Configure project :
+Fabric Loom: 1.18.2
+Using `clientOnlyMinecraftJar()` is not recommended for Minecraft versions 1.3 or newer.
+
+> Task :generateShaderRecords
+
+> Task :compileJava
+Note: Some input files use or override a deprecated API.
+Note: Recompile with -Xlint:deprecation for details.
+
+> Task :bundleFsrNatives
+> Task :bundleNgxNatives
+> Task :bundleNrdNatives
+> Task :bundleXessNatives
+
+> Task :compileShaders
+/home/runner/work/Caustica/Caustica/shaders/display/bloom_composite.comp
+/home/runner/work/Caustica/Caustica/shaders/display/bloom_downsample.comp
+/home/runner/work/Caustica/Caustica/shaders/display/bloom_upsample.comp
+/home/runner/work/Caustica/Caustica/shaders/display/display.comp
+/home/runner/work/Caustica/Caustica/shaders/display/dof.comp
+/home/runner/work/Caustica/Caustica/shaders/display/exposure_hist.comp
+/home/runner/work/Caustica/Caustica/shaders/display/exposure_resolve.comp
+/home/runner/work/Caustica/Caustica/shaders/display/fg_sky_mask.comp
+/home/runner/work/Caustica/Caustica/shaders/display/fg_sky_mask.comp
+/home/runner/work/Caustica/Caustica/shaders/display/fg_ui_composite.comp
+/home/runner/work/Caustica/Caustica/shaders/display/hdr_ui_composite.comp
+/home/runner/work/Caustica/Caustica/shaders/display/native_fg_interp.comp
+/home/runner/work/Caustica/Caustica/shaders/display/native_fg_interp.comp
+/home/runner/work/Caustica/Caustica/shaders/display/nrd_combine.comp
+/home/runner/work/Caustica/Caustica/shaders/display/sdr_present.comp
+/home/runner/work/Caustica/Caustica/shaders/display/svgf_atrous.comp
+/home/runner/work/Caustica/Caustica/shaders/display/svgf_reproject.comp
+/home/runner/work/Caustica/Caustica/shaders/overlay/block_outline.frag
+/home/runner/work/Caustica/Caustica/shaders/overlay/block_outline.vert
+/home/runner/work/Caustica/Caustica/shaders/overlay/entity_glow.frag
+/home/runner/work/Caustica/Caustica/shaders/overlay/entity_glow.vert
+/home/runner/work/Caustica/Caustica/shaders/overlay/entity_glow_composite.frag
+/home/runner/work/Caustica/Caustica/shaders/overlay/name_tag.frag
+/home/runner/work/Caustica/Caustica/shaders/overlay/name_tag.vert
+/home/runner/work/Caustica/Caustica/shaders/overlay/overlay_fullscreen_triangle.vert
+/home/runner/work/Caustica/Caustica/shaders/overlay/overlay_passthrough_composite.frag
+
+> Task :processResources
+> Task :classes
+> Task :processIncludeJars
+> Task :jar
+> Task :sourcesJar
+> Task :compileTestJava
+> Task :processTestResources NO-SOURCE
+> Task :testClasses
+
+> Task :test
+
+RtWeatherCaptureTest > snowIsTaggedSeparatelySoItIsNotRefracted() FAILED
+    org.opentest4j.AssertionFailedError at RtWeatherCaptureTest.java:382
+
+188 tests completed, 1 failed
+
+> Task :test FAILED
+gradle/actions: Writing build results to /home/runner/work/_temp/.gradle-actions/build-results/__run-1792593752278.json
+
+[Incubating] Problems report is available at: file:///home/runner/work/Caustica/Caustica/build/reports/problems/problems-report.html
+
+FAILURE: Build failed with an exception.
+
+* What went wrong:
+Execution failed for task ':test'.
+> There were failing tests. See the report at: file:///home/runner/work/Caustica/Caustica/build/reports/tests/test/index.html
+
+* Try:
+> Run with --scan to get full insights from a Build Scan (powered by Develocity).
+
+BUILD FAILED in 1m 45s
+15 actionable tasks: 14 executed, 1 from cache

@@ -1,0 +1,8 @@
+63:RtWeatherCaptureTest > snowIsTaggedSeparatelySoItIsNotRefracted() FAILED
+64:    org.opentest4j.AssertionFailedError at RtWeatherCaptureTest.java:382
+66:188 tests completed, 1 failed
+68:> Task :test FAILED
+73:FAILURE: Build failed with an exception.
+75:* What went wrong:
+76:Execution failed for task ':test'.
+82:BUILD FAILED in 1m 45s
