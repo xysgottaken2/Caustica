@@ -412,7 +412,8 @@ public final class RtVideoOptions {
         return new OptionInstance<>(
             "caustica.options.rt.dofFocalDistance",
             OptionInstance.cachedConstantTooltip(Component.translatable("caustica.options.rt.dofFocalDistance.tooltip")),
-            (caption, blocks) -> Options.genericValueLabel(caption, Component.literal(blocks + " blocks")),
+            (caption, blocks) -> Options.genericValueLabel(caption,
+                    Component.translatable("caustica.options.value.blocks", blocks)),
             new OptionInstance.IntRange(2, 512),
             Math.clamp(Math.round(setting.value()), 2, 512),
             blocks -> setting.set(blocks.floatValue()));
@@ -436,7 +437,8 @@ public final class RtVideoOptions {
         return new OptionInstance<>(
             "caustica.options.rt.dofFocalLength",
             OptionInstance.cachedConstantTooltip(Component.translatable("caustica.options.rt.dofFocalLength.tooltip")),
-            (caption, mm) -> Options.genericValueLabel(caption, Component.literal(mm + " mm")),
+            (caption, mm) -> Options.genericValueLabel(caption,
+                    Component.translatable("caustica.options.value.millimetres", mm)),
             new OptionInstance.IntRange(12, 400),
             Math.clamp(Math.round(setting.value()), 12, 400),
             mm -> setting.set(mm.floatValue()));
@@ -448,7 +450,8 @@ public final class RtVideoOptions {
         return new OptionInstance<>(
             "caustica.options.rt.dofMaxBlur",
             OptionInstance.cachedConstantTooltip(Component.translatable("caustica.options.rt.dofMaxBlur.tooltip")),
-            (caption, px) -> Options.genericValueLabel(caption, Component.literal(px + " px")),
+            (caption, px) -> Options.genericValueLabel(caption,
+                    Component.translatable("caustica.options.value.pixels", px)),
             new OptionInstance.IntRange(1, 96),
             Math.clamp(Math.round(setting.value()), 1, 96),
             px -> setting.set(px.floatValue()));
@@ -469,7 +472,7 @@ public final class RtVideoOptions {
             OptionInstance.cachedConstantTooltip(Component.translatable("caustica.options.rt.reflexMinInterval.tooltip")),
             (caption, micros) -> Options.genericValueLabel(caption, micros == 0
                     ? Component.translatable("caustica.options.rt.reflexMinInterval.off")
-                    : Component.literal(micros + " us")),
+                    : Component.translatable("caustica.options.value.microseconds", micros)),
             new OptionInstance.IntRange(0, 20000),
             Math.clamp(setting.value(), 0, 20000),
             setting::set);
@@ -1288,7 +1291,7 @@ public final class RtVideoOptions {
             OptionInstance.cachedConstantTooltip(
                     Component.translatable("caustica.options.rt.fogDistance.tooltip")),
             (caption, step) -> Options.genericValueLabel(caption,
-                    Component.literal((FOG_DISTANCE_MIN + step * FOG_DISTANCE_STEP) + " blocks")),
+                    Component.translatable("caustica.options.value.blocks", FOG_DISTANCE_MIN + step * FOG_DISTANCE_STEP)),
             new OptionInstance.IntRange(0, FOG_DISTANCE_STEPS),
             initial,
             step -> setting.set((float) (FOG_DISTANCE_MIN + step * FOG_DISTANCE_STEP)));
@@ -1326,8 +1329,9 @@ public final class RtVideoOptions {
             "caustica.options.rt.fogHeightFalloff",
             OptionInstance.cachedConstantTooltip(
                     Component.translatable("caustica.options.rt.fogHeightFalloff.tooltip")),
-            (caption, step) -> Options.genericValueLabel(caption, Component.literal(
-                    step == 0 ? "Off" : (step * FOG_FALLOFF_STEP) + " blocks")),
+            (caption, step) -> Options.genericValueLabel(caption, step == 0
+                    ? Component.translatable("options.off")
+                    : Component.translatable("caustica.options.value.blocks", step * FOG_FALLOFF_STEP)),
             new OptionInstance.IntRange(0, FOG_FALLOFF_STEPS),
             initial,
             step -> setting.set((float) (step * FOG_FALLOFF_STEP)));
@@ -1676,7 +1680,8 @@ public final class RtVideoOptions {
         return new OptionInstance<>(
             "caustica.options.rt.hdrPaperWhite",
             OptionInstance.cachedConstantTooltip(Component.translatable("caustica.options.rt.hdrPaperWhite.tooltip")),
-            (caption, nits) -> Options.genericValueLabel(caption, Component.literal(nits + " nits")),
+            (caption, nits) -> Options.genericValueLabel(caption,
+                    Component.translatable("caustica.options.value.nits", nits)),
             new OptionInstance.IntRange(80, 1000),
             Math.clamp(Math.round(setting.value()), 80, 1000),
             nits -> setting.set(nits.floatValue()));
@@ -1687,7 +1692,8 @@ public final class RtVideoOptions {
         return new OptionInstance<>(
             "caustica.options.rt.hdrPeak",
             OptionInstance.cachedConstantTooltip(Component.translatable("caustica.options.rt.hdrPeak.tooltip")),
-            (caption, nits) -> Options.genericValueLabel(caption, Component.literal(nits + " nits")),
+            (caption, nits) -> Options.genericValueLabel(caption,
+                    Component.translatable("caustica.options.value.nits", nits)),
             new OptionInstance.IntRange(80, 10000),
             Math.clamp(Math.round(setting.value()), 80, 10000),
             nits -> setting.set(nits.floatValue()));
@@ -1718,7 +1724,8 @@ public final class RtVideoOptions {
         return new OptionInstance<>(
             captionKey,
             OptionInstance.cachedConstantTooltip(Component.translatable(captionKey + ".tooltip")),
-            (caption, value) -> Options.genericValueLabel(caption, Component.literal(value + " s")),
+            (caption, value) -> Options.genericValueLabel(caption,
+                    Component.translatable("caustica.options.value.seconds", value)),
             new OptionInstance.IntRange(min, max),
             Math.clamp(Math.round(setting.value()), min, max),
             value -> setting.set(value.floatValue()));
@@ -1729,7 +1736,8 @@ public final class RtVideoOptions {
         return new OptionInstance<>(
             captionKey,
             OptionInstance.cachedConstantTooltip(Component.translatable(captionKey + ".tooltip")),
-            (caption, value) -> Options.genericValueLabel(caption, Component.literal(value + " blocks")),
+            (caption, value) -> Options.genericValueLabel(caption,
+                    Component.translatable("caustica.options.value.blocks", value)),
             new OptionInstance.IntRange(min, max),
             Math.clamp(Math.round(setting.value()), min, max),
             value -> setting.set(value.floatValue()));
@@ -1741,7 +1749,7 @@ public final class RtVideoOptions {
             captionKey,
             OptionInstance.cachedConstantTooltip(Component.translatable(captionKey + ".tooltip")),
             (caption, value) -> Options.genericValueLabel(caption,
-                    Component.literal(value + "/min")),
+                    Component.translatable("caustica.options.value.perMinute", value)),
             new OptionInstance.IntRange(min, max),
             Math.clamp(Math.round(setting.value()), min, max),
             value -> setting.set(value.floatValue()));
@@ -1831,7 +1839,8 @@ public final class RtVideoOptions {
             "caustica.options.rt.parallaxDistance",
             OptionInstance.cachedConstantTooltip(
                     Component.translatable("caustica.options.rt.parallaxDistance.tooltip")),
-            (caption, blocks) -> Options.genericValueLabel(caption, Component.literal(blocks + " blocks")),
+            (caption, blocks) -> Options.genericValueLabel(caption,
+                    Component.translatable("caustica.options.value.blocks", blocks)),
             new OptionInstance.IntRange(16, 256),
             Math.clamp(Math.round(setting.value()), 16, 256),
             blocks -> setting.set(blocks.floatValue()));
@@ -1956,7 +1965,8 @@ public final class RtVideoOptions {
         return new OptionInstance<>(
             "caustica.options.sharc.cellSize",
             OptionInstance.cachedConstantTooltip(Component.translatable("caustica.options.sharc.cellSize.tooltip")),
-            (caption, blocks) -> Options.genericValueLabel(caption, Component.literal(blocks + " blocks")),
+            (caption, blocks) -> Options.genericValueLabel(caption,
+                    Component.translatable("caustica.options.value.blocks", blocks)),
             new OptionInstance.IntRange(1, 64),
             Math.clamp(Math.round(setting.value()), 1, 64),
             blocks -> setting.set(blocks.floatValue()));
@@ -1971,7 +1981,7 @@ public final class RtVideoOptions {
             "caustica.options.sharc.cacheEntries",
             OptionInstance.cachedConstantTooltip(Component.translatable("caustica.options.sharc.cacheEntries.tooltip")),
             (caption, shift) -> Options.genericValueLabel(caption,
-                    Component.literal((1 << shift) + " entries")),
+                    Component.translatable("caustica.options.value.entries", 1 << shift)),
             new OptionInstance.IntRange(minShift, maxShift),
             initial,
             shift -> setting.set(1 << shift));
@@ -2006,7 +2016,7 @@ public final class RtVideoOptions {
             "caustica.options.sharc.frameLifetime",
             OptionInstance.cachedConstantTooltip(Component.translatable("caustica.options.sharc.frameLifetime.tooltip")),
             (caption, value) -> Options.genericValueLabel(caption,
-                    Component.literal(value + " frames")),
+                    Component.translatable("caustica.options.value.frames", value)),
             new OptionInstance.IntRange(1, 240),
             Math.clamp(setting.value(), 1, 240),
             setting::set);
@@ -2022,7 +2032,7 @@ public final class RtVideoOptions {
             "caustica.options.sharc.stableFrames",
             OptionInstance.cachedConstantTooltip(Component.translatable("caustica.options.sharc.stableFrames.tooltip")),
             (caption, value) -> Options.genericValueLabel(caption,
-                    Component.literal(value + " samples")),
+                    Component.translatable("caustica.options.value.samples", value)),
             new OptionInstance.IntRange(0, 30),
             Math.clamp(setting.value(), 0, 30),
             setting::set);
