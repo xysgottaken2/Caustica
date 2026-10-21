@@ -83,6 +83,8 @@ public final class CausticaConfig {
             Rt.Lights.RESTIR_SAMPLING, Rt.Lights.RESTIR_TEMPORAL_HISTORY, Rt.Lights.RESTIR_SPATIAL_NEIGHBOURS,
             Rt.Lights.RESTIR_MAX_AGE, Rt.Hand.FOV_FOLLOWS_CAMERA,
             Rt.Exposure.MODE, Rt.Tonemapping.OPERATOR, Rt.Bloom.ENABLED,
+            Rt.Dof.ENABLED, Rt.Dof.FOCUS_MODE, Rt.Dof.FOCAL_DISTANCE, Rt.Dof.APERTURE,
+            Rt.Dof.FOCAL_LENGTH, Rt.Dof.MAX_BLUR,
             Rt.FrameStats.ENABLED, Rt.Hdr.ENABLED, Ngx.PATH,
         };
     }
@@ -201,6 +203,14 @@ public final class CausticaConfig {
                 " HDR display output (ST.2084/PQ). When enabled the swapchain is created in PQ automatically\n"
                         + " (falls back to SDR if the surface doesn't advertise it). paper-white-nits / peak-nits\n"
                         + " drive the scene-HDR -> display mapping.");
+        FILE.setComment("dof",
+                " Screen-space depth of field: blurs regions in front of and behind the focal plane\n"
+                        + " like a real camera lens. Off by default. focus-mode chooses how the focal\n"
+                        + " distance is set: manual uses the focal-distance slider (blocks); auto reads\n"
+                        + " the depth at screen centre each frame. focal-distance / aperture (f-stop) /\n"
+                        + " focal-length (mm) drive a thin-lens circle of confusion, and max-blur caps\n"
+                        + " the blur radius in screen pixels. Every knob is live: a slider drag takes\n"
+                        + " effect on the next frame, no reload needed.");
     }
 
     private static Path resolveConfigPath() {
@@ -1683,6 +1693,50 @@ public final class CausticaConfig {
                     case "high", "2" -> "high";
                     case "ultra", "3" -> "ultra";
                     default -> "high";
+                };
+            }
+        }
+
+        /**
+         * Depth of field: a screen-space post-process that blurs regions in front of and behind the
+         * focal plane so the picture behaves like a real camera lens. Off by default; every knob is
+         * live (a slider drag lands on the next frame, no reload needed).
+         *
+         * <p>Focus mode chooses how the focal distance is determined: {@code manual} uses the
+         * focal-distance slider (blocks), while {@code auto} reads the depth at screen centre each
+         * frame so whatever sits in the middle of the view stays sharp. The blur radius is a
+         * thin-lens circle of confusion driven by focal distance, aperture (f-stop) and focal length
+         * (mm), capped by the max-blur slider in screen pixels.
+         */
+        public static final class Dof {
+            public static final BooleanSetting ENABLED =
+                    bool("caustica.rt.dof", "dof.enabled", false);
+            /** focus mode: manual (slider) or auto (screen centre). */
+            public static final StringSetting FOCUS_MODE =
+                    string("caustica.rt.dof.focusMode", "dof.focus-mode", "manual", Dof::sanitizeFocusMode);
+            /** Distance to the focal plane, in blocks (manual mode only). */
+            public static final FloatSetting FOCAL_DISTANCE =
+                    clampedFloat("caustica.rt.dof.focalDistance", "dof.focal-distance", 16.0f, 2.0f, 512.0f);
+            /** Lens aperture (f-stop): smaller numbers give stronger background/foreground blur. */
+            public static final FloatSetting APERTURE =
+                    clampedFloat("caustica.rt.dof.aperture", "dof.aperture", 2.8f, 0.5f, 32.0f);
+            /** Lens focal length, in mm: longer lenses give stronger blur. */
+            public static final FloatSetting FOCAL_LENGTH =
+                    clampedFloat("caustica.rt.dof.focalLength", "dof.focal-length", 50.0f, 12.0f, 400.0f);
+            /** Maximum blur radius in screen pixels; caps how far the blur can spread. */
+            public static final FloatSetting MAX_BLUR =
+                    clampedFloat("caustica.rt.dof.maxBlur", "dof.max-blur", 16.0f, 1.0f, 96.0f);
+
+            private Dof() {
+            }
+
+            private static String sanitizeFocusMode(String value) {
+                if (value == null) {
+                    return "manual";
+                }
+                return switch (value.toLowerCase(java.util.Locale.ROOT).replace('-', '_')) {
+                    case "auto", "autofocus", "auto_focus" -> "auto";
+                    default -> "manual";
                 };
             }
         }

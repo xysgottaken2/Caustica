@@ -66,6 +66,7 @@ import dev.comfyfluffy.caustica.rt.material.RtMaterialOverrides;
 import dev.comfyfluffy.caustica.rt.material.RtMaterialRegistry;
 import dev.comfyfluffy.caustica.rt.pipeline.RtBloomPipeline;
 import dev.comfyfluffy.caustica.rt.pipeline.RtDisplayPipeline;
+import dev.comfyfluffy.caustica.rt.pipeline.RtDofPipeline;
 import dev.comfyfluffy.caustica.rt.pipeline.RtDlssFg;
 import dev.comfyfluffy.caustica.rt.pipeline.RtDlssRr;
 import dev.comfyfluffy.caustica.rt.pipeline.RtFsrFrameGen;
@@ -605,6 +606,7 @@ public final class RtComposite {
     private int pushSlot;
     private RtDisplayPipeline displayPipeline;
     private RtBloomPipeline bloomPipeline;
+    private RtDofPipeline dofPipeline;
     private RtImage output;
     // Packed primary -> indirect continuations. Pass A is fixed at one sample and owns two records per
     // render pixel (base + optional transmission); Pass B resamples them at the configured SPP.
@@ -996,6 +998,9 @@ public final class RtComposite {
             }
             if (bloomPipeline == null) {
                 bloomPipeline = RtBloomPipeline.create(ctx);
+            }
+            if (dofPipeline == null) {
+                dofPipeline = RtDofPipeline.create(ctx);
             }
             // A resource reload re-stitches the block atlas. We've already torn down the world pipeline
             // (onResourceReloadStart) so nothing references the old atlas, but MC's deferred free keeps the
@@ -2237,6 +2242,21 @@ public final class RtComposite {
                 VulkanCommandEncoder.memoryBarrier(cmd, stack);
             }
 
+            // Depth of field: blurs foreground and background around the focal plane. Runs after bloom
+            // so the blur operates on the final lit HDR image, and before display tone mapping so both
+            // SDR and HDR presentations receive the DoF'd picture. Bypassed for debug views and when
+            // disabled (the default).
+            if (debugView == 0 && dofPipeline != null
+                    && CausticaConfig.Rt.Dof.ENABLED.value()
+                    && gDepth != null && rrOutput != null) {
+                try (RtFrameStats.Scope ignoredStats = RtFrameStats.FRAME.stage("frame.dof")) {
+                    dofPipeline.ensureSize(displayW, displayH);
+                    dofPipeline.dispatch(cmd, stack, displayW, displayH, renderW, renderH,
+                            rrOutput.view, rrOutput.image, gDepth.view);
+                }
+                VulkanCommandEncoder.memoryBarrier(cmd, stack);
+            }
+
             try (RtDebugLabels.Scope ignored = RtDebugLabels.scope(ctx, cmd, "map RT to display");
                  RtFrameStats.Scope ignoredStats = RtFrameStats.FRAME.stage("frame.displayMap")) {
                 displayPipeline.dispatch(cmd, displayW, displayH, CausticaConfig.Rt.Hdr.enabled(),
@@ -3009,6 +3029,10 @@ public final class RtComposite {
         if (bloomPipeline != null) {
             bloomPipeline.destroy();
             bloomPipeline = null;
+        }
+        if (dofPipeline != null) {
+            dofPipeline.destroy();
+            dofPipeline = null;
         }
         if (displayPipeline != null) {
             displayPipeline.destroy();
