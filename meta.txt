@@ -1,0 +1,11 @@
+run=39618454473 job=jvm ref=28/merge sha=15082a105461921535b0bca4d60b1164fcf2fd5c
+workflow=CI event=pull_request
+--- errors ---
+88:RtWeatherCaptureTest > snowIsTaggedSeparatelySoItIsNotRefracted() FAILED
+89:    org.opentest4j.AssertionFailedError at RtWeatherCaptureTest.java:382
+91:188 tests completed, 1 failed
+93:> Task :test FAILED
+96:FAILURE: Build failed with an exception.
+98:* What went wrong:
+99:Execution failed for task ':test'.
+105:BUILD FAILED in 47s
