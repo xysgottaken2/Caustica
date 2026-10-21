@@ -71,6 +71,14 @@ final class RtTerrainMesher {
     static final int TERRAIN_PRIM_CUTOUT = 16;
     /** Thin/translucent surface (glass, ice, etc.); not treated as a wet film. */
     static final int TERRAIN_PRIM_TRANSLUCENT = 32;
+    /**
+     * The column's biome receives liquid rain, so this surface may take rain's response.
+     *
+     * <p>A separate bit from {@link #TERRAIN_PRIM_RAIN_EXPOSED}: that one is the smooth sky-exposure used
+     * to fade wetness under cover, while this one is a hard biome answer and must switch exactly at the
+     * border. A snow biome next to a rainy one is meshed at the same time and each keeps its own answer.
+     */
+    static final int TERRAIN_PRIM_RAIN_BIOME = 64;
 
     /** Sprite classification for the two portal blocks. */
     private static final int PORTAL_NONE = 0;
@@ -235,8 +243,11 @@ final class RtTerrainMesher {
                         fluidCapture.water = fluid.is(FluidTags.WATER);
                         if (fluidCapture.water && region instanceof RtSectionSnapshots.Region snapshot) {
                             // The heightmap includes the fluid surface: open rivers/oceans get rain
-                            // impacts, while water beneath a cave ceiling/roof is not rain-exposed.
-                            fluidCapture.rainExposed = snapshot.isRainExposed(m);
+                            // impacts, while water beneath a cave ceiling/roof is not rain-exposed. The
+                            // biome answer keeps a lake in a snow or desert biome glassy while the lake
+                            // in the rainy valley beside it ripples.
+                            fluidCapture.rainExposed = snapshot.isRainExposed(m)
+                                    && snapshot.isLiquidRainColumn(m);
                         } else {
                             fluidCapture.rainExposed = false;
                         }
@@ -260,9 +271,11 @@ final class RtTerrainMesher {
                     capture.pos = m;
                     if (region instanceof RtSectionSnapshots.Region snapshot) {
                         capture.rainExposed = snapshot.isRainExposed(m);
+                        capture.rainBiome = snapshot.isLiquidRainColumn(m);
                         capture.rainShelterDistance = snapshot.rainShelterDistance(m);
                     } else {
                         capture.rainExposed = false;
+                        capture.rainBiome = false;
                         capture.rainShelterDistance = RtSectionSnapshots.RAIN_SHELTER_FALLBACK;
                     }
                     Vec3 offset = state.getOffset(m);
@@ -451,6 +464,7 @@ final class RtTerrainMesher {
         BlockState state;
         BlockPos pos;
         boolean rainExposed;
+        boolean rainBiome;
         float rainShelterDistance;
         float originX, originY, originZ;
         private final BlockPos.MutableBlockPos cullPos = new BlockPos.MutableBlockPos();
@@ -487,6 +501,7 @@ final class RtTerrainMesher {
             if (len > 1.0e-6f) { nx /= len; ny /= len; nz /= len; }
             q.nx = nx; q.ny = ny; q.nz = nz;
             q.rainExposed = rainExposed;
+            q.rainBiome = rainBiome;
             q.rainShelterDistance = rainShelterDistance;
 
             ChunkSectionLayer layer = quad.chunkLayer();
@@ -724,6 +739,9 @@ final class RtTerrainMesher {
                 if (q.rainExposed) {
                     flags |= TERRAIN_PRIM_RAIN_EXPOSED;
                 }
+                if (q.rainBiome) {
+                    flags |= TERRAIN_PRIM_RAIN_BIOME;
+                }
                 if (q.cutout && !q.translucent) {
                     flags |= TERRAIN_PRIM_CUTOUT;
                 }
@@ -793,6 +811,7 @@ final class RtTerrainMesher {
         boolean tinted; // tintIndex >= 0 — the tinted member of a base+overlay pair
         int portal; // PORTAL_NONE / PORTAL_NETHER / PORTAL_END — tagged by putFabric, stamped into flags
         boolean rainExposed;
+        boolean rainBiome;
         float rainShelterDistance;
         float tr, tg, tb, emission;
         int materialId;

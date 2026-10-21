@@ -37,8 +37,6 @@ import net.minecraft.world.item.BlockItem;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.level.MoonPhase;
-import net.minecraft.world.level.biome.Biome;
-import net.minecraft.world.level.levelgen.Heightmap;
 import net.minecraft.world.level.material.FluidState;
 import net.minecraft.world.phys.Vec3;
 import org.joml.Matrix4f;
@@ -157,45 +155,21 @@ public final class RtComposite {
     }
 
     /**
-     * Whether liquid rain — not snow — is falling on the camera's own column.
+     * Whether the weather system is currently producing precipitation anywhere in this level.
      *
-     * <p>{@code getRainLevel} describes the storm, not what falls out of it: it reads the same in a
-     * snowy taiga as in a jungle, so keying the surface response off it alone put impact rings on water
-     * and a wet film on the ground while the game was drawing snowflakes.
+     * <p>This is deliberately the coarse, world-wide answer: {@code getRainLevel} says how hard the
+     * storm is. It is the right switch for the lanes below, because those lanes are shared by every prim
+     * in the frame and cannot be per-column.
      *
-     * <p>The answer therefore comes from the biome, which is the authority vanilla itself consults: a
-     * column is rain only when its biome reports {@link Biome.Precipitation#RAIN} at that spot. Snow
-     * reports {@code SNOW}, and biomes that never get precipitation at all — deserts, badlands, most
-     * savannas — report {@code NONE}, so all of them are excluded by the same comparison rather than by
-     * a biome list this renderer would have to keep in sync with the world.
-     *
-     * <p>The column is sampled at its surface instead of at the eye: the answer decides what lands on
-     * the ground, and temperature (hence rain vs. snow) varies with height, so a mountain column in a
-     * temperate biome is correctly snow while the valley below it is rain.
-     *
-     * <p>Everything else the weather drives — sky darkening, cloud thickening, fog density, the storm
-     * greying — deliberately stays keyed on the global level: snow is just as overcast as rain.
+     * <p>What rain is falling — and therefore whether a given <em>surface</em> may be wet or splashing —
+     * is decided per column in the terrain snapshot: each meshed prim carries whether its own column is
+     * rained on (the biome says RAIN) and open to the sky ({@link RtPrecipitation}). That is what makes a
+     * snow biome next to a rainy one show rings in one and nothing in the other within the same frame.
+     * An earlier version gated these lanes on the camera's biome instead, which switched the whole
+     * world's rain response on and off as the player crossed a border.
      */
-    private static boolean liquidRainAt(ClientLevel level, double cameraX, double cameraZ, float partialTick) {
-        return level != null
-                && level.getRainLevel(partialTick) > 0.001f
-                && liquidPrecipitationAt(level, cameraX, cameraZ);
-    }
-
-    /**
-     * Vanilla's own rain/snow question for one column: {@code Biome.getPrecipitationAt} at the surface.
-     *
-     * <p>This is the same call the game's weather renderer makes to decide whether a column gets the
-     * rain sheet or the snow sheet, so the surface response cannot disagree with the precipitation on
-     * screen — including at biome borders, where the column under the camera is what matters.
-     */
-    private static boolean liquidPrecipitationAt(ClientLevel level, double cameraX, double cameraZ) {
-        int blockX = Mth.floor(cameraX);
-        int blockZ = Mth.floor(cameraZ);
-        int surfaceY = level.getHeight(Heightmap.Types.MOTION_BLOCKING, blockX, blockZ);
-        BlockPos pos = new BlockPos(blockX, Math.max(surfaceY, level.getMinY()), blockZ);
-        return level.getBiome(pos).value().getPrecipitationAt(pos, level.getSeaLevel())
-                == Biome.Precipitation.RAIN;
+    private static boolean precipitating(ClientLevel level, float partialTick) {
+        return level != null && level.getRainLevel(partialTick) > 0.001f;
     }
 
     /**
@@ -1784,15 +1758,13 @@ public final class RtComposite {
             int dimension = dimensionId(level);
             float partialTick = Minecraft.getInstance().getDeltaTracker().getGameTimeDeltaPartialTick(false);
             WeatherState weather = weatherState(level, partialTick);
-            // Liquid precipitation at the eye. Snow shares the storm, the darkened sky and the thicker
-            // deck, but it cannot splash: no impact rings, no wet film, and no bolt through it (vanilla's
-            // own isRainingAt() likewise requires RAIN precipitation, so thundersnow does not exist).
-            boolean liquidRain = liquidRainAt(level, camX, camZ, partialTick);
+            // Storm-wide switch. Whether a particular surface responds is decided per column by the
+            // mesher (see RtSectionSnapshots / RtPrecipitation), never by where the camera stands.
+            boolean raining = precipitating(level, partialTick);
             // Render-thread lightning scheduler. It publishes a short-lived strike position and pulse
             // envelope to the shaders (sky bolt + local point light) and plays positional thunder; it
             // never mutates the world or spawns a server entity.
-            RtLightning.State lightning = LIGHTNING.update(level, camX, camY, camZ,
-                    liquidRain ? weather.rain() : 0f,
+            RtLightning.State lightning = LIGHTNING.update(level, camX, camY, camZ, weather.rain(),
                     CausticaConfig.Rt.Composite.LIGHTNING_ENABLED.value(),
                     CausticaConfig.Rt.Composite.LIGHTNING_STRIKES_PER_MINUTE.value(),
                     CausticaConfig.Rt.Composite.LIGHTNING_INTENSITY.value(),
@@ -1888,20 +1860,20 @@ public final class RtComposite {
                     // own FOG_COLOR attribute, blended by the slider — see fogTint() above.
                     fogTint(),
                     // Live rain material state. Disabling wetness clears it instead of leaving a stale
-                    // wet ground value to reappear if the option is toggled back on. Both the film and the
-                    // ground rings are rain-only: under snow the lane drops to dry at once, so a taiga
-                    // never shows a glossy dark surface with splashes on it.
-                    new Float4(surfaceWetnessForFrame(liquidRain),
+                    // wet ground value to reappear if the option is toggled back on. These are feature
+                    // switches only — which surfaces actually respond is per prim, because only the
+                    // mesher knows each column's biome and sky exposure.
+                    new Float4(surfaceWetnessForFrame(raining),
                             CausticaConfig.Rt.Composite.WETNESS_GLOSS.value(),
-                            liquidRain && CausticaConfig.Rt.Composite.GROUND_RAIN_RIPPLES.value()
+                            CausticaConfig.Rt.Composite.GROUND_RAIN_RIPPLES.value()
                                     ? CausticaConfig.Rt.Composite.GROUND_RIPPLE_STRENGTH.value() : 0.0f,
                             CausticaConfig.Rt.Composite.WETNESS_TRANSITION_DISTANCE.value()),
                     // x shrinks/enlarges procedural water rings; y disables/scales their amplitude;
                     // z scales rain-lens ray bending; w caps how much weather fill clouds may add.
-                    // Rings are rain-only for the same reason as the ground ones: a flake landing on
-                    // water does not kick up a crown.
+                    // The water surface reads its own prim's rain-exposure bit, so a lake in a snow
+                    // biome stays glassy while the lake next door ripples.
                     new Float4(CausticaConfig.Rt.Composite.WATER_RIPPLE_SCALE.value(),
-                            liquidRain && CausticaConfig.Rt.Composite.WATER_RAIN_RIPPLES.value()
+                            CausticaConfig.Rt.Composite.WATER_RAIN_RIPPLES.value()
                                     ? CausticaConfig.Rt.Composite.WATER_RIPPLE_STRENGTH.value() : 0.0f,
                             CausticaConfig.Rt.Composite.RAIN_REFRACTION_ENABLED.value()
                                     ? CausticaConfig.Rt.Composite.RAIN_REFRACTION_STRENGTH.value() : 0.0f,

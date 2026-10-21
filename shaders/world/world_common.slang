@@ -312,6 +312,12 @@ public static const uint TERRAIN_PRIM_RAIN_EXPOSED = 8u;
 public static const uint TERRAIN_PRIM_CUTOUT = 16u;
 // Bit 5: a thin translucent surface (glass, ice); excluded from the wet-film overlay.
 public static const uint TERRAIN_PRIM_TRANSLUCENT = 32u;
+// Bit 6: this column's biome receives LIQUID rain (vanilla's Biome.getPrecipitationAt == RAIN), sampled
+// by the mesher from the same per-chunk snapshot that bakes the shelter distances. Deliberately a hard
+// bit rather than part of that distance field: "is the sky open here" should fade out under a roof over
+// the transition radius, while "is this a rainy biome" must change exactly at the biome border — blending
+// it would put impact rings several blocks inside a snow biome, which is the bug this bit exists to fix.
+public static const uint TERRAIN_PRIM_RAIN_BIOME = 64u;
 // Prim.flags (entity prims): a vanilla rain/snow sheet captured by RtWeatherCapture, or one of
 // vanilla's little rain-impact/splash billboards. Shares the flags lane the portal tags use on terrain —
 // particles never carry portal tags, so the bit is unambiguous. It selects the weather COVERAGE rules:

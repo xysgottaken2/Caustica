@@ -69,16 +69,22 @@ final class RtWeatherStormRegressionTest {
      * darkening. Gating the scheduler on it would also stop the bolts, which is not what the option
      * says; the flash and the point light are zeroed per-lane instead.
      *
-     * <p>The rain level it reads is the <em>liquid</em> one: a snow biome carries the same global storm
-     * value while the game draws flakes, and vanilla's own {@code isRainingAt()} requires RAIN
-     * precipitation, so there is no thundersnow to reproduce.
+     * <p>It reads the global storm level on purpose. Which <em>column</em> a bolt may land on is a
+     * separate, per-column question answered in {@code RtLightning.chooseStrike} (vanilla's own
+     * {@code isRainingAt()} requires RAIN precipitation, so there is no thundersnow): gating the
+     * scheduler on the camera's biome instead would stop the lightning that a storm keeps throwing into
+     * the rainy biome next door.
      */
     @Test
     void lightningIsDrivenByRainNotByThePresentationToggle() throws IOException {
         String java = Files.readString(COMPOSITE);
 
-        assertTrue(java.contains("liquidRain ? weather.rain() : 0f"),
-                "the scheduler must read the live rain level, and only while rain (not snow) falls");
+        assertTrue(java.contains("LIGHTNING.update(level, camX, camY, camZ, weather.rain(),"),
+                "the scheduler must read the live, world-wide rain level");
+        String lightning = Files.readString(
+                REPO_ROOT.resolve("src/main/java/dev/comfyfluffy/caustica/rt/RtLightning.java"));
+        assertTrue(lightning.contains("RtPrecipitation.isLiquidRain("),
+                "the strike COLUMN, unlike the scheduler, must be a place where rain falls");
         // Ordering: update() runs before the push record is built, so a strike can never be a frame late.
         int update = java.indexOf("LIGHTNING.update(");
         int push = java.indexOf("new Float4((float) (lightning.x() - terrain.blockX)");

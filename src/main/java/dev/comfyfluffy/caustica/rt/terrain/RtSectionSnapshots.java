@@ -13,6 +13,7 @@ import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.entity.BlockEntity;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.chunk.EmptyLevelChunk;
+import dev.comfyfluffy.caustica.rt.RtPrecipitation;
 import net.minecraft.world.level.chunk.LevelChunk;
 import net.minecraft.world.level.chunk.LevelChunkSection;
 import net.minecraft.world.level.chunk.PalettedContainer;
@@ -58,9 +59,20 @@ final class RtSectionSnapshots {
     private static final Object AIR = new Object();
 
     private final Long2ObjectLinkedOpenHashMap<Object> cache = new Long2ObjectLinkedOpenHashMap<>();
-    // One immutable heightmap snapshot per center chunk, shared by every vertical section build. This
-    // avoids repeating the neighbour-height queries for each of a chunk's up to 24 sections.
-    private final Long2ObjectLinkedOpenHashMap<int[]> rainHeightmapCache =
+    /**
+     * Per-column rain data for one chunk plus its apron. Both arrays are indexed the same way, so a
+     * column's surface height and its precipitation type are always read together.
+     *
+     * <p>Sampling the biome here — once per chunk, next to the height — is what makes the wet film and
+     * the impact rings follow the biome map instead of the camera: a snow biome and the rainy biome next
+     * to it are meshed in the same frame and each keeps its own answer.
+     */
+    private record RainColumnMap(int[] motionBlockingTopY, boolean[] liquidRain) {
+    }
+
+    // One immutable snapshot per center chunk, shared by every vertical section build. This avoids
+    // repeating the neighbour-height and biome queries for each of a chunk's up to 24 sections.
+    private final Long2ObjectLinkedOpenHashMap<RainColumnMap> rainHeightmapCache =
             new Long2ObjectLinkedOpenHashMap<>();
 
     /** Snapshot the 3×3×3 neighbourhood of a section, reusing cached palette copies (render thread). */
@@ -96,25 +108,36 @@ final class RtSectionSnapshots {
         rainHeightmapCache.clear();
     }
 
-    private int[] rainHeightmap(ClientLevel level, int centerSectionX, int centerSectionZ) {
+    private RainColumnMap rainHeightmap(ClientLevel level, int centerSectionX, int centerSectionZ) {
         long key = RtTerrain.sectionKey(centerSectionX, 0, centerSectionZ);
-        int[] cached = rainHeightmapCache.getAndMoveToLast(key);
+        RainColumnMap cached = rainHeightmapCache.getAndMoveToLast(key);
         if (cached != null) {
             return cached;
         }
-        int[] snapshot = new int[RAIN_MAP_SIZE * RAIN_MAP_SIZE];
+        int[] tops = new int[RAIN_MAP_SIZE * RAIN_MAP_SIZE];
+        boolean[] liquid = new boolean[RAIN_MAP_SIZE * RAIN_MAP_SIZE];
+        int baseX = centerSectionX << 4;
+        int baseZ = centerSectionZ << 4;
         for (int z = -RAIN_TRANSITION_RADIUS; z < 16 + RAIN_TRANSITION_RADIUS; z++) {
             for (int x = -RAIN_TRANSITION_RADIUS; x < 16 + RAIN_TRANSITION_RADIUS; x++) {
-                snapshot[(z + RAIN_TRANSITION_RADIUS) * RAIN_MAP_SIZE
-                        + x + RAIN_TRANSITION_RADIUS] = level.getHeight(Heightmap.Types.MOTION_BLOCKING,
-                        (centerSectionX << 4) + x, (centerSectionZ << 4) + z);
+                int blockX = baseX + x;
+                int blockZ = baseZ + z;
+                int top = level.getHeight(Heightmap.Types.MOTION_BLOCKING, blockX, blockZ);
+                int index = (z + RAIN_TRANSITION_RADIUS) * RAIN_MAP_SIZE + x + RAIN_TRANSITION_RADIUS;
+                tops[index] = top;
+                // The biome at THIS column decides whether precipitation is liquid. Baking it into the
+                // apron is what gives the biome border a soft edge: the chamfer field below blends from
+                // the nearest rainy column, so a taiga next to a forest fades dry over the transition
+                // distance instead of switching at a hard line the mesher could not know about.
+                liquid[index] = RtPrecipitation.isLiquidRain(level, blockX, blockZ, top);
             }
         }
-        rainHeightmapCache.putAndMoveToLast(key, snapshot);
+        RainColumnMap map = new RainColumnMap(tops, liquid);
+        rainHeightmapCache.putAndMoveToLast(key, map);
         while (rainHeightmapCache.size() > MAX_RAIN_HEIGHTMAPS) {
             rainHeightmapCache.removeFirst();
         }
-        return snapshot;
+        return map;
     }
 
     private Object section(ClientLevel level, int scx, int scy, int scz) {
@@ -173,18 +196,23 @@ final class RtSectionSnapshots {
         private static final float RAIN_DISTANCE_DIAGONAL = 1.41421356f;
         private static final float RAIN_DISTANCE_CUTOFF = RAIN_TRANSITION_RADIUS + 1.0f;
         private final int[] motionBlockingTopY;
+        // Per-column precipitation type from the same apron, sampled from the biome map. A prim can only
+        // take rain's surface response where THIS column is rained on — not wherever the camera happens
+        // to be standing.
+        private final boolean[] liquidRainColumn;
         // One baked shelter-distance value per block in the target section. The shader applies the live
         // transition-distance slider to these values, so dragging the setting needs no mesh rebuild.
         private final float[] rainShelterDistances = new float[16 * 16 * 16];
 
         Region(ClientLevel level, int minSectionX, int minSectionY, int minSectionZ,
-               int centerSectionX, int centerSectionZ, Object[] sections, int[] motionBlockingTopY) {
+               int centerSectionX, int centerSectionZ, Object[] sections, RainColumnMap columns) {
             this.level = level;
             this.minSectionX = minSectionX;
             this.minSectionY = minSectionY;
             this.minSectionZ = minSectionZ;
             this.sections = sections;
-            this.motionBlockingTopY = motionBlockingTopY;
+            this.motionBlockingTopY = columns.motionBlockingTopY();
+            this.liquidRainColumn = columns.liquidRain();
             this.cardinalLighting = level.cardinalLighting();
             this.lightEngine = level.getLightEngine();
             this.debug = level.isDebug();
@@ -206,6 +234,27 @@ final class RtSectionSnapshots {
             }
             int mapIndex = (z + RAIN_TRANSITION_RADIUS) * RAIN_MAP_SIZE + x + RAIN_TRANSITION_RADIUS;
             return pos.getY() >= motionBlockingTopY[mapIndex] - 1;
+        }
+
+        /**
+         * True when this column's biome receives liquid rain rather than snow or nothing.
+         *
+         * <p>Kept separate from {@link #isRainExposed} on purpose. "Is the sky open here" fades with the
+         * shelter distance, which is what makes a surface dry out gradually as it goes under a roof. "Is
+         * this a rainy biome" does not fade: a snow biome starts where it starts, and blending it would
+         * put rings a few blocks inside the snow, which is exactly the bug this exists to fix.
+         */
+        boolean isLiquidRainColumn(BlockPos pos) {
+            if (debug) {
+                return false;
+            }
+            int x = pos.getX() - centerMinBlockX;
+            int z = pos.getZ() - centerMinBlockZ;
+            if (x < 0 || x >= 16 || z < 0 || z >= 16) {
+                return false;
+            }
+            return liquidRainColumn[(z + RAIN_TRANSITION_RADIUS) * RAIN_MAP_SIZE
+                    + x + RAIN_TRANSITION_RADIUS];
         }
 
         /**
@@ -237,7 +286,10 @@ final class RtSectionSnapshots {
                 int surfaceY = centerMinBlockY + localY;
                 for (int i = 0; i < distance.length; i++) {
                     // Heightmap values point just above the highest motion-blocking block. This is
-                    // equivalent to the direct-exposure test blockY >= height - 1.
+                    // equivalent to the direct-exposure test blockY >= height - 1. The field measures
+                    // distance to the nearest OPEN column; the biome gate is a separate, hard bit on the
+                    // prim (see isLiquidRainColumn), so shelter fades smoothly while a biome border does
+                    // not — which is what stops rings leaking a few blocks into the snow.
                     distance[i] = surfaceY >= motionBlockingTopY[i] - 1
                             ? 0.0f : RAIN_DISTANCE_INFINITY;
                 }

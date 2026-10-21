@@ -18,6 +18,10 @@ final class RtLightning {
     private static final long FLASH_DURATION_NANOS = 180_000_000L;
     private static final float STRIKE_MIN_DISTANCE = 20.0f;
     private static final float STRIKE_DISTANCE_RANGE = 34.0f;
+    // Candidate columns tried before a scheduled strike is skipped. Rainless biomes (desert, snow, and
+    // anything else without liquid precipitation) are common near a storm's edge, so a single draw would
+    // silently delete most bolts in mixed terrain.
+    private static final int STRIKE_ATTEMPTS = 8;
 
     record State(double x, double y, double z, float intensity) {
         static final State NONE = new State(0.0, 0.0, 0.0, 0.0f);
@@ -43,9 +47,16 @@ final class RtLightning {
             nextStrikeNanos = nowNanos + nextDelay(strikesPerMinute);
         }
         if (nowNanos >= nextStrikeNanos) {
-            chooseStrike(level, cameraX, cameraY, cameraZ);
-            flashStartedNanos = nowNanos;
+            // Reschedule first: a strike that finds nowhere to land is skipped, not retried every frame.
             nextStrikeNanos = nowNanos + nextDelay(strikesPerMinute);
+            // Vanilla's own isRainingAt() requires RAIN precipitation, so a bolt never lands on a snowy
+            // or rainless column — and the scheduler keeps running, because a storm that reaches a
+            // neighbouring biome still throws lightning there while the player stands in the taiga.
+            if (!chooseStrike(level, cameraX, cameraY, cameraZ)) {
+                flashStartedNanos = -1L;
+                return State.NONE;
+            }
+            flashStartedNanos = nowNanos;
             // Use the vanilla thunder sound at the actual strike location. The distance-delay flag
             // makes a nearby flash crack sooner than a distant one, and WEATHER respects the game's
             // weather-volume slider. A broad enough source volume lets strikes at the far edge of the
@@ -90,19 +101,33 @@ final class RtLightning {
         return (long) (seconds * 1_000_000_000.0);
     }
 
-    private void chooseStrike(ClientLevel level, double cameraX, double cameraY, double cameraZ) {
-        double angle = random.nextDouble() * Math.PI * 2.0;
-        double distance = STRIKE_MIN_DISTANCE + random.nextDouble() * STRIKE_DISTANCE_RANGE;
-        int blockX = (int) Math.floor(cameraX + Math.cos(angle) * distance);
-        int blockZ = (int) Math.floor(cameraZ + Math.sin(angle) * distance);
-        // Prefer solid-ground height rather than the top of leaves, so the flash visibly lights nearby
-        // terrain. The 20-54 block radius keeps the strike inside the normally loaded local area.
-        int surfaceY = level.getHeight(Heightmap.Types.MOTION_BLOCKING_NO_LEAVES, blockX, blockZ);
-        if (surfaceY <= level.getMinY()) {
-            surfaceY = level.getHeight(Heightmap.Types.MOTION_BLOCKING, blockX, blockZ);
+    /**
+     * Picks a strike column where liquid rain actually reaches the ground.
+     *
+     * @return false when none of the sampled columns is rained on, in which case no flash is published
+     */
+    private boolean chooseStrike(ClientLevel level, double cameraX, double cameraY, double cameraZ) {
+        for (int attempt = 0; attempt < STRIKE_ATTEMPTS; attempt++) {
+            double angle = random.nextDouble() * Math.PI * 2.0;
+            double distance = STRIKE_MIN_DISTANCE + random.nextDouble() * STRIKE_DISTANCE_RANGE;
+            int blockX = (int) Math.floor(cameraX + Math.cos(angle) * distance);
+            int blockZ = (int) Math.floor(cameraZ + Math.sin(angle) * distance);
+            // Prefer solid-ground height rather than the top of leaves, so the flash visibly lights
+            // nearby terrain. The 20-54 block radius keeps the strike inside the normally loaded area.
+            int surfaceY = level.getHeight(Heightmap.Types.MOTION_BLOCKING_NO_LEAVES, blockX, blockZ);
+            if (surfaceY <= level.getMinY()) {
+                surfaceY = level.getHeight(Heightmap.Types.MOTION_BLOCKING, blockX, blockZ);
+            }
+            // The column's own biome decides whether this is a storm it can strike: snow and rainless
+            // biomes answer NONE, so the bolt and its point light never appear over them.
+            if (!RtPrecipitation.isLiquidRain(level, blockX, blockZ, surfaceY)) {
+                continue;
+            }
+            strikeX = blockX + 0.5;
+            strikeY = Math.max(level.getMinY() + 1, surfaceY);
+            strikeZ = blockZ + 0.5;
+            return true;
         }
-        strikeX = blockX + 0.5;
-        strikeY = Math.max(level.getMinY() + 1, surfaceY);
-        strikeZ = blockZ + 0.5;
+        return false;
     }
 }

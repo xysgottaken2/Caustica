@@ -1024,6 +1024,7 @@ void main(inout Payload payload, in BuiltInTriangleIntersectionAttributes attr) 
     float rainAmount = saturate(framePush.weather.x);
     float2 groundRippleGrad = float2(0.0, 0.0);
     bool rainExposed = (terrainFlags & TERRAIN_PRIM_RAIN_EXPOSED) != 0u;
+    bool rainBiome = (terrainFlags & TERRAIN_PRIM_RAIN_BIOME) != 0u;
     bool cutoutSurface = (terrainFlags & TERRAIN_PRIM_CUTOUT) != 0u;
     bool translucentSurface = (terrainFlags & TERRAIN_PRIM_TRANSLUCENT) != 0u;
     bool rainWettable = (!nonSolid || cutoutSurface) && !translucentSurface;
@@ -1032,6 +1033,15 @@ void main(inout Payload payload, in BuiltInTriangleIntersectionAttributes attr) 
     float rainReach = transitionDistance > 0.001
             ? 1.0 - smoothstep(0.0, transitionDistance, shelterDistance)
             : (rainExposed ? 1.0 : 0.0);
+    // ...and then the biome gate, which must NOT fade. Shelter is a roof: the wet edge softens over
+    // the transition radius because the cover above is only partial. A biome border is not partial
+    // cover — the first snowy column is already fully snow, so masking it with a distance field would
+    // paint rings several blocks into the snow next to a rainy valley, and would let the camera's own
+    // biome decide what happens half a world away. The mesher bakes this bit per column, so every
+    // visible chunk answers for itself, all at once.
+    if (!rainBiome) {
+        rainReach = 0.0;
+    }
     if (rainWettable && wetFaceUp > 0.0 && rainReach > 0.0) {
         wetness = saturate(framePush.surfaceWetness.x) * wetFaceUp * rainReach;
         // Ground ripple amplitude inherits the same smooth shelter mask through `wetness` below. It
