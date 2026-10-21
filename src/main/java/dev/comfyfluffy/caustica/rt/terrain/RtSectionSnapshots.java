@@ -125,10 +125,10 @@ final class RtSectionSnapshots {
                 int top = level.getHeight(Heightmap.Types.MOTION_BLOCKING, blockX, blockZ);
                 int index = (z + RAIN_TRANSITION_RADIUS) * RAIN_MAP_SIZE + x + RAIN_TRANSITION_RADIUS;
                 tops[index] = top;
-                // The biome at THIS column decides whether precipitation is liquid. Baking it into the
-                // apron is what gives the biome border a soft edge: the chamfer field below blends from
-                // the nearest rainy column, so a taiga next to a forest fades dry over the transition
-                // distance instead of switching at a hard line the mesher could not know about.
+                // The biome at THIS column decides whether its precipitation is liquid. Keeping the
+                // answer per column is the whole point: a taiga and the rainy forest beside it are
+                // sampled here in the same pass, each at its own surface height, so neither can borrow
+                // the other's weather — and no camera position participates in the decision at all.
                 liquid[index] = RtPrecipitation.isLiquidRain(level, blockX, blockZ, top);
             }
         }
