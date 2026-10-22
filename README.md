@@ -4,7 +4,7 @@ Hardware-ray-traced renderer for Minecraft's Vulkan backend. It replaces the van
 with path tracing and the vendor upscaling/denoising stack (DLSS Ray Reconstruction, DLSS Frame
 Generation, FSR 3, XeSS, NRD, SVGF) while keeping Minecraft's UI and gameplay intact.
 
-![Caustica ray-traced Minecraft scene](docs/gallery/2026-07-09_21.25.14.jpg)
+![Caustica ray-traced Minecraft scene](docs/gallery/banana.png)
 
 ## Features
 
