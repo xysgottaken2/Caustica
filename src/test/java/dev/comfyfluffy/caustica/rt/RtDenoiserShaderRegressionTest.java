@@ -247,20 +247,25 @@ final class RtDenoiserShaderRegressionTest {
 
         assertTrue(reproject.contains("imageStore(momentsOut, pix, vec4(moments, frames, 0.0));"),
                 "the reprojection must store the frame count in the moments texture");
-        // The wavelet no longer reads the count at all: its only consumer was the per-pixel reach
-        // cap, which was the mutating-footprint bug (see svgfCascadeReachIsUniform). The count is
-        // still produced here because the reprojection itself needs it to drive alpha.
-        // The wavelet may read the count ONLY to draw the diagnostic overlay, never to shape the
-        // filter: a per-pixel reach driven by the frame count was the mutating-footprint bug (see
-        // svgfCascadeReachIsUniform). Pin that structurally -- every read must sit after the
-        // debug-mode branch, which runs once at the very end and returns immediately.
-        int momentsRead = atrous.indexOf("imageLoad(moments");
-        if (momentsRead >= 0) {
-            int debugBranch = atrous.indexOf("pc.debugMode != 0");
-            assertTrue(debugBranch >= 0 && momentsRead > debugBranch,
-                    "the wavelet may only read the frame count inside the diagnostic overlay");
-            assertTrue(atrous.indexOf("imageLoad(moments", momentsRead + 1) < 0,
-                    "exactly one frame-count read is allowed, the diagnostic one");
+        // Classic SVGF may only read the count in the debug overlay. A-SVGF has one legitimate
+        // extra read before filtering: it converts temporal confidence into a continuous
+        // long-tap attenuation, rather than resurrecting the old per-pixel filter-radius cap.
+        int firstMomentsRead = atrous.indexOf("imageLoad(moments");
+        int debugBranch = atrous.indexOf("pc.debugMode != 0");
+        assertTrue(debugBranch >= 0, "the wavelet must retain its debug branch");
+        if (atrous.contains("pc.adaptive")) {
+            assertTrue(firstMomentsRead >= 0 && firstMomentsRead < debugBranch,
+                    "A-SVGF must obtain history confidence before filtering");
+            int debugMomentsRead = atrous.indexOf("imageLoad(moments", firstMomentsRead + 1);
+            assertTrue(debugMomentsRead > debugBranch,
+                    "the only second frame-count read must be the diagnostic overlay");
+            assertTrue(atrous.indexOf("imageLoad(moments", debugMomentsRead + 1) < 0,
+                    "A-SVGF has exactly one adaptive and one diagnostic frame-count read");
+        } else if (firstMomentsRead >= 0) {
+            assertTrue(firstMomentsRead > debugBranch,
+                    "classic SVGF may only read the frame count inside the diagnostic overlay");
+            assertTrue(atrous.indexOf("imageLoad(moments", firstMomentsRead + 1) < 0,
+                    "classic SVGF allows exactly one diagnostic frame-count read");
         }
         assertFalse(atrous.contains("histLen"),
                 "the frame count no longer travels in the history image's alpha channel");
