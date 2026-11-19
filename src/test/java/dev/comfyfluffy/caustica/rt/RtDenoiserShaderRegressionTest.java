@@ -174,29 +174,48 @@ final class RtDenoiserShaderRegressionTest {
      * SVGF's accumulated frame count lives in the moments texture, NOT in the history's alpha,
      * because the à-trous feedback overwrites the whole history image. Moving it back into the
      * history alpha would make the count read as variance (and vice versa) with no compile error.
+     *
+     * <p>The moments texture's channels are therefore: {@code xy} = luminance moments, {@code z} =
+     * frame count, {@code w} = A-SVGF adaptation (how much history the temporal gradient released
+     * this frame). All four are written by the reprojection on every path — including the sky
+     * early-out — because both the {@code z} and {@code w} consumers would otherwise read a value
+     * from some earlier frame.
      */
     @Test
     void svgfFrameCountLivesInTheMomentsTexture() throws IOException {
         String reproject = Files.readString(SVGF_REPROJECT);
         String atrous = Files.readString(SVGF_ATROUS);
 
-        assertTrue(reproject.contains("imageStore(momentsOut, pix, vec4(moments, frames, 0.0));"),
+        assertTrue(reproject.contains("imageStore(momentsOut, pix, vec4(moments, frames, adapt));"),
                 "the reprojection must store the frame count in the moments texture");
-        // The wavelet no longer reads the count at all: its only consumer was the per-pixel reach
-        // cap, which was the mutating-footprint bug (see svgfCascadeReachIsUniform). The count is
-        // still produced here because the reprojection itself needs it to drive alpha.
-        // The wavelet may read the count ONLY to draw the diagnostic overlay, never to shape the
-        // filter: a per-pixel reach driven by the frame count was the mutating-footprint bug (see
-        // svgfCascadeReachIsUniform). Pin that structurally -- every read must sit after the
-        // debug-mode branch, which runs once at the very end and returns immediately.
-        int momentsRead = atrous.indexOf("imageLoad(moments");
-        if (momentsRead >= 0) {
-            int debugBranch = atrous.indexOf("pc.debugMode != 0");
-            assertTrue(debugBranch >= 0 && momentsRead > debugBranch,
-                    "the wavelet may only read the frame count inside the diagnostic overlay");
-            assertTrue(atrous.indexOf("imageLoad(moments", momentsRead + 1) < 0,
-                    "exactly one frame-count read is allowed, the diagnostic one");
-        }
+        // Every write of the moments texture must fill all four channels: alpha now carries the
+        // A-SVGF adaptation, so a write that left it out would let it go stale.
+        int stores = countOf(reproject, "imageStore(momentsOut,");
+        assertEquals(2, stores, "the reprojection has exactly one ordinary and one sky moments write");
+        assertEquals(stores, countOf(reproject, "imageStore(momentsOut, pix, vec4("),
+                "every moments write must fill all four channels");
+        assertEquals(1, countOf(reproject,
+                        "imageStore(momentsOut, pix, vec4(moments, frames, adapt));"),
+                "the ordinary write must carry the adaptation in alpha");
+        assertEquals(1, countOf(reproject,
+                        "imageStore(momentsOut, pix, vec4(lum, lum * lum, min(histFrames + 1.0, "
+                                + "max(pc.maxFrames, 1.0)), 0.0));"),
+                "the sky write must fill all four channels too");
+
+        // The wavelet no longer reads the count to shape the filter: its only consumer was the
+        // per-pixel reach cap, which was the mutating-footprint bug (see svgfCascadeReachIsUniform).
+        // Both reads that remain (.z frame count, .w adaptation) draw the diagnostic overlay and
+        // must sit after the debug-mode branch, which runs once at the very end and returns.
+        int debugBranch = atrous.indexOf("pc.debugMode != 0");
+        assertTrue(debugBranch >= 0, "the wavelet must have a debug overlay branch");
+        assertEquals(2, countOf(atrous, "imageLoad(moments"),
+                "exactly two moments reads are allowed, both diagnostic (.z count, .w adaptation)");
+        int historyRead = atrous.indexOf("imageLoad(moments, pix).z");
+        int adaptRead = atrous.indexOf("imageLoad(moments, pix).w");
+        assertTrue(historyRead > debugBranch,
+                "the frame count may only be read inside the diagnostic overlay");
+        assertTrue(adaptRead > debugBranch,
+                "the adaptation may only be read inside the diagnostic overlay");
         assertFalse(atrous.contains("histLen"),
                 "the frame count no longer travels in the history image's alpha channel");
     }
