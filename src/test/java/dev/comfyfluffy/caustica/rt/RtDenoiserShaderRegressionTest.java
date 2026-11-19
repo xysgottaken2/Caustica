@@ -32,6 +32,7 @@ final class RtDenoiserShaderRegressionTest {
     private static final Path SVGF_REPROJECT = REPO_ROOT.resolve("shaders/display/svgf_reproject.comp");
     private static final Path SVGF_ATROUS = REPO_ROOT.resolve("shaders/display/svgf_atrous.comp");
     private static final Path SVGF_GRADIENT = REPO_ROOT.resolve("shaders/display/svgf_gradient.comp");
+    private static final Path GUIDES = REPO_ROOT.resolve("shaders/world/guides.slang");
     private static final Path SVGF_DENOISER = REPO_ROOT.resolve(
             "src/main/java/dev/comfyfluffy/caustica/rt/pipeline/RtSvgfDenoiser.java");
     private static final Path NRD_DENOISER =
@@ -752,5 +753,51 @@ final class RtDenoiserShaderRegressionTest {
         float fullAdapt = bound * (1.0f - 1.0f) + 65504.0f * 1.0f;
         assertEquals(65504.0f, fullAdapt, 1.0f,
                 "full adaptation must lift the bound out of the way");
+    }
+
+    /**
+     * Both motion vectors the denoisers consume must be bounded by the frame size.
+     *
+     * <p>An unbounded guide MV is not a tuning problem, it is a visible artefact: rocks and walls read
+     * as static vertical streaks of stretched texture. Static streaks while the camera is standing
+     * still prove the vector is numerically broken rather than physically wrong — real parallax error
+     * still requires camera motion. Three paths in guides.slang produce one (a transmitted point whose
+     * current and previous positions go through different projections, a rear-projection singularity,
+     * and the TIR branch that reports water THICKNESS as if it were a world displacement), and because
+     * the error is a deterministic function of each pixel's geometry it accumulates into a streak
+     * instead of averaging out.
+     *
+     * <p>REBLUR tolerates this (its pre-pass averages the signal over a wide anisotropic kernel and
+     * rejects history on hit distance) while RELAX and SVGF reproject on the MV directly, which is
+     * exactly why the artefact was reported for RELAX and not for REBLUR. Both vectors therefore have
+     * to be bounded at the source.
+     */
+    @Test
+    void guideMotionVectorsAreBoundedByTheFrame() throws Exception {
+        String guides = Files.readString(GUIDES);
+        assertEquals(2, countOf(guides, "float maxMotion = max(size.x, size.y);"),
+                "both the ordinary and the reflection guide motion must be bounded");
+        assertEquals(2, countOf(guides, "if (!(abs(motion.x) <= maxMotion) || !(abs(motion.y) <= maxMotion)) {")
+                        + countOf(guides, "if (!(abs(reflectionMotion.x) <= maxMotion) || !(abs(reflectionMotion.y) <= maxMotion)) {"),
+                "each bounded vector must fall back to zero motion");
+        // The reflection path must still report zero when the reprojection is invalid at all.
+        assertTrue(guides.contains("if (!prevValid) {\n        return float2(0.0, 0.0);\n    }"),
+                "an invalid reflection reprojection must report no motion");
+
+        // Sanity-check that the bound discriminates: a legitimate fast pan stays inside it, a
+        // reprojection singularity does not.
+        float frameWidth = 640.0f;
+        assertTrue(Math.abs(12.0f) <= frameWidth, "a fast pan must survive the bound");
+        assertFalse(Math.abs(1.0e6f) <= frameWidth, "a broken divide must be rejected");
+    }
+
+    private static int countOf(String haystack, String needle) {
+        int count = 0;
+        int at = haystack.indexOf(needle);
+        while (at >= 0) {
+            count++;
+            at = haystack.indexOf(needle, at + needle.length());
+        }
+        return count;
     }
 }

@@ -136,7 +136,22 @@ public float2 resolveSpecularGuides(SpecSurface surface, float3 primaryDir,
     float2 prevNdc = previousReflectionNdc(
             surfacePos, previousN, surface.motionPrev,
             reflectedHit, reflectedMotionPrev, prevValid);
-    return prevValid ? (prevNdc - currentNdc) * 0.5 * size : float2(0.0, 0.0);
+    if (!prevValid) {
+        return float2(0.0, 0.0);
+    }
+    float2 reflectionMotion = (prevNdc - currentNdc) * 0.5 * size;
+    // Same sanity bound as the ordinary guide motion (see writeGuides). The reflection probe is the
+    // MORE exposed of the two: it double-applies a screen-space delta (surface motion AND reflected
+    // terminal motion), and its terminal is `surfacePos + specDir * 1.0e6` whenever the reflection
+    // escapes to the sky, so a pixel whose reflected ray misses can report a vector of an entirely
+    // different magnitude than its neighbour whose ray hits a wall one block away. A mirrored,
+    // hand-tuned probe is exactly where a bounded, deterministic answer beats an unbounded accurate
+    // one, and "no motion" keeps the specular history inside the denoiser's own fallback.
+    float maxMotion = max(size.x, size.y);
+    if (!(abs(reflectionMotion.x) <= maxMotion) || !(abs(reflectionMotion.y) <= maxMotion)) {
+        return float2(0.0, 0.0);
+    }
+    return reflectionMotion;
 }
 
 public void setTransmissionGuide(float3 hitCamRel, float3 motionPrev, float3 normal,
@@ -323,6 +338,36 @@ public void writeGuides(int2 pix, float3 primaryDir, float2 jndc, float2 size, f
         if (gv_motionUseRefracted) curNdc = curClipMotion.xy / curClipMotion.w;
         motion = (prevClip.xy / prevClip.w - curNdc) * 0.5 * size;
     } else {
+        motion = float2(0.0, 0.0);
+    }
+
+    // ---- Sanity bound on the guide motion. A motion vector is a SUB-PIXEL quantity; anything much
+    // larger than the frame is not motion, it is a broken reprojection.
+    //
+    // This is not defensive paranoia, it is the fix for a real artefact: rocks and walls read as
+    // vertical streaks of stretched texture. Streaks that are static while standing still are the
+    // signature of a NUMERICALLY unbounded vector rather than a physically wrong one — a real
+    // parallax error still needs camera motion. Three paths in this file produce one:
+    //
+    //   * a transmitted guide point's CURRENT position is projected with curViewProj while its
+    //     previous position subtracts gv_motionObjDisp, so a moving entity's displacement becomes a
+    //     screen-space delta that grows with distance;
+    //   * the same point can sit behind the camera in the previous frame (the rear-projection
+    //     singularity), where w just above zero leaves the divide finite but enormous;
+    //   * the TIR branch of resolveTransmissionGuide deliberately forces motionPrev to zero for
+    //     water, and when that branch fires the signal is a WATER THICKNESS rather than a world
+    //     displacement, so reprojecting it as one is meaningless.
+    //
+    // At every pixel the error is a deterministic function of that pixel's geometry, so it does not
+    // average out over time: whatever the denoiser reprojects with it lands in a fixed place and
+    // accumulates into a streak. REBLUR survives this because its per-denoiser pre-pass averages the
+    // signal across a wide anisotropic kernel and drops the MV-driven history where hit distance
+    // looks wrong, while RELAX (like SVGF) reprojects on the MV directly.
+    //
+    // Reporting "no motion" is the correct conservative answer: the denoiser then falls back to a
+    // spatial estimate for that pixel instead of mixing in a sample from an unrelated surface.
+    float maxMotion = max(size.x, size.y);
+    if (!(abs(motion.x) <= maxMotion) || !(abs(motion.y) <= maxMotion)) {
         motion = float2(0.0, 0.0);
     }
 
