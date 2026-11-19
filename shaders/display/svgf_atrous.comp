@@ -50,6 +50,9 @@ layout(push_constant) uniform Push {
     // deduced. Unlike the guide debug views (pc.debugView in the tracer) these run with the
     // denoiser ENABLED, which is the whole point -- the guide views disable it.
     int debugMode;
+    // A-SVGF: smoothly reduces long-range spatial taps once temporal history has converged. It
+    // preserves contact-shadow and thin-geometry detail without changing the number of passes.
+    int adaptive;
 } pc;
 
 const float DENOISING_RANGE = 500000.0;
@@ -154,6 +157,14 @@ void main() {
     }
     float filteredVar = varWeight > 0.0 ? varSum / varWeight : cv;
 
+    // A-SVGF is deliberately CONTINUOUS. A per-pixel integer cap on the cascade gave adjacent
+    // pixels different filter radii and made texture-sized bands crawl under motion. Instead, once
+    // the temporal estimator has enough history, attenuate only long spatial taps with a smooth
+    // confidence term. Fresh/disoccluded pixels keep the complete SVGF kernel needed to kill 1 spp
+    // shadow noise; converged pixels retain sharp contact shadows and fine block edges.
+    float historyFrames = max(imageLoad(moments, pix).z, 0.0);
+    float adaptiveConfidence = pc.adaptive != 0 ? smoothstep(4.0, 24.0, historyFrames) : 0.0;
+
     // Luminance edge-stop denominator: phi * sqrt(variance). The epsilon keeps a fully converged
     // (variance ~ 0) pixel from dividing by zero and rejecting every neighbour.
     float lc = prefilteredLuma(pix, maxPix);
@@ -241,6 +252,12 @@ void main() {
             float lt = prefilteredLuma(q, maxPix);
 
             float w = KERNEL[dx + 2] * KERNEL[dy + 2];
+            if (adaptiveConfidence > 0.0) {
+                // The attenuation grows with the actual tap distance, not the pass number. That
+                // keeps it radial and continuous across the entire à-trous cascade.
+                float tapDistance2 = dot(vec2(offset), vec2(offset));
+                w *= exp(-0.012 * adaptiveConfidence * tapDistance2);
+            }
             if (!centerSky) {
                 // Depth: allowed difference grows with the surface's own screen-space slope.
                 float expectedDz = gradZ * length(vec2(offset));

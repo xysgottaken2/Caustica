@@ -284,6 +284,8 @@ public final class RtComposite {
     // sky cutoff, NRD's IN_VIEWZ), so it is set for both denoisers.
     private static final int FEATURE_VIEWZ = 128;
     private static final int FEATURE_SHARC = 256;
+    /** NRD RELAX uses linear radiance + raw hit distance; REBLUR uses YCoCg + normalized distance. */
+    private static final int FEATURE_NRD_RELAX = 512;
 
     // ---- Dimension ids (WorldPush.dimension). Mirrors world_common.slang's DIMENSION_* constants.
     // The Overworld runs the atmosphere march and the sun/moon cycle; the Nether and the End have no
@@ -331,6 +333,9 @@ public final class RtComposite {
                 // internally and SVGF works on the combined radiance, so capturing the split would
                 // burn an extra shadow ray plus bandwidth for buffers nothing reads.
                 flags |= FEATURE_NRD;
+                if (CausticaConfig.Rt.Nrd.relax()) {
+                    flags |= FEATURE_NRD_RELAX;
+                }
                 flags |= FEATURE_VIEWZ;
             } else if (CausticaConfig.Rt.Denoise.ENABLED.value() && debugView() == 0) {
                 // SVGF needs gViewZ for its geometry-validated reprojection and its sky cutoff.
@@ -458,6 +463,8 @@ public final class RtComposite {
     // GEOMETRY rather than thrown away on motion: a long window no longer means ghosting, it means
     // a converged image. The exponential tail after the 1/n phase still tracks lighting changes.
     private static final float SVGF_MAX_FRAMES = 48.0f;
+    /** A-SVGF keeps a little more temporal confidence while its adaptive spatial taps preserve edges. */
+    private static final float ASVGF_MAX_FRAMES = 64.0f;
     /**
      * Debug-view ids that inspect SVGF's internal state instead of the tracer's guides. Unlike the
      * guide views these leave the denoiser enabled, because the point is to see what it is doing.
@@ -475,6 +482,10 @@ public final class RtComposite {
     // Depth edge-stop, as a multiple of the local screen-space depth gradient. Scaling by the
     // gradient is what keeps slanted surfaces from reading as discontinuities.
     private static final float SVGF_PHI_DEPTH = 2.0f;
+    /** Tighter A-SVGF edge stops: less shadow/geometry softening after its history has converged. */
+    private static final float ASVGF_PHI_LUMINANCE = 2.75f;
+    private static final float ASVGF_PHI_NORMAL = 192.0f;
+    private static final float ASVGF_PHI_DEPTH = 1.35f;
     // Matches the viewZ cap the tracer writes for sky/miss pixels: everything beyond is passed
     // through the denoise chain raw (the sky never accumulates history).
     private static final float NRD_DENOISING_RANGE = 500000.0f;
@@ -734,6 +745,7 @@ public final class RtComposite {
     /** Sky-mask pass over FSR FG's generated frames (see RtFgSkyMaskPipeline); created lazily. */
     private RtFgSkyMaskPipeline fgSkyMaskPipeline;
     private boolean renderSizeSvgfEnabled;
+    private boolean renderSizeSvgfAdaptive;
     // NRD/REBLUR: the denoiser's own input/output pair + the combined (decoded + summed) radiance
     // the upscale stage consumes, plus the validation overlay target and the combine pipeline.
     private RtImage nrdDiffOut;
@@ -1407,6 +1419,8 @@ public final class RtComposite {
         // toggling NRD appeared to do nothing at all.
         boolean nrdEnabled = !rrEnabled && RtNrdDenoiser.active();
         boolean svgfEnabled = !rrEnabled && !nrdEnabled && CausticaConfig.Rt.Denoise.ENABLED.value();
+        boolean svgfAdaptive = svgfEnabled && CausticaConfig.Rt.Composite.isDenoiserMode(
+                CausticaConfig.Rt.Composite.DENOISER_MODE_ASVGF);
         if (output != null && continuationQueue != null
                 && displayImage != null && hdrDisplayImage != null && rrOutput != null && exposure.ready()
                 && displayW == width && displayH == height
@@ -1414,6 +1428,7 @@ public final class RtComposite {
                 && renderSizeFsrEnabled == fsrEnabled && renderSizeFsrQuality == fsrQuality
                 && renderSizeXessEnabled == xessEnabled && renderSizeXessQuality == xessQuality
                 && renderSizeSvgfEnabled == svgfEnabled
+                && renderSizeSvgfAdaptive == svgfAdaptive
                 && renderSizeNrdEnabled == nrdEnabled) {
             syncRestirResources(ctx);
             return;
@@ -1471,6 +1486,7 @@ public final class RtComposite {
         renderSizeXessEnabled = xessEnabled;
         renderSizeXessQuality = xessQuality;
         renderSizeSvgfEnabled = svgfEnabled;
+        renderSizeSvgfAdaptive = svgfAdaptive;
         renderSizeNrdEnabled = nrdEnabled;
 
         // RT traces into an HDR (R16G16B16A16_SFLOAT) target so radiance > 1 survives to the display
@@ -1517,8 +1533,9 @@ public final class RtComposite {
             svgfPrevNormal = ctx.createStorageImage(renderW, renderH, VK10.VK_FORMAT_R16G16B16A16_SFLOAT, "svgf prev normal " + renderW + "x" + renderH);
             if (svgfDenoiser == null) {
                 svgfDenoiser = RtSvgfDenoiser.create(ctx);
-                CausticaMod.LOGGER.info("SVGF denoiser active ({} a-trous passes, {} frame window)",
-                        RtSvgfDenoiser.ATROUS_PASSES, (int) SVGF_MAX_FRAMES);
+                CausticaMod.LOGGER.info("{} denoiser active ({} a-trous passes, {} frame window)",
+                        svgfAdaptive ? "A-SVGF" : "SVGF", RtSvgfDenoiser.ATROUS_PASSES,
+                        (int) (svgfAdaptive ? ASVGF_MAX_FRAMES : SVGF_MAX_FRAMES));
             } else {
                 // The images above are new. A recycled view handle can compare equal to the one that
                 // was just destroyed, so the descriptor cache must be dropped rather than trusted.
@@ -2006,7 +2023,8 @@ public final class RtComposite {
                 if (nrdDone) {
                     VulkanCommandEncoder.memoryBarrier(cmd, stack); // NRD outputs visible to the combine
                     try (RtFrameStats.Scope ignoredStats = RtFrameStats.FRAME.stage("frame.nrdCombine")) {
-                        nrdCombinePipeline.dispatch(cmd, renderW, renderH, NRD_DENOISING_RANGE);
+                        nrdCombinePipeline.dispatch(cmd, renderW, renderH, NRD_DENOISING_RANGE,
+                                CausticaConfig.Rt.Nrd.relax());
                     }
                     VulkanCommandEncoder.memoryBarrier(cmd, stack); // combine output visible downstream
                     denoisedSource = nrdCombined;
@@ -2091,12 +2109,18 @@ public final class RtComposite {
                 VulkanCommandEncoder.memoryBarrier(cmd, stack); // trace + guides visible to the denoiser
                 try (RtDebugLabels.Scope ignored = RtDebugLabels.scope(ctx, cmd, "SVGF denoise");
                      RtFrameStats.Scope ignoredStats = RtFrameStats.FRAME.stage("frame.svgf")) {
+                    boolean adaptiveSvgf = CausticaConfig.Rt.Composite.isDenoiserMode(
+                            CausticaConfig.Rt.Composite.DENOISER_MODE_ASVGF);
+                    float svgfMaxFrames = adaptiveSvgf ? ASVGF_MAX_FRAMES : SVGF_MAX_FRAMES;
+                    float svgfPhiLuminance = adaptiveSvgf ? ASVGF_PHI_LUMINANCE : SVGF_PHI_LUMINANCE;
+                    float svgfPhiNormal = adaptiveSvgf ? ASVGF_PHI_NORMAL : SVGF_PHI_NORMAL;
+                    float svgfPhiDepth = adaptiveSvgf ? ASVGF_PHI_DEPTH : SVGF_PHI_DEPTH;
                     svgfDenoiser.reproject(cmd, renderW, renderH, svgfParity,
                             upscaleSource.view, historyIn.view, momentsIn.view,
                             historyOut.view, momentsOut.view, svgfFilterPing.view,
                             gMotion.view, gViewZ.view, gNormal.view,
                             svgfPrevViewZ.view, svgfPrevNormal.view, gAlbedo.view,
-                            svgfReset, SVGF_MAX_FRAMES, svgfCamForwardDelta);
+                            svgfReset, svgfMaxFrames, svgfCamForwardDelta);
                     VulkanCommandEncoder.memoryBarrier(cmd, stack); // reprojection visible to the wavelet
 
                     // À-trous cascade with doubling tap spacing. The first iteration's output is
@@ -2116,8 +2140,8 @@ public final class RtComposite {
                         svgfDenoiser.atrous(cmd, renderW, renderH, pass, svgfParity,
                                 src.view, dst.view, gViewZ.view, gNormal.view, momentsOut.view,
                                 gAlbedo.view,
-                                SVGF_PHI_LUMINANCE, SVGF_PHI_NORMAL, SVGF_PHI_DEPTH,
-                                extraSkySmooth, lastPass, svgfDebugView ? debugView : 0);
+                                svgfPhiLuminance, svgfPhiNormal, svgfPhiDepth,
+                                extraSkySmooth, lastPass, svgfDebugView ? debugView : 0, adaptiveSvgf);
                         VulkanCommandEncoder.memoryBarrier(cmd, stack);
                         if (pass == RtSvgfDenoiser.HISTORY_FEEDBACK_PASS) {
                             // Copy this iteration's colour into the history the next frame reads.

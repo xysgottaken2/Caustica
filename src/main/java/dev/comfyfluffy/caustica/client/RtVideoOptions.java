@@ -81,18 +81,18 @@ public final class RtVideoOptions {
         if (RtUpscalerSupport.MODE_DLSS.equals(mode)) {
             options.add(dlssQuality());
             options.add(dlssPreset());
+            options.add(dlssDenoiserMode(upscalerChanged));
+            if (CausticaConfig.Rt.Composite.isDenoiserMode(CausticaConfig.Rt.Composite.DENOISER_MODE_NRD)) {
+                options.add(nrdAlgorithm());
+            }
         } else if (RtUpscalerSupport.MODE_FSR3.equals(mode)) {
             options.add(fsrQuality());
         } else if (RtUpscalerSupport.MODE_XESS.equals(mode)) {
             options.add(xessQuality());
         }
-        // Denoiser rows, for every path except DLSS (Ray Reconstruction denoises internally, so it
-        // owns the slot and neither row would do anything).
-        //
-        // The built-in SVGF is the only denoiser offered. REBLUR is no longer exposed: it kept its
-        // own temporal history inside the library, so the reprojection fixes that cleaned up the
-        // built-in path could not reach it, and it stayed blobby where SVGF is now stable. The
-        // integration is left in the tree (the CI still builds the shim) but nothing turns it on.
+        // DLSS exposes its mutually-exclusive filter selector above. Other upscalers still use
+        // the renderer's own SVGF path; NRD is intentionally scoped to the DLSS page so an old
+        // config cannot accidentally stack it with a second upscaler.
         if (!RtUpscalerSupport.MODE_DLSS.equals(mode)) {
             options.add(svgfDenoiser());
         }
@@ -115,7 +115,10 @@ public final class RtVideoOptions {
         if (RtUpscalerSupport.MODE_DLSS.equals(mode)) {
             options.add(dlssQuality());
             options.add(dlssPreset());
-            options.add(denoiser());
+            options.add(dlssDenoiserMode(upscalerChanged));
+            if (CausticaConfig.Rt.Composite.isDenoiserMode(CausticaConfig.Rt.Composite.DENOISER_MODE_NRD)) {
+                options.add(nrdAlgorithm());
+            }
         } else if (RtUpscalerSupport.MODE_FSR3.equals(mode)) {
             options.add(fsrQuality());
             options.add(svgfDenoiser());
@@ -1337,14 +1340,55 @@ public final class RtVideoOptions {
             step -> setting.set((float) (step * FOG_FALLOFF_STEP)));
     }
 
+    private static final List<String> DLSS_DENOISER_MODES = List.of(
+            CausticaConfig.Rt.Composite.DENOISER_MODE_DLSS_RR,
+            CausticaConfig.Rt.Composite.DENOISER_MODE_SVGF,
+            CausticaConfig.Rt.Composite.DENOISER_MODE_ASVGF,
+            CausticaConfig.Rt.Composite.DENOISER_MODE_NRD);
+    private static final List<String> NRD_ALGORITHMS = List.of(
+            CausticaConfig.Rt.Nrd.MODE_REBLUR, CausticaConfig.Rt.Nrd.MODE_RELAX);
+
     /**
-     * The denoising filter (DLSS Ray Reconstruction). Turning it off shows the raw path-traced image —
-     * a correct but noisy reference view — and, because RR also owns the upscale, moves the trace to
-     * full display resolution. Safe to toggle live: {@code RtComposite.ensureOutput} re-sizes the trace
-     * targets on the next frame.
+     * The DLSS-only denoiser selector. RR owns denoise + reconstruction; SVGF, A-SVGF and NRD replace RR
+     * entirely, so the trace returns to display resolution instead of passing one temporal filter
+     * through another. Reopening makes the NRD algorithm row appear only when it is relevant.
      */
-    private static OptionInstance<Boolean> denoiser() {
-        return bool("caustica.options.rt.denoiser", CausticaConfig.Rt.Composite.DENOISER);
+    private static OptionInstance<String> dlssDenoiserMode(Runnable onChanged) {
+        StringSetting setting = CausticaConfig.Rt.Composite.DENOISER_MODE;
+        String initial = setting.value();
+        if (!DLSS_DENOISER_MODES.contains(initial)) {
+            initial = CausticaConfig.Rt.Composite.DENOISER_MODE_DLSS_RR;
+        }
+        return new OptionInstance<>(
+                "caustica.options.rt.denoiserMode",
+                OptionInstance.cachedConstantTooltip(Component.translatable("caustica.options.rt.denoiserMode.tooltip")),
+                (caption, value) -> Component.translatable("caustica.options.rt.denoiserMode." + value),
+                new OptionInstance.Enum<>(DLSS_DENOISER_MODES, Codec.STRING),
+                initial,
+                value -> {
+                    setting.set(value);
+                    // Retain compatibility with old config keys while guaranteeing that only the
+                    // selected filter can claim the denoise slot.
+                    CausticaConfig.Rt.Composite.DENOISER.set(true);
+                    CausticaConfig.Rt.Denoise.ENABLED.set(true);
+                    CausticaConfig.Rt.Nrd.ENABLED.set(
+                            CausticaConfig.Rt.Composite.DENOISER_MODE_NRD.equals(value));
+                    onChanged.run();
+                });
+    }
+
+    /** Algorithm choice within the NRD item: REBLUR for noisy paths, RELAX for cleaner ReSTIR paths. */
+    private static OptionInstance<String> nrdAlgorithm() {
+        StringSetting setting = CausticaConfig.Rt.Nrd.MODE;
+        String initial = setting.value();
+        if (!NRD_ALGORITHMS.contains(initial)) {
+            initial = CausticaConfig.Rt.Nrd.MODE_REBLUR;
+        }
+        return new OptionInstance<>(
+                "caustica.options.rt.nrdAlgorithm",
+                OptionInstance.cachedConstantTooltip(Component.translatable("caustica.options.rt.nrdAlgorithm.tooltip")),
+                (caption, value) -> Component.translatable("caustica.options.rt.nrdAlgorithm." + value),
+                new OptionInstance.Enum<>(NRD_ALGORITHMS, Codec.STRING), initial, setting::set);
     }
 
     /**

@@ -57,7 +57,8 @@ public final class CausticaConfig {
         @SuppressWarnings("unused")
         Object[] touch = {
             Rt.ENABLED, Rt.Composite.SPP, Rt.Composite.MAX_BOUNCES, Rt.Composite.SSS,
-            Rt.Composite.WEATHER_LIGHTING, Rt.Composite.DENOISER, Rt.Composite.METALLIC_SHININESS,
+            Rt.Composite.WEATHER_LIGHTING, Rt.Composite.DENOISER, Rt.Composite.DENOISER_MODE,
+            Rt.Composite.METALLIC_SHININESS,
             Rt.Composite.WATER_WAVE_STRENGTH, Rt.Composite.WATER_WAVE_SPEED, Rt.Composite.WATER_WAVE_DETAIL,
             Rt.Composite.WETNESS_ENABLED, Rt.Composite.WETNESS_WET_SECONDS, Rt.Composite.WETNESS_DRY_SECONDS,
             Rt.Composite.WETNESS_GLOSS, Rt.Composite.WETNESS_TRANSITION_DISTANCE,
@@ -75,7 +76,7 @@ public final class CausticaConfig {
             Rt.Entities.ENABLED, Rt.Entities.GLOW_ENABLED, Rt.EntityTextures.MAX_TEXTURES,
             Rt.DlssRr.ENABLED, Rt.DlssRr.PRESET, Rt.DlssRr.QUALITY, Rt.Fg.ENABLED,
             Rt.Fsr.ENABLED, Rt.Fsr.QUALITY, Rt.Xess.ENABLED, Rt.Xess.QUALITY,
-            Rt.Denoise.ENABLED, Rt.Nrd.ENABLED, Rt.Nrd.VALIDATION,
+            Rt.Denoise.ENABLED, Rt.Nrd.ENABLED, Rt.Nrd.MODE, Rt.Nrd.VALIDATION,
             Rt.Sharc.ENABLED, Rt.Sharc.CELL_SIZE, Rt.Sharc.CACHE_ENTRIES, Rt.Sharc.UPDATE_COVERAGE,
             Rt.Sharc.TEMPORAL_BLEND, Rt.Sharc.START_BOUNCE, Rt.Sharc.STRENGTH, Rt.Sharc.MAX_DISTANCE,
             Rt.Sharc.FRAME_LIFETIME, Rt.Sharc.NORMAL_THRESHOLD, Rt.Sharc.STABLE_FRAMES, Rt.Sharc.DEBUG,
@@ -141,17 +142,21 @@ public final class CausticaConfig {
                         + " 3 Ultra Performance, 5 native AA). The runtime is bundled for Windows only for\n"
                         + " now; elsewhere the upscaler selector does not offer FSR 3.");
         FILE.setComment("denoise",
-                " The renderer's own denoiser (SVGF): geometry-validated temporal reprojection with\n"
+                " The renderer's own denoiser (SVGF / A-SVGF): geometry-validated temporal reprojection with\n"
                         + " luminance moments, then a variance-guided a-trous wavelet cascade. Default on and\n"
                         + " used by every non-DLSS path; DLSS Ray Reconstruction denoises internally instead,\n"
-                        + " and switching NRD on hands the slot to REBLUR.");
+                        + " and switching NRD on hands the slot to REBLUR or RELAX. A-SVGF keeps the same\n"
+                        + " temporal estimator but smoothly narrows only long spatial taps once history has\n"
+                        + " converged, preserving thin geometry and contact shadows.");
         FILE.setComment("nrd",
-                " NRD (NVIDIA Real-time Denoisers) REBLUR denoising: the optional alternative to the\n"
+                " NRD (NVIDIA Real-time Denoisers) REBLUR/RELAX denoising: the optional alternative to the\n"
                         + " built-in denoiser, running on demodulated per-lobe radiance so diffuse and specular\n"
                         + " are filtered separately. Denoises at render resolution; combine with FSR 3 / XeSS\n"
                         + " (or no upscaler) for the display. Requires the bundled NRD natives (Windows) and is\n"
-                        + " mutually exclusive with both DLSS and the built-in denoiser.\n"
-                        + " validation: REBLUR's diagnostic overlay; replaces the image with NRD's debug grid.");
+                        + " mutually exclusive with DLSS Ray Reconstruction and the built-in denoiser. NRD's\n"
+                        + " SIGMA is intentionally not dispatched until the tracer exposes an isolated direct-shadow\n"
+                        + " signal: SIGMA cannot correctly denoise a combined radiance image.\n"
+                        + " validation: NRD's diagnostic overlay; replaces the image with NRD's debug grid.");
         FILE.setComment("sharc",
                 " Experimental SHaRC (NVIDIA Spatial Hash Radiance Cache). A shader-only world-space\n"
                         + " radiance cache: early bounces warm a voxel hash with the local light they see,\n"
@@ -791,6 +796,37 @@ public final class CausticaConfig {
              */
             public static final BooleanSetting DENOISER =
                     bool("caustica.rt.denoiser", "composite.denoiser", true);
+
+            /**
+             * The denoiser selected while the DLSS backend is active. Keeping this separate from
+             * the backend switch makes the filters genuinely exclusive: choosing SVGF, A-SVGF or
+             * NRD cannot leave DLSS-RR evaluating over their already-denoised output.
+             */
+            public static final StringSetting DENOISER_MODE =
+                    string("caustica.rt.denoiserMode", "composite.denoiser-mode", "dlss_rr",
+                            Composite::sanitizeDenoiserMode);
+
+            public static final String DENOISER_MODE_DLSS_RR = "dlss_rr";
+            public static final String DENOISER_MODE_SVGF = "svgf";
+            public static final String DENOISER_MODE_ASVGF = "asvgf";
+            public static final String DENOISER_MODE_NRD = "nrd";
+
+            public static boolean isDenoiserMode(String mode) {
+                return mode.equals(DENOISER_MODE.value());
+            }
+
+            private static String sanitizeDenoiserMode(String value) {
+                if (value == null) {
+                    return DENOISER_MODE_DLSS_RR;
+                }
+                return switch (value.toLowerCase(java.util.Locale.ROOT).replace('-', '_')) {
+                    case "dlss", "dlss_rr", "rr", "ray_reconstruction" -> DENOISER_MODE_DLSS_RR;
+                    case "svgf" -> DENOISER_MODE_SVGF;
+                    case "asvgf", "a_svgf", "adaptive_svgf", "adaptive" -> DENOISER_MODE_ASVGF;
+                    case "nrd", "reblur", "relax" -> DENOISER_MODE_NRD;
+                    default -> DENOISER_MODE_DLSS_RR;
+                };
+            }
             /**
              * Flat, vanilla-style cloud deck drawn by the sky shader.
              *
@@ -1467,6 +1503,19 @@ public final class CausticaConfig {
          */
         public static final class Nrd {
             public static final BooleanSetting ENABLED = bool("caustica.rt.nrd", "nrd.enabled", false);
+            /** NRD's two diffuse+specular denoisers share the same guide buffers but not packing. */
+            public static final StringSetting MODE =
+                    string("caustica.rt.nrd.mode", "nrd.mode", "reblur", Nrd::sanitizeMode);
+            public static final String MODE_REBLUR = "reblur";
+            public static final String MODE_RELAX = "relax";
+
+            public static boolean relax() {
+                return MODE_RELAX.equals(MODE.value());
+            }
+
+            private static String sanitizeMode(String value) {
+                return value != null && "relax".equalsIgnoreCase(value.trim()) ? MODE_RELAX : MODE_REBLUR;
+            }
             /**
              * REBLUR's 16-viewport validation overlay (OUT_VALIDATION): diagnostics for inputs,
              * accumulation frame counts, disocclusion/occlusion state — the tool for debugging

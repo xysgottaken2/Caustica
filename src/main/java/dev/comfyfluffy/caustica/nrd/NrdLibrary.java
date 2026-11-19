@@ -28,6 +28,8 @@ public final class NrdLibrary {
     private final MethodHandle newFrame;
     private final MethodHandle setSettings;
     private final MethodHandle setReblurSettings;
+    private final MethodHandle setRelaxSettings;
+    private final MethodHandle setMode;
     private final MethodHandle denoise;
     private final MethodHandle destroy;
     private final MethodHandle lastResult;
@@ -63,6 +65,17 @@ public final class NrdLibrary {
                         ValueLayout.JAVA_FLOAT, ValueLayout.JAVA_FLOAT, ValueLayout.JAVA_FLOAT,
                         ValueLayout.JAVA_FLOAT, ValueLayout.JAVA_FLOAT,
                         ValueLayout.JAVA_INT));
+        // int nrdshim_set_relax_settings(int reconstruction, int accum, int fastAccum,
+        //     int historyFix, float diffusePrepass, float specularPrepass, float lobeAngle,
+        //     float roughness, float fastClampSigma, int antiFirefly)
+        this.setRelaxSettings = handle(lookup, "nrdshim_set_relax_settings",
+                FunctionDescriptor.of(ValueLayout.JAVA_INT,
+                        ValueLayout.JAVA_INT, ValueLayout.JAVA_INT, ValueLayout.JAVA_INT,
+                        ValueLayout.JAVA_INT,
+                        ValueLayout.JAVA_FLOAT, ValueLayout.JAVA_FLOAT, ValueLayout.JAVA_FLOAT,
+                        ValueLayout.JAVA_FLOAT, ValueLayout.JAVA_FLOAT, ValueLayout.JAVA_INT));
+        this.setMode = handle(lookup, "nrdshim_set_mode",
+                FunctionDescriptor.of(ValueLayout.JAVA_INT, ValueLayout.JAVA_INT));
         // int nrdshim_denoise(u64 cmd, [image, fmt] x 8: mv, normalRough, viewZ, diffIn, specIn,
         //                     diffOut, specOut, validation)
         this.denoise = handle(lookup, "nrdshim_denoise",
@@ -163,6 +176,32 @@ public final class NrdLibrary {
                     enableAntiFirefly ? 1 : 0);
         } catch (Throwable t) {
             throw new RuntimeException("nrdshim_set_reblur_settings failed", t);
+        }
+    }
+
+    /** RELAX-specific tuning; its raw-distance input contract is intentionally distinct from REBLUR's. */
+    public int setRelaxSettings(int hitDistReconstructionMode, int maxAccumulatedFrameNum,
+                                int maxFastAccumulatedFrameNum, int historyFixFrameNum,
+                                float diffusePrepassBlurRadius, float specularPrepassBlurRadius,
+                                float lobeAngleFraction, float roughnessFraction,
+                                float fastHistoryClampingSigmaScale, boolean enableAntiFirefly) {
+        try {
+            return (int) this.setRelaxSettings.invokeExact(
+                    hitDistReconstructionMode, maxAccumulatedFrameNum, maxFastAccumulatedFrameNum,
+                    historyFixFrameNum, diffusePrepassBlurRadius, specularPrepassBlurRadius,
+                    lobeAngleFraction, roughnessFraction, fastHistoryClampingSigmaScale,
+                    enableAntiFirefly ? 1 : 0);
+        } catch (Throwable t) {
+            throw new RuntimeException("nrdshim_set_relax_settings failed", t);
+        }
+    }
+
+    /** 0 selects REBLUR, 1 selects RELAX. The native boundary clears history on a change. */
+    public int setMode(boolean relax) {
+        try {
+            return (int) this.setMode.invokeExact(relax ? 1 : 0);
+        } catch (Throwable t) {
+            throw new RuntimeException("nrdshim_set_mode failed", t);
         }
     }
 

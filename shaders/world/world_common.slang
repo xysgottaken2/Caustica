@@ -234,6 +234,7 @@ public static const uint FEATURE_RESTIR = 32u;            // temporal + spatial 
 public static const uint FEATURE_NRD = 64u;              // NRD denoiser signal capture (per-lobe radiance + hit distance)
 public static const uint FEATURE_VIEWZ = 128u;           // a renderer-side denoiser needs gViewZ (reprojection validation + sky cutoff)
 public static const uint FEATURE_SHARC = 256u;           // experimental spatial-hash radiance cache
+public static const uint FEATURE_NRD_RELAX = 512u;       // RELAX pack: linear RGB + raw hit distance
 
 // How far a full thunderstorm pulls the sky and the fog toward their own luminance, in 0..1. One shared
 // number on purpose: world.rmiss desaturates the sky with it and fog.slang desaturates the scattered

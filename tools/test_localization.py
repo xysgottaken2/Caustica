@@ -29,6 +29,8 @@ SHARED_KEYS = {
         "rt.tonemapOperator.agx", "rt.tonemapOperator.pbr_neutral",
         "rt.tonemapOperator.aces", "rt.tonemapOperator.filmic",
         "rt.tonemapOperator.psychov", "rt.reflex", "rt.reflexHeader",
+        "rt.denoiserMode.dlss_rr", "rt.denoiserMode.svgf", "rt.denoiserMode.nrd",
+        "rt.nrdAlgorithm.reblur", "rt.nrdAlgorithm.relax",
         "rt.menuButton", "rt.fgEngine.fsr31", "value.seconds",
         "value.perMinute", "value.millimetres", "value.pixels", "value.nits",
     )
@@ -66,6 +68,8 @@ SELECTOR_VALUES = {
     "rt.dlssQuality": (3, 0, 1, 2, 5),
     "rt.dlssPreset": (0, 4, 5, 6),
     "rt.upscaler": ("none", "dlss", "fsr3", "xess"),
+    "rt.denoiserMode": ("dlss_rr", "svgf", "asvgf", "nrd"),
+    "rt.nrdAlgorithm": ("reblur", "relax"),
     "rt.debugView": tuple(range(14)),
 }
 

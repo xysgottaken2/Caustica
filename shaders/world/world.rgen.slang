@@ -1186,11 +1186,19 @@ void main() {
         diffRad = clamp(diffRad, 0.0, 65504.0);
         specRad = clamp(specRad, 0.0, 65504.0);
 
-        // viewZ was written at the primary hit by Pass A (sky = 1e6 = INF for NRD).
+        // viewZ was written at the primary hit by Pass A (sky = 1e6 = INF for NRD). REBLUR and
+        // RELAX deliberately do not share an input encoding: REBLUR uses YCoCg + a normalized
+        // distance while RELAX consumes linear RGB + raw in-lobe distance. The host sets this bit
+        // with the matching native dispatch, so an algorithm change is never menu-only.
         float viewZ = gViewZ[pix];
-        float normHitDiff = frameHitDiff > 0.0 ? nrdNormHitDist(frameHitDiff, viewZ, rough) : 0.0;
-        float normHitSpec = frameHitSpec > 0.0 ? nrdNormHitDist(frameHitSpec, viewZ, rough) : 0.0;
-        gNrdDiff[pix] = float4(nrdLinearToYCoCg(diffRad), normHitDiff);
-        gNrdSpec[pix] = float4(nrdLinearToYCoCg(specRad), normHitSpec);
+        if (nrdRelaxEnabled()) {
+            gNrdDiff[pix] = float4(diffRad, frameHitDiff > 0.0 ? min(frameHitDiff, 65504.0) : 0.0);
+            gNrdSpec[pix] = float4(specRad, frameHitSpec > 0.0 ? min(frameHitSpec, 65504.0) : 0.0);
+        } else {
+            float normHitDiff = frameHitDiff > 0.0 ? nrdNormHitDist(frameHitDiff, viewZ, rough) : 0.0;
+            float normHitSpec = frameHitSpec > 0.0 ? nrdNormHitDist(frameHitSpec, viewZ, rough) : 0.0;
+            gNrdDiff[pix] = float4(nrdLinearToYCoCg(diffRad), normHitDiff);
+            gNrdSpec[pix] = float4(nrdLinearToYCoCg(specRad), normHitSpec);
+        }
     }
 }

@@ -41,6 +41,12 @@
 // index = hash(cell, normalOctant) % entryCount. Temporal accumulation is a sample-count-weighted
 // running mean whose effective sample count decays once per frame (the first write of a frame),
 // which reproduces NVIDIA's frame-bounded accumulation window without a separate resolve pass.
+//
+// Multiple raygen invocations can hit the same slot in a frame. The first version read-modified-
+// wrote the 48-byte record without exclusion, so simultaneous visits lost samples and, worse,
+// propagated radiance could overwrite an own-light update. The high bit of cellFrame.w is now a
+// short-lived per-entry write lock; the remaining 31 bits retain the frame stamp. It makes the
+// collapsed Update/Resolve safe without changing the host allocation or the entry ABI.
 
 import world_common;
 
@@ -60,6 +66,8 @@ public struct SharcEntry {
 // Debug overlay id (RtVideoOptions' debug view list). Pass A skips this id so pass B — the pass
 // that actually queries the cache — owns the output; see world.rgen's main().
 public static const uint SHARC_DEBUG_VIEW_ID = 13u;
+public static const uint SHARC_LOCK_BIT = 0x80000000u;
+public static const uint SHARC_FRAME_MASK = 0x7fffffffu;
 
 // Per-pixel SHaRC debug state, aggregated across SPP samples and split leaves by max/any.
 public static uint gv_sharcDbgQueried = 0u; // any cache query was attempted
@@ -169,7 +177,52 @@ public float sharcDecay(WorldPush push) {
 public uint sharcFrameStamp(WorldPush push) {
     // Stamp 0 is reserved for "never written"; frame indices start wherever the host counter
     // starts, so clamp to at least 1.
-    return max(push.frameIndex, 1u);
+    return max(push.frameIndex, 1u) & SHARC_FRAME_MASK;
+}
+
+/** The high bit is exclusively a write lock and must never participate in freshness arithmetic. */
+public uint sharcEntryFrame(SharcEntry entry) {
+    return entry.cellFrame.w & SHARC_FRAME_MASK;
+}
+
+/**
+ * Acquire a slot's bounded GPU spin lock. SHaRC is intentionally sparse, so collisions are rare;
+ * a bounded retry is preferable to stalling an entire wavefront behind a hot hash slot. The caller
+ * receives an unlocked logical copy of the entry and MUST call sharcUnlock on every path after a
+ * successful acquisition.
+ */
+public bool sharcTryLock(DevicePtr<SharcEntry> cache, uint index, out SharcEntry entry) {
+    entry = cache[index];
+    [loop]
+    for (uint attempt = 0u; attempt < 16u; ++attempt) {
+        entry = cache[index];
+        uint observed = entry.cellFrame.w;
+        if ((observed & SHARC_LOCK_BIT) != 0u) {
+            continue;
+        }
+        uint previous;
+        InterlockedCompareExchange(cache[index].cellFrame.w, observed, observed | SHARC_LOCK_BIT, previous);
+        if (previous == observed) {
+            entry.cellFrame.w = observed;
+            return true;
+        }
+    }
+    return false;
+}
+
+/**
+ * Publish a fully updated entry and release its lock last. Do not assign the struct wholesale:
+ * that can write cellFrame.w before radiance/normal fields, exposing a half-updated record to a
+ * concurrent query. Readers either see the old unlocked entry, the lock and reject, or all new
+ * fields followed by the unlocked stamp.
+ */
+public void sharcUnlock(DevicePtr<SharcEntry> cache, uint index, SharcEntry entry) {
+    cache[index].radiance = entry.radiance;
+    cache[index].cellFrame.x = entry.cellFrame.x;
+    cache[index].cellFrame.y = entry.cellFrame.y;
+    cache[index].cellFrame.z = entry.cellFrame.z;
+    cache[index].normal = entry.normal;
+    cache[index].cellFrame.w = entry.cellFrame.w & SHARC_FRAME_MASK;
 }
 
 // Looks up the cached OUTGOING radiance for `pos`/`n`. Returns false for any stale, colliding,
@@ -187,18 +240,23 @@ public bool sharcQuery(WorldPush push, float3 pos, float3 n,
     uint3 cell = sharcCell(push, pos);
     uint index = sharcIndex(push, cell, sharcNormalBits(n));
 
-    SharcEntry entry = ConstPtr<SharcEntry>(push.sharcCacheAddr)[index];
+    ConstPtr<SharcEntry> cache = ConstPtr<SharcEntry>(push.sharcCacheAddr);
+    SharcEntry entry = cache[index];
+    uint entryStamp = entry.cellFrame.w;
+    if ((entryStamp & SHARC_LOCK_BIT) != 0u) {
+        return false; // never sample a record while another ray is resolving it
+    }
     if (entry.cellFrame.x != cell.x || entry.cellFrame.y != cell.y || entry.cellFrame.z != cell.z) {
         return false; // spatial-hash collision with a different cell
     }
     float samples = entry.radiance.w;
-    if (samples <= 0.0 || entry.cellFrame.w == 0u) {
+    if (samples <= 0.0 || sharcEntryFrame(entry) == 0u) {
         return false; // empty
     }
     if (samples < push.sharcParams3.x) {
         return false; // not enough samples yet (was the old "stable frames" warm-up)
     }
-    if (push.frameIndex - entry.cellFrame.w > uint(push.sharcParams2.z)) {
+    if (push.frameIndex - sharcEntryFrame(entry) > uint(push.sharcParams2.z)) {
         return false; // stale
     }
     float storedLen = length(entry.normal.xyz);
@@ -210,6 +268,13 @@ public bool sharcQuery(WorldPush push, float3 pos, float3 n,
     // silently zeroed every marginal hit (the "everything green but nothing changed" symptom).
     float nd = saturate(dot(entry.normal.xyz / storedLen, n));
     if (nd < push.sharcParams2.w) {
+        return false;
+    }
+    // Seqlock verification: a writer that began after our first read set the high bit before
+    // touching any data. If it overlaps this query, reject and shade normally rather than mixing
+    // fields from two cache states. A writer that completed entirely between the reads leaves an
+    // older but internally coherent sample, which is safe for this approximate cache.
+    if (cache[index].cellFrame.w != entryStamp) {
         return false;
     }
     radiance = entry.radiance.xyz;
@@ -258,16 +323,20 @@ public bool sharcWrite(WorldPush push, float3 pos, float3 n, float3 radiance,
     uint index = sharcIndex(push, cell, normalBits);
 
     DevicePtr<SharcEntry> cache = DevicePtr<SharcEntry>(push.sharcCacheAddr);
-    SharcEntry entry = cache[index];
+    SharcEntry entry;
+    if (!sharcTryLock(cache, index, entry)) {
+        return false;
+    }
     bool sameCell = entry.cellFrame.x == cell.x
             && entry.cellFrame.y == cell.y
             && entry.cellFrame.z == cell.z;
-    bool occupied = sameCell && entry.radiance.w > 0.0 && entry.cellFrame.w != 0u;
-    bool stale = entry.cellFrame.w == 0u
-            || (push.frameIndex - entry.cellFrame.w > uint(push.sharcParams2.z));
+    bool occupied = sameCell && entry.radiance.w > 0.0 && sharcEntryFrame(entry) != 0u;
+    bool stale = sharcEntryFrame(entry) == 0u
+            || (push.frameIndex - sharcEntryFrame(entry) > uint(push.sharcParams2.z));
     // A different live cell owns this hash slot: leave it alone (an aggressive overwrite would make
     // the cache churn between near misses and destroy temporal reuse).
     if (!sameCell && !stale && entry.radiance.w > 0.0) {
+        sharcUnlock(cache, index, entry);
         return false;
     }
 
@@ -279,10 +348,10 @@ public bool sharcWrite(WorldPush push, float3 pos, float3 n, float3 radiance,
         fresh.radiance = float4(clamped, 1.0);
         fresh.cellFrame = uint4(cell.x, cell.y, cell.z, frame);
         fresh.normal = float4(normalize(n + float3(1.0e-6, 1.0e-6, 1.0e-6)), 0.0);
-        cache[index] = fresh;
+        sharcUnlock(cache, index, fresh);
     } else {
         float samples = max(entry.radiance.w, 0.0);
-        if (entry.cellFrame.w != frame) {
+        if (sharcEntryFrame(entry) != frame) {
             samples *= sharcDecay(push);
         }
         float blend = 1.0 / (samples + 1.0);
@@ -296,7 +365,7 @@ public bool sharcWrite(WorldPush push, float3 pos, float3 n, float3 radiance,
         float3 blended = lerp(normalize(entry.normal.xyz + float3(1.0e-6, 1.0e-6, 1.0e-6)), n, blend);
         float3 meanNormal = length(blended) > 1.0e-4 ? normalize(blended) : n;
         updated.normal = float4(meanNormal, 0.0);
-        cache[index] = updated;
+        sharcUnlock(cache, index, updated);
     }
     indexOut = index;
     return true;
@@ -322,8 +391,12 @@ public void sharcPropagate(WorldPush push, uint index, float3 value) {
         return;
     }
     DevicePtr<SharcEntry> cache = DevicePtr<SharcEntry>(push.sharcCacheAddr);
-    SharcEntry entry = cache[index];
-    if (entry.radiance.w <= 0.0 || entry.cellFrame.w == 0u) {
+    SharcEntry entry;
+    if (!sharcTryLock(cache, index, entry)) {
+        return;
+    }
+    if (entry.radiance.w <= 0.0 || sharcEntryFrame(entry) == 0u) {
+        sharcUnlock(cache, index, entry);
         return; // entry was cleared or lost: nothing sensible to blend into
     }
     float samples = max(entry.radiance.w, 0.0);
@@ -336,7 +409,7 @@ public void sharcPropagate(WorldPush push, uint index, float3 value) {
     updated.radiance = float4(clamp(entry.radiance.xyz + clamped * scale,
             float3(0.0, 0.0, 0.0), float3(65504.0, 65504.0, 65504.0)), samples);
     updated.cellFrame.w = sharcFrameStamp(push);
-    cache[index] = updated;
+    sharcUnlock(cache, index, updated);
 }
 
 // Pushes `radianceValue` (the outgoing radiance leaving `pos`, e.g. a shaded vertex's local light,
