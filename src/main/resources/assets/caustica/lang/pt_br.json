@@ -168,6 +168,7 @@
 	"caustica.options.rt.debugView.11": "SVGF: Variância",
 	"caustica.options.rt.debugView.12": "SVGF: Sigma de Luminância",
 	"caustica.options.rt.debugView.13": "Cache SHaRC",
+	"caustica.options.rt.debugView.14": "A-SVGF: Adaptação",
 	"caustica.options.rt.lightsHeader": "Iluminação RT",
 	"caustica.options.rt.tonemapHeader": "Tonemapping RT",
 	"caustica.options.rt.blockEmissiveIntensity": "Intensidade de blocos emissivos",

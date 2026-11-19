@@ -472,10 +472,16 @@ public final class RtComposite {
      * Debug-view ids that inspect SVGF's internal state instead of the tracer's guides. Unlike the
      * guide views these leave the denoiser enabled, because the point is to see what it is doing.
      * 10 = history length (black means the reprojection threw the history away), 11 = variance,
-     * 12 = luminance sigma (bright means the bilateral has degenerated into a box blur).
+     * 12 = luminance sigma (bright means the bilateral has degenerated into a box blur),
+     * 14 = A-SVGF adaptation (bright means the temporal gradient released history there, i.e. the
+     * lighting genuinely changed; a uniform bright frame means it is reading noise as change).
+     * The range is kept CONTIGUOUS on purpose: it also gates whether the tracer's own guide debug
+     * views are suppressed, so a hole in the middle would let id 13 (the SHaRC overlay, see
+     * sharc.slang) disable the denoiser and lose the overlay it was asking for. Only the à-trous
+     * shader acts on 14, so 13 passing through the range is harmless.
      */
     private static final int SVGF_DEBUG_FIRST = 10;
-    private static final int SVGF_DEBUG_LAST = 12;
+    private static final int SVGF_DEBUG_LAST = 14;
     // Luminance edge-stop, in estimated standard deviations. This is the knob that decides how much
     // the wavelet trusts its own variance estimate: 4 sigma filters the 1-spp signal hard while
     // still stopping at genuine luminance edges (SVGF's paper uses 4 as well).
@@ -735,6 +741,13 @@ public final class RtComposite {
     private RtImage svgfFilterPong;
     private RtImage svgfPrevViewZ;
     private RtImage svgfPrevNormal;
+    // A-SVGF gradient state: the tile statistic the reprojection consumes, and the PREVIOUS frame's
+    // raw (undenoised) trace it is measured against. The raw ping-pong is required rather than
+    // optional — comparing against the accumulated history would fold the filter's own output back
+    // into its guidance (see svgf_gradient.comp).
+    private RtImage svgfGradient;
+    private RtImage svgfRawTracePing;
+    private RtImage svgfRawTracePong;
     private boolean svgfWriteToPing;
     private boolean svgfHasHistory;
     private double svgfPrevCamX;
@@ -1309,6 +1322,18 @@ public final class RtComposite {
             svgfPrevNormal.destroy();
             svgfPrevNormal = null;
         }
+        if (svgfGradient != null) {
+            svgfGradient.destroy();
+            svgfGradient = null;
+        }
+        if (svgfRawTracePing != null) {
+            svgfRawTracePing.destroy();
+            svgfRawTracePing = null;
+        }
+        if (svgfRawTracePong != null) {
+            svgfRawTracePong.destroy();
+            svgfRawTracePong = null;
+        }
         if (nrdDiffOut != null) {
             nrdDiffOut.destroy();
             nrdDiffOut = null;
@@ -1541,6 +1566,11 @@ public final class RtComposite {
             svgfFilterPong = ctx.createStorageImage(renderW, renderH, VK10.VK_FORMAT_R16G16B16A16_SFLOAT, "svgf filter pong " + renderW + "x" + renderH);
             svgfPrevViewZ = ctx.createStorageImage(renderW, renderH, VK10.VK_FORMAT_R32_SFLOAT, "svgf prev viewZ " + renderW + "x" + renderH);
             svgfPrevNormal = ctx.createStorageImage(renderW, renderH, VK10.VK_FORMAT_R16G16B16A16_SFLOAT, "svgf prev normal " + renderW + "x" + renderH);
+            // A-SVGF temporal gradient: one entry per GRADIENT_TILE x GRADIENT_TILE tile, stored at
+            // render resolution so the reprojection can read it at any pixel of the tile.
+            svgfGradient = ctx.createStorageImage(renderW, renderH, VK10.VK_FORMAT_R16G16B16A16_SFLOAT, "svgf gradient " + renderW + "x" + renderH);
+            svgfRawTracePing = ctx.createStorageImage(renderW, renderH, VK10.VK_FORMAT_R16G16B16A16_SFLOAT, "svgf raw trace ping " + renderW + "x" + renderH);
+            svgfRawTracePong = ctx.createStorageImage(renderW, renderH, VK10.VK_FORMAT_R16G16B16A16_SFLOAT, "svgf raw trace pong " + renderW + "x" + renderH);
             if (svgfDenoiser == null) {
                 svgfDenoiser = RtSvgfDenoiser.create(ctx);
                 CausticaMod.LOGGER.info("SVGF denoiser active ({} a-trous passes, {} frame window)",
@@ -2077,6 +2107,9 @@ public final class RtComposite {
             boolean svgfRan = false;
             if (svgfPath && !nrdDone && !nrdValidationOn
                     && svgfDenoiser != null && svgfHistoryPing != null && gViewZ != null) {
+                // The untouched trace, kept before the cascade reassigns upscaleSource: this frame's
+                // gradient compared against it, and next frame's compares against the copy below.
+                RtImage svgfRawTrace = upscaleSource;
                 int svgfParity = svgfWriteToPing ? 0 : 1;
                 RtImage historyIn = svgfWriteToPing ? svgfHistoryPong : svgfHistoryPing;
                 RtImage historyOut = svgfWriteToPing ? svgfHistoryPing : svgfHistoryPong;
@@ -2124,14 +2157,30 @@ public final class RtComposite {
                 // FG amplifies residual per-frame sky noise into visible flicker (it interpolates
                 // between presented frames), so the sky smooths harder while it is presenting.
                 int extraSkySmooth = RtFramePresenter.INSTANCE.isActive() ? 1 : 0;
+                // Previous frame's RAW trace, for the A-SVGF gradient. While there is no history
+                // (first frame after a realloc, or a toggle) there is nothing to compare against, so
+                // the ping-pong pair is seeded with this frame's trace below and the gradient is told
+                // to report "no information".
+                RtImage rawPrev = svgfWriteToPing ? svgfRawTracePong : svgfRawTracePing;
+                RtImage rawOut = svgfWriteToPing ? svgfRawTracePing : svgfRawTracePong;
                 VulkanCommandEncoder.memoryBarrier(cmd, stack); // trace + guides visible to the denoiser
                 try (RtDebugLabels.Scope ignored = RtDebugLabels.scope(ctx, cmd, "SVGF denoise");
                      RtFrameStats.Scope ignoredStats = RtFrameStats.FRAME.stage("frame.svgf")) {
+                    // A-SVGF stage 0: measure how much this tile's ILLUMINATION changed since last
+                    // frame. This is what the reprojection below turns into an adaptive blend rate —
+                    // plain SVGF has no way to know its history went stale, which is why it drags a
+                    // moved shadow behind the geometry for tens of frames.
+                    svgfDenoiser.gradient(cmd, renderW, renderH, svgfParity,
+                            upscaleSource.view, rawPrev.view, svgfGradient.view,
+                            gAlbedo.view, gViewZ.view, svgfReset);
+                    VulkanCommandEncoder.memoryBarrier(cmd, stack); // gradient visible to the reprojection
+
                     svgfDenoiser.reproject(cmd, renderW, renderH, svgfParity,
                             upscaleSource.view, historyIn.view, momentsIn.view,
                             historyOut.view, momentsOut.view, svgfFilterPing.view,
                             gMotion.view, gViewZ.view, gNormal.view,
                             svgfPrevViewZ.view, svgfPrevNormal.view, gAlbedo.view,
+                            svgfGradient.view,
                             svgfReset, SVGF_MAX_FRAMES, svgfCamForwardDelta);
                     VulkanCommandEncoder.memoryBarrier(cmd, stack); // reprojection visible to the wavelet
 
@@ -2174,6 +2223,10 @@ public final class RtComposite {
                     // accept history under motion instead of clamping colour and smearing.
                     copyImage(cmd, stack, gViewZ, svgfPrevViewZ);
                     copyImage(cmd, stack, gNormal, svgfPrevNormal);
+                    // ...and the raw trace, which next frame's A-SVGF gradient measures this frame's
+                    // lighting against. Deliberately the UNFILTERED trace: feeding the denoised result
+                    // back here would make the gradient measure the filter against itself.
+                    copyImage(cmd, stack, svgfRawTrace, rawOut);
                     VulkanCommandEncoder.memoryBarrier(cmd, stack);
                 }
                 svgfWriteToPing = !svgfWriteToPing;

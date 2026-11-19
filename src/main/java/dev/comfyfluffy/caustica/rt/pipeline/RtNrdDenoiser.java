@@ -164,10 +164,23 @@ public final class RtNrdDenoiser {
      *
      * Scaling to a reference width keeps NRD's intent (the radius covers the same ANGULAR extent)
      * without letting it eat the frame at low render resolutions.
+     *
+     * <p>The specular radius is deliberately NOT NRD's 50. That default assumes a path tracer whose
+     * specular lobe is a stochastic BRDF sample. This renderer's most prominent specular surface is
+     * WATER, whose reflected ray comes from a HANDLE-BASED re-trace of the wave surface (see
+     * {@code resolveSpecularGuides}): neighbouring pixels resolve to coherent reflected directions,
+     * so the signal is already smooth along the lobe and the anisotropic pre-pass has nothing to
+     * average -- it only moves energy sideways. Worse, the pre-pass is a hit-distance-guided blur
+     * whose radius grows with hit distance, and the corner of the screen that shows "the world
+     * through the water surface" is by construction the far-hit region: a large radius there reads as
+     * painterly, cartoon-flattened colour rather than as water, and it is one of the visible
+     * differences between REBLUR and DLSS-RR on exactly that view. Halving it keeps the firefly
+     * suppression the pass exists for (a lone outlier is still averaged against its neighbours) while
+     * leaving the coherent reflected content where it belongs.
      */
     private static final float PREPASS_REFERENCE_WIDTH = 1920.0f;
     private static final float DIFFUSE_PREPASS_BLUR_RADIUS = 30.0f;
-    private static final float SPECULAR_PREPASS_BLUR_RADIUS = 50.0f;
+    private static final float SPECULAR_PREPASS_BLUR_RADIUS = 24.0f;
     /** Never shrink the pre-pass to nothing: NRD warns it is required for probabilistic input. */
     private static final float MIN_PREPASS_BLUR_RADIUS = 6.0f;
     /** Spatial filter radii, in pixels: NRD defaults (converged pixels shrink toward the minimum). */

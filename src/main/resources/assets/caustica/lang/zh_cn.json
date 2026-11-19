@@ -168,6 +168,7 @@
 	"caustica.options.rt.debugView.11": "SVGF：方差",
 	"caustica.options.rt.debugView.12": "SVGF：亮度 Sigma",
 	"caustica.options.rt.debugView.13": "SHaRC 缓存",
+	"caustica.options.rt.debugView.14": "A-SVGF：自适应",
 	"caustica.options.rt.lightsHeader": "光追照明",
 	"caustica.options.rt.tonemapHeader": "光追色调映射",
 	"caustica.options.rt.blockEmissiveIntensity": "自发光方块强度",

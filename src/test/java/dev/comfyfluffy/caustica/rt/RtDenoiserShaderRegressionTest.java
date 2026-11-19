@@ -31,6 +31,9 @@ final class RtDenoiserShaderRegressionTest {
     private static final Path NRD_COMBINE = REPO_ROOT.resolve("shaders/display/nrd_combine.comp");
     private static final Path SVGF_REPROJECT = REPO_ROOT.resolve("shaders/display/svgf_reproject.comp");
     private static final Path SVGF_ATROUS = REPO_ROOT.resolve("shaders/display/svgf_atrous.comp");
+    private static final Path SVGF_GRADIENT = REPO_ROOT.resolve("shaders/display/svgf_gradient.comp");
+    private static final Path SVGF_DENOISER = REPO_ROOT.resolve(
+            "src/main/java/dev/comfyfluffy/caustica/rt/pipeline/RtSvgfDenoiser.java");
     private static final Path NRD_DENOISER =
             REPO_ROOT.resolve("src/main/java/dev/comfyfluffy/caustica/rt/pipeline/RtNrdDenoiser.java");
 
@@ -642,5 +645,112 @@ final class RtDenoiserShaderRegressionTest {
                 "the composite must route the DLSS-SR path through the upscale slot");
         assertTrue(composite.contains("RtDlssSr.INSTANCE.evaluate("),
                 "the composite must dispatch the DLSS-SR upscale");
+    }
+
+    /**
+     * A-SVGF's temporal gradient must compare against the PREVIOUS FRAME'S RAW TRACE, never against
+     * the accumulated history. Comparing against the history folds the filter's own output back into
+     * its guidance: the statistic then decays toward "nothing changed" exactly where the history is
+     * stale, which is the one situation it exists to detect. The two are indistinguishable to a
+     * compiler (both are rgba16f images), so the composite's source is pinned.
+     */
+    @Test
+    void asvgfGradientComparesAgainstTheRawTraceNotTheHistory() throws Exception {
+        String composite = Files.readString(
+                REPO_ROOT.resolve("src/main/java/dev/comfyfluffy/caustica/rt/RtComposite.java"));
+        assertTrue(composite.contains("RtImage svgfRawTrace = upscaleSource;"),
+                "the raw trace must be captured before the cascade reassigns upscaleSource");
+        assertTrue(composite.contains("copyImage(cmd, stack, svgfRawTrace, rawOut);"),
+                "the raw trace snapshot must be the unfiltered trace");
+        // The gradient dispatch must read the raw ping-pong, not historyIn/momentsIn/filterOut.
+        int grad = composite.indexOf("svgfDenoiser.gradient(");
+        assertTrue(grad > 0, "the composite must dispatch the A-SVGF gradient pass");
+        String call = composite.substring(grad, composite.indexOf(");", grad));
+        assertTrue(call.contains("rawPrev.view"),
+                "the gradient must read the previous frame's raw trace");
+        assertFalse(call.contains("historyIn.view") || call.contains("filterOut") ,
+                "the gradient must not read the accumulated history");
+    }
+
+    /**
+     * The gradient must run BEFORE the reprojection that consumes it, and be visible to it: a
+     * missing barrier means the reprojection reads last frame's statistic (or garbage), which looks
+     * like the adaptive blend doing nothing or flickering.
+     */
+    @Test
+    void asvgfGradientIsDispatchedBeforeTheReprojection() throws Exception {
+        String composite = Files.readString(
+                REPO_ROOT.resolve("src/main/java/dev/comfyfluffy/caustica/rt/RtComposite.java"));
+        int grad = composite.indexOf("svgfDenoiser.gradient(");
+        int reproject = composite.indexOf("svgfDenoiser.reproject(");
+        assertTrue(grad > 0 && reproject > 0, "both passes must be dispatched");
+        assertTrue(grad < reproject, "the gradient must be recorded before the reprojection");
+        assertTrue(composite.substring(grad, reproject).contains("memoryBarrier"),
+                "the gradient must be made visible to the reprojection");
+
+        // The reprojection must actually receive the gradient as its 13th binding.
+        String denoiser = Files.readString(SVGF_DENOISER);
+        assertTrue(denoiser.contains("private static final int REPROJECT_BINDINGS = 13;"),
+                "svgf_reproject gained the gradient binding");
+        assertTrue(denoiser.contains("long gradientView,"),
+                "reproject() must take the gradient view");
+        assertTrue(denoiser.contains("private static final int GRADIENT_BINDINGS = 5;"),
+                "svgf_gradient binds current, prev, out, albedo, viewZ");
+        assertTrue(denoiser.contains("\"svgf_gradient.comp.spv\""),
+                "the gradient pipeline must be created from svgf_gradient.comp");
+    }
+
+    /**
+     * The adaptive alpha must only ever INCREASE the blend rate, never lower it. A gradient that
+     * could shrink alpha would let the filter lock down harder than 1/n, which is the path back to
+     * the lag A-SVGF exists to remove.
+     */
+    @Test
+    void asvgfAdaptationOnlyReleasesHistory() throws Exception {
+        String reproject = Files.readString(SVGF_REPROJECT);
+        assertTrue(reproject.contains("float alpha = max(1.0 / frames, ALPHA_MIN);"),
+                "the base blend rate must be 1/n floored at ALPHA_MIN");
+        assertTrue(reproject.contains("alpha = max(alpha, adapt);"),
+                "the gradient may only increase alpha");
+
+        // The noise floor must be subtracted before the change is measured as a change: 1-spp noise
+        // differs frame to frame by its own magnitude, and without the subtraction every frame would
+        // read as "the lighting changed" and the denoiser would never accumulate at all.
+        assertTrue(reproject.contains(
+                        "float change = max(abs(grad.x) - GRADIENT_NOISE_MULTIPLE * grad.z, 0.0);"),
+                "the temporal change must be measured net of the tile noise floor");
+
+        // The gradient itself must be demodulated on both frames, or walking across a texture reads
+        // as a lighting change everywhere.
+        String gradient = Files.readString(SVGF_GRADIENT);
+        assertTrue(gradient.contains(
+                        "float lc = dot(demodulate(imageLoad(current, q).rgb, factor), LUMA);"),
+                "the current frame must be demodulated before comparison");
+        assertTrue(gradient.contains(
+                        "float lp = dot(demodulate(imageLoad(prevColor, q).rgb, factor), LUMA);"),
+                "the previous frame must be demodulated by the SAME factor");
+    }
+
+    /**
+     * The firefly clamp bounds the incoming sample by the HISTORY, so where the gradient has just
+     * concluded the history is stale the clamp must yield — otherwise the pixel is released from the
+     * blend and simultaneously dragged back to the old brightness, which is lag plus a hard edge.
+     */
+    @Test
+    void asvgfFireflyClampYieldsToTheAdaptation() throws Exception {
+        String reproject = Files.readString(SVGF_REPROJECT);
+        assertTrue(reproject.contains("bound = mix(bound, 65504.0, adapt);"),
+                "the firefly bound must widen as the gradient releases history");
+
+        // Sanity-check that this is not vacuous: without the widening, a real lighting change above
+        // the bound is clipped back to it.
+        float histLum = 0.05f;
+        float histSigma = 0.01f;
+        float lum = 0.40f;
+        float bound = histLum + 3.0f * histSigma + 1.0f * histLum + 0.05f;
+        assertTrue(lum > bound, "an 8x lighting change must exceed the plain history bound");
+        float fullAdapt = bound * (1.0f - 1.0f) + 65504.0f * 1.0f;
+        assertEquals(65504.0f, fullAdapt, 1.0f,
+                "full adaptation must lift the bound out of the way");
     }
 }

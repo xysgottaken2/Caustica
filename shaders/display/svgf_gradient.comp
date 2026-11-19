@@ -1,0 +1,155 @@
+#version 460
+
+// A-SVGF stage 0 — the TEMPORAL GRADIENT image (Schied et al. 2018, "Spatiotemporal Variance-Guided
+// Filtering: Towards Real-Time, Temporally-Coherent Denoising").
+//
+// This is what turns plain SVGF into A-SVGF. Plain SVGF blends new samples into the history at a rate
+// that depends on the HISTORY LENGTH alone (alpha = 1/n, capped), so a pixel that has accumulated 48
+// frames keeps trusting that history even at the exact moment the lighting there changes -- that is
+// temporal lag, and it is why SVGF smears a moving shadow or a turning highlight far behind the
+// geometry. A-SVGF instead measures, per pixel, how much the ILLUMINATION changed since the previous
+// frame, and lets that measurement drive the blend: no change -> keep accumulating (converge, no
+// noise), big change -> restart accumulation (no lag). The two halves of the denoiser stop being
+// independent: the same statistic now drives both the temporal blend and, through the variance it
+// feeds, the spatial filter.
+//
+// Why a SEPARATE, downsampled pass rather than a term inside the reprojection:
+//
+//   * The gradient is only meaningful on a DEMODULATED signal. Comparing two raw samples would report
+//     a change wherever the geometry moved onto a different texture, which is most of the screen while
+//     walking, and the filter would throw its history away for no reason. Both frames are divided by
+//     the CURRENT frame's demodulation factor, so what is left is pure lighting change.
+//
+//   * It must be compared against the PREVIOUS FRAME'S RAW TRACE, not against the accumulated
+//     history. The history has already been filtered, so measuring a difference against it folds the
+//     denoiser's own output back into its guidance -- a feedback loop that makes the statistic drift
+//     toward "nothing changed" exactly where it is needed most.
+//
+//   * Raw 1-spp samples are noise, and a per-pixel difference of two noisy samples is ~1.4x as noisy
+//     as either. Averaging a TILE makes the estimate usable: the tile's mean luminance cancels the
+//     noise (it averages 4x4 = 16 samples from each frame), while a real lighting change survives
+//     because a shadow edge moving across the tile changes its MEAN, not just its variance.
+//
+// Output (rgba16f, render resolution; only tiles are accurate, every pixel of a tile holds the same
+// value so the reprojection can sample it with a plain imageLoad at any pixel):
+//   x = signed luminance change of the tile (current - previous), demodulated
+//   y = the tile's luminance level (max of the tile means), i.e. the scale the change is relative to
+//   z = the tile's TEMPORAL standard deviation of luminance (sqrt of the mean of the per-pixel squared
+//       differences / 2) -- the noise floor the change has to beat to count as a real change
+//   w = 1 when the tile contains no valid comparison (sky, or the first frame), 0 otherwise
+//
+// The relative statistic is |x| / (y + eps) computed by the consumer: an absolute change of 0.01 is
+// enormous in a dark room and invisible in sunlight, and only the ratio is meaningful across a scene
+// that spans both.
+
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+
+layout(binding = 0, set = 0, rgba16f) uniform readonly  image2D current;   // this frame's raw trace
+layout(binding = 1, set = 0, rgba16f) uniform readonly  image2D prevColor; // PREVIOUS frame's raw trace
+layout(binding = 2, set = 0, rgba16f) uniform writeonly image2D gradient;  // the tile statistic
+layout(binding = 3, set = 0, rgba16f) uniform readonly  image2D albedo;    // diffuse albedo guide
+layout(binding = 4, set = 0, r32f)    uniform readonly  image2D viewZ;     // linear view depth
+
+layout(push_constant) uniform Push {
+    int width;
+    int height;
+    int tile;     // tile edge in pixels; GRADIENT_TILE in RtSvgfDenoiser
+    int reset;    // 1 = no previous frame to compare against (realloc, toggle, first frame)
+} pc;
+
+// Matches the viewZ the tracer writes for sky/miss pixels (RtComposite.NRD_DENOISING_RANGE).
+const float DENOISING_RANGE = 500000.0;
+const vec3 LUMA = vec3(0.2126, 0.7152, 0.0722);
+// Must match svgf_reproject.comp's / svgf_atrous.comp's constants exactly.
+const float ALBEDO_FLOOR = 0.10;
+const float SPECULAR_SHARE = 0.04;
+
+bool isSky(float z) {
+    return !(z < DENOISING_RANGE);
+}
+
+/** Mirror of svgf_reproject.comp's demodFactor: total reflectance, not raw albedo. */
+vec3 demodFactor(ivec2 p) {
+    ivec2 q = clamp(p, ivec2(0), ivec2(pc.width - 1, pc.height - 1));
+    vec3 a = imageLoad(albedo, q).rgb;
+    if (any(isnan(a)) || any(isinf(a))) {
+        return vec3(1.0);
+    }
+    a = clamp(a, vec3(0.0), vec3(1.0));
+    return max(a * (1.0 - SPECULAR_SHARE) + SPECULAR_SHARE, vec3(ALBEDO_FLOOR));
+}
+
+/**
+ * Sanitize then demodulate an already-loaded radiance sample. Takes the SAMPLE rather than the image
+ * on purpose: opaque types (image2D) as function parameters are legal GLSL 4.60 but the least
+ * portable corner of it across glslang versions, and there is no reason to depend on it.
+ */
+vec3 demodulate(vec3 c, vec3 factor) {
+    if (any(isnan(c)) || any(isinf(c))) {
+        return vec3(0.0);
+    }
+    return clamp(c / factor, vec3(0.0), vec3(65504.0));
+}
+
+void main() {
+    ivec2 pix = ivec2(gl_GlobalInvocationID.xy);
+    if (pix.x >= pc.width || pix.y >= pc.height) {
+        return;
+    }
+    // Every pixel of a tile computes the same statistic from the same tile origin, so the value is
+    // uniform across the tile and a consumer can read it at any of the tile's pixels.
+    ivec2 tileOrigin = (pix / pc.tile) * pc.tile;
+    ivec2 maxPix = ivec2(pc.width - 1, pc.height - 1);
+
+    if (pc.reset != 0) {
+        // No previous frame: report "no information" so the reprojection falls back to its ordinary
+        // 1/n accumulation instead of reading a stale or uninitialised comparison.
+        imageStore(gradient, pix, vec4(0.0, 0.0, 0.0, 1.0));
+        return;
+    }
+
+    float sumCur = 0.0;
+    float sumPrev = 0.0;
+    float sumDiffSq = 0.0;
+    float count = 0.0;
+    float skyCount = 0.0;
+
+    for (int dy = 0; dy < pc.tile; dy++) {
+        for (int dx = 0; dx < pc.tile; dx++) {
+            ivec2 q = clamp(tileOrigin + ivec2(dx, dy), ivec2(0), maxPix);
+            if (isSky(imageLoad(viewZ, q).r)) {
+                // Sky is analytic and noise-free, and its radiance is unrelated to the geometry's
+                // lighting; including it would make every tile that touches the horizon look like it
+                // changed whenever the camera turned.
+                skyCount += 1.0;
+                continue;
+            }
+            // The SAME factor demodulates both frames: the comparison has to be of lighting, and
+            // using each frame's own factor would let albedo noise masquerade as a lighting change.
+            vec3 factor = demodFactor(q);
+            float lc = dot(demodulate(imageLoad(current, q).rgb, factor), LUMA);
+            float lp = dot(demodulate(imageLoad(prevColor, q).rgb, factor), LUMA);
+            sumCur += lc;
+            sumPrev += lp;
+            // Variance of the per-pixel difference. For two independent estimates of the same value
+            // the difference has 2x the variance, hence the /2; that is the textbook temporal
+            // noise-floor estimator and it needs no extra history buffer, which is why this pass is
+            // self-contained.
+            float diff = lc - lp;
+            sumDiffSq += diff * diff;
+            count += 1.0;
+        }
+    }
+
+    float tileSize = float(pc.tile * pc.tile);
+    if (count < 0.5 || skyCount > tileSize * 0.5) {
+        imageStore(gradient, pix, vec4(0.0, 0.0, 0.0, 1.0));
+        return;
+    }
+
+    float meanCur = sumCur / count;
+    float meanPrev = sumPrev / count;
+    float noiseSigma = sqrt(max(sumDiffSq / count * 0.5, 0.0));
+
+    imageStore(gradient, pix, vec4(meanCur - meanPrev, max(meanCur, meanPrev), noiseSigma, 0.0));
+}

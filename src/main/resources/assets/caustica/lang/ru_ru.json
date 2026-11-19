@@ -168,6 +168,7 @@
 	"caustica.options.rt.debugView.11": "SVGF: дисперсия",
 	"caustica.options.rt.debugView.12": "SVGF: сигма яркости",
 	"caustica.options.rt.debugView.13": "Кэш SHaRC",
+	"caustica.options.rt.debugView.14": "A-SVGF: адаптация",
 	"caustica.options.rt.lightsHeader": "Освещение RT",
 	"caustica.options.rt.tonemapHeader": "Тональная компрессия RT",
 	"caustica.options.rt.blockEmissiveIntensity": "Яркость светящихся блоков",

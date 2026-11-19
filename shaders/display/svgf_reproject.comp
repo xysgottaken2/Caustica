@@ -19,7 +19,10 @@
 //
 // Outputs (all render resolution):
 //   histOut    rgba16f  rgb = accumulated colour (the next frame's history); alpha unused
-//   momentsOut rgba16f  x = luminance m1, y = m2, z = history length in FRAMES
+//   momentsOut rgba16f  x = luminance m1, y = m2, z = history length in FRAMES,
+//                       w = A-SVGF adaptation (how much history the temporal gradient released,
+//                       0 = the ordinary 1/n blend, 1 = fully released). Stored for the debug view;
+//                       nothing reads it for filtering.
 //   filterOut  rgba16f  rgb = accumulated colour, a = VARIANCE — the à-trous pass's input
 //
 // The frame count deliberately lives in the moments texture rather than the history's alpha: the
@@ -40,6 +43,10 @@ layout(binding = 8, set = 0, rgba16f) uniform readonly  image2D normal;     // w
 layout(binding = 9, set = 0, r32f)    uniform readonly  image2D prevViewZ;  // linear view depth, previous frame
 layout(binding = 10, set = 0, rgba16f) uniform readonly image2D prevNormal; // world normal, previous frame
 layout(binding = 11, set = 0, rgba16f) uniform readonly image2D albedo;     // diffuse albedo guide (demodulation)
+// A-SVGF temporal gradient (svgf_gradient.comp). x = signed demodulated luminance change over the
+// tile, y = the tile's luminance level, z = the tile's temporal noise floor, w = 1 when the tile had
+// no valid comparison. Read as the ADAPTIVE half of the temporal blend; see the accumulation below.
+layout(binding = 12, set = 0, rgba16f) uniform readonly image2D gradient;
 
 layout(push_constant) uniform Push {
     int width;
@@ -68,6 +75,22 @@ const float DEPTH_TOLERANCE = 0.05;   // 5% of view depth
 const float NORMAL_TOLERANCE = 0.70;
 // Spatial fallback radius while the temporal history is too short to carry a meaningful variance.
 const int SPATIAL_VARIANCE_RADIUS = 3;
+// ---- A-SVGF adaptive accumulation.
+//
+// Plain SVGF's blend rate depends only on history length, so a converged pixel keeps its history
+// through a lighting change and the image lags behind the geometry. A-SVGF measures the illumination
+// change per tile and mixes that into alpha. The change is measured RELATIVE to the tile's own
+// luminance level because an absolute change of 0.01 is enormous in a dark room and invisible in
+// sunlight, and it must exceed the measured temporal NOISE FLOOR by NOISE_MULTIPLE before it counts
+// at all -- otherwise 1-spp noise, which differs frame to frame by its own magnitude, would be read
+// as "the lighting changed" and the denoiser would never accumulate (the exact failure this whole
+// pass exists to avoid).
+const float ALPHA_MIN = 0.075;        // SVGF's own floor: the history never fully locks down
+const float GRADIENT_NOISE_MULTIPLE = 2.5;
+const float GRADIENT_RELATIVE_SCALE = 0.06;
+// Below this history length the gradient is not consulted: alpha is already large (1/n dominates), so
+// adaptation cannot sharpen anything and only risks discarding the little history there is.
+const float GRADIENT_MIN_FRAMES = 6.0;
 // Neighbourhood used to bound a fresh (history-less) sample, and how many standard deviations of
 // that neighbourhood it may exceed. Only ever applied when there is no history to contradict it.
 // Firefly rejection against the accumulated history. The bound is
@@ -295,12 +318,37 @@ void main() {
         return;
     }
 
-    // ---- Accumulate. 1/n up to the window cap converges the Monte-Carlo estimate as fast as an
-    // unbiased running mean can, then holds a fixed exponential window so slow lighting changes are
-    // still tracked. No motion-scaled alpha: motion is handled by REJECTING history that does not
-    // reproject (above), not by discarding history that does.
+    // ---- Accumulate: A-SVGF's adaptive blend.
+    //
+    // The base rate is 1/n, which converges the Monte-Carlo estimate as fast as an unbiased running
+    // mean can, floored at ALPHA_MIN so the window stays finite and slow lighting changes are still
+    // tracked. No motion-scaled alpha: motion is handled by REJECTING history that does not reproject
+    // (above), not by discarding history that does.
+    //
+    // On top of that base, the temporal gradient opens the blend up where the lighting genuinely
+    // changed. This is the whole of A-SVGF's advantage over SVGF: SVGF's alpha knows how much history
+    // a pixel has, never how STALE it is, so a converged pixel drags a moved shadow or a turning
+    // highlight behind it for tens of frames. The gradient supplies the missing "is this history still
+    // describing the same light" term, at a tile granularity coarse enough that 1-spp noise cannot
+    // masquerade as a lighting change.
     float frames = min(histFrames + 1.0, max(pc.maxFrames, 1.0));
-    float alpha = 1.0 / frames;
+    float alpha = max(1.0 / frames, ALPHA_MIN);
+
+    vec4 grad = imageLoad(gradient, pix);
+    float adapt = 0.0;
+    if (grad.w < 0.5 && grad.y < 65504.0 && frames > GRADIENT_MIN_FRAMES) {
+        // Excess of the measured change over what noise alone would explain. A shadow edge crossing
+        // the tile moves its mean by far more than the noise floor; static 1-spp noise does not.
+        float change = max(abs(grad.x) - GRADIENT_NOISE_MULTIPLE * grad.z, 0.0);
+        // Relative to the tile's own light level, then saturating: a small real change releases a
+        // little history, a large one releases all of it. Saturing (rather than a linear ramp to 1)
+        // keeps a big-but-threshold change from snapping alpha to 1 and re-introducing the noise of a
+        // discarded history; full reset stays reserved for the geometry gate, which is the only
+        // reliable evidence that the history belongs to something else entirely.
+        float relative = change / (grad.y + 1.0e-3) / GRADIENT_RELATIVE_SCALE;
+        adapt = clamp(relative, 0.0, 1.0);
+        alpha = max(alpha, adapt);
+    }
 
     // ---- Firefly rejection, bounded by the HISTORY rather than by the neighbourhood.
     //
@@ -324,6 +372,14 @@ void main() {
         float histSigma = sqrt(max(histMoments.y - histMoments.x * histMoments.x, 0.0));
         float bound = histLum + FIREFLY_HISTORY_SIGMA * histSigma
                 + FIREFLY_HISTORY_RELATIVE * histLum + FIREFLY_CLAMP_FLOOR;
+        // The bound is evidence from the HISTORY, so it is only as good as the history is. Where the
+        // gradient above has just concluded the lighting changed, the history is stale by definition
+        // and clamping the new sample back toward it would undo the adaptation -- the pixel would be
+        // released from the blend and simultaneously dragged back to the old brightness, which is the
+        // worst of both (lag plus a hard edge at the clamp). Widening the bound by the same adaptive
+        // factor keeps the two consistent: a firefly is still rejected in converged regions, which is
+        // where the artefact actually shows, and real lighting changes pass through untouched.
+        bound = mix(bound, 65504.0, adapt);
         if (lum > bound) {
             // Scale the colour rather than clipping channels, so hue survives the rejection.
             cur *= bound / lum;
@@ -375,6 +431,6 @@ void main() {
     // histOut is the fallback history for the next frame; the à-trous pass overwrites it with its
     // first iteration's (cleaner) result, which is why the frame count does not live in its alpha.
     imageStore(histOut, pix, vec4(accum, 1.0));
-    imageStore(momentsOut, pix, vec4(moments, frames, 0.0));
+    imageStore(momentsOut, pix, vec4(moments, frames, adapt));
     imageStore(filterOut, pix, vec4(accum, variance));
 }
