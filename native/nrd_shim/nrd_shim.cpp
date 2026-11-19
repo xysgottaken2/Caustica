@@ -1,10 +1,12 @@
 // Flat C ABI shim over NVIDIA NRD (NVIDIA Real-time Denoisers) for the Caustica RT renderer.
 //
 // NRD is a C++/NRI library and Java's FFM can only bind a flat C ABI, so this DLL wraps NRD's
-// REBLUR_DIFFUSE_SPECULAR denoiser behind a handful of primitive-argument entry points (the same
-// trade-off as ngx_shim / fsr_shim / xess_shim). The heavy lifting is delegated to NRD's own
-// Integration layer (NRDIntegration.hpp), which owns the NRI pipelines/descriptors and records the
-// denoiser passes straight into the renderer's command buffer.
+// REBLUR_DIFFUSE_SPECULAR and RELAX_DIFFUSE_SPECULAR denoisers behind a handful of
+// primitive-argument entry points (the same trade-off as ngx_shim / fsr_shim / xess_shim). The
+// heavy lifting is delegated to NRD's own Integration layer (NRDIntegration.hpp), which owns the
+// NRI pipelines/descriptors and records the denoiser passes straight into the renderer's command
+// buffer. The denoiser is chosen at init (nrdshim_init's denoiserType); switching it rebuilds the
+// instance, exactly like a resize.
 //
 // ---------------------------------------------------------------------------------------------
 // RESOURCE CONTRACT (all render resolution, all left in VK_IMAGE_LAYOUT_GENERAL by the renderer,
@@ -18,11 +20,16 @@
 //                                     "xyz, w" — the tracer's existing guide needs no repack.
 //   IN_VIEWZ                  r32f    positive linear view depth of the primary hit; sky is written
 //                                     far beyond CommonSettings::denoisingRange (NRD's INF marker).
-//   IN_DIFF_RADIANCE_HITDIST  rgba16f YCoCg DEMODULATED diffuse radiance + normalized hit distance
-//   IN_SPEC_RADIANCE_HITDIST  rgba16f YCoCg DEMODULATED specular radiance + normalized hit distance
+//   IN_DIFF_RADIANCE_HITDIST  rgba16f DEMODULATED diffuse radiance + hit distance
+//   IN_SPEC_RADIANCE_HITDIST  rgba16f DEMODULATED specular radiance + hit distance
 //   OUT_DIFF_RADIANCE_HITDIST rgba16f denoised (the renderer re-modulates + sums both)
 //   OUT_SPEC_RADIANCE_HITDIST rgba16f denoised
 //   OUT_VALIDATION            rgba8   optional diagnostic overlay
+//
+// The radiance/hit-distance encoding differs per denoiser (NRD.hlsli front-end pack functions):
+// REBLUR wants YCoCg radiance + NORMALIZED hit distance (REBLUR_FrontEnd_PackRadianceAndNormHitDist),
+// RELAX wants LINEAR radiance + RAW hit distance (RELAX_FrontEnd_PackRadianceAndHitDist). The
+// renderer writes the encoding the active denoiser expects (see the FEATURE_NRD_RELAX flag).
 //
 // ---------------------------------------------------------------------------------------------
 // MATRIX / SETTINGS CONTRACT — the part the previous integration got wrong, and the reason REBLUR
@@ -118,10 +125,13 @@ static std::vector<nri::QueueFamilyVKDesc> g_queueFamilies;
 static uint32_t g_width = 0;
 static uint32_t g_height = 0;
 static int g_lastResult = 0;
-// Set once the very first denoise is recorded; used only to make the log say "REBLUR is running".
+// Set once the very first denoise is recorded; used only to make the log say which denoiser runs.
 static bool g_loggedFirstDenoise = false;
-// One stable denoiser id for the single REBLUR_DIFFUSE_SPECULAR instance.
+// One stable denoiser id for the single DIFFUSE_SPECULAR instance (REBLUR or RELAX).
 static const nrd::Identifier DENOISER_ID = 0;
+// Which denoiser the live instance runs: 0 = REBLUR_DIFFUSE_SPECULAR, 1 = RELAX_DIFFUSE_SPECULAR.
+// Set by nrdshim_init; switching it rebuilds the instance (see NrdRuntime on the Java side).
+static int g_denoiserType = 0;
 
 // ---------------------------------------------------------------------------------------------
 // REBLUR tuning last sent by Java. A resize rebuilds the NRD instance with library defaults, so the
@@ -229,6 +239,122 @@ static int applyStoredReblurSettings() {
     return NRDSHIM_OK;
 }
 
+// ---------------------------------------------------------------------------------------------
+// RELAX tuning last sent by Java. Same sentinel contract as ReblurTuning: counts use <= 0 (or
+// -1 where 0 is meaningful) for "keep NRD's own default", floats use <= 0 (or -1 for the
+// pre-pass radii, where 0 legitimately means "disabled").
+// ---------------------------------------------------------------------------------------------
+struct RelaxTuning {
+    int hitDistanceReconstructionMode = 0; // nrd::HitDistanceReconstructionMode
+    int diffuseMaxAccumulatedFrameNum = 0;
+    int specularMaxAccumulatedFrameNum = 0;
+    int diffuseMaxFastAccumulatedFrameNum = 0;
+    int specularMaxFastAccumulatedFrameNum = 0;
+    int historyFixFrameNum = -1;
+    int atrousIterationNum = -1; // -1 = default; valid range [2; 8]
+    float fastHistoryClampingSigmaScale = 0.0f;
+    float diffusePrepassBlurRadius = -1.0f; // -1 = default; 0 legitimately means "disabled"
+    float specularPrepassBlurRadius = -1.0f;
+    float minHitDistanceWeight = 0.0f;
+    float lobeAngleFraction = 0.0f;
+    float roughnessFraction = 0.0f;
+    float diffusePhiLuminance = 0.0f;
+    float specularPhiLuminance = 0.0f;
+    float depthThreshold = 0.0f;
+    int enableAntiFirefly = 0;
+    int enableRoughnessEdgeStopping = 1;
+    bool valid = false; // false until Java sends tuning at least once
+};
+
+static RelaxTuning g_relaxTuning;
+
+/** Push {@link g_relaxTuning} into the live NRD instance. No-op before the instance exists. */
+static int applyStoredRelaxSettings() {
+    if (!g_integration) {
+        return NRDSHIM_ERR_NOT_INITIALIZED;
+    }
+    // Default-constructed: every field the host does not override keeps NRD's own tuned default.
+    nrd::RelaxSettings settings = {};
+
+    settings.hitDistanceReconstructionMode =
+            (nrd::HitDistanceReconstructionMode) g_relaxTuning.hitDistanceReconstructionMode;
+    if (g_relaxTuning.diffuseMaxAccumulatedFrameNum > 0) {
+        settings.diffuseMaxAccumulatedFrameNum = (uint32_t) g_relaxTuning.diffuseMaxAccumulatedFrameNum;
+    }
+    if (g_relaxTuning.specularMaxAccumulatedFrameNum > 0) {
+        settings.specularMaxAccumulatedFrameNum = (uint32_t) g_relaxTuning.specularMaxAccumulatedFrameNum;
+    }
+    if (g_relaxTuning.diffuseMaxFastAccumulatedFrameNum > 0) {
+        settings.diffuseMaxFastAccumulatedFrameNum = (uint32_t) g_relaxTuning.diffuseMaxFastAccumulatedFrameNum;
+    }
+    if (g_relaxTuning.specularMaxFastAccumulatedFrameNum > 0) {
+        settings.specularMaxFastAccumulatedFrameNum = (uint32_t) g_relaxTuning.specularMaxFastAccumulatedFrameNum;
+    }
+    if (g_relaxTuning.historyFixFrameNum >= 0) {
+        settings.historyFixFrameNum = (uint32_t) g_relaxTuning.historyFixFrameNum;
+    }
+    if (g_relaxTuning.atrousIterationNum >= 0) {
+        settings.atrousIterationNum = (uint32_t) g_relaxTuning.atrousIterationNum;
+    }
+    if (g_relaxTuning.fastHistoryClampingSigmaScale > 0.0f) {
+        settings.fastHistoryClampingSigmaScale = g_relaxTuning.fastHistoryClampingSigmaScale;
+    }
+    if (g_relaxTuning.diffusePrepassBlurRadius >= 0.0f) {
+        settings.diffusePrepassBlurRadius = g_relaxTuning.diffusePrepassBlurRadius;
+    }
+    if (g_relaxTuning.specularPrepassBlurRadius >= 0.0f) {
+        settings.specularPrepassBlurRadius = g_relaxTuning.specularPrepassBlurRadius;
+    }
+    if (g_relaxTuning.minHitDistanceWeight > 0.0f) {
+        settings.minHitDistanceWeight = g_relaxTuning.minHitDistanceWeight;
+    }
+    if (g_relaxTuning.lobeAngleFraction > 0.0f) {
+        settings.lobeAngleFraction = g_relaxTuning.lobeAngleFraction;
+    }
+    if (g_relaxTuning.roughnessFraction > 0.0f) {
+        settings.roughnessFraction = g_relaxTuning.roughnessFraction;
+    }
+    if (g_relaxTuning.diffusePhiLuminance > 0.0f) {
+        settings.diffusePhiLuminance = g_relaxTuning.diffusePhiLuminance;
+    }
+    if (g_relaxTuning.specularPhiLuminance > 0.0f) {
+        settings.specularPhiLuminance = g_relaxTuning.specularPhiLuminance;
+    }
+    if (g_relaxTuning.depthThreshold > 0.0f) {
+        settings.depthThreshold = g_relaxTuning.depthThreshold;
+    }
+    settings.enableAntiFirefly = g_relaxTuning.enableAntiFirefly != 0;
+    settings.enableRoughnessEdgeStopping = g_relaxTuning.enableRoughnessEdgeStopping != 0;
+    // Same fast-history clamp as REBLUR: "fast >= main" disables the fast history entirely,
+    // which is almost certainly unintended; clamp instead of surprising the caller.
+    if (settings.diffuseMaxFastAccumulatedFrameNum >= settings.diffuseMaxAccumulatedFrameNum
+            && settings.diffuseMaxAccumulatedFrameNum > 1) {
+        settings.diffuseMaxFastAccumulatedFrameNum = settings.diffuseMaxAccumulatedFrameNum / 2;
+    }
+    if (settings.specularMaxFastAccumulatedFrameNum >= settings.specularMaxAccumulatedFrameNum
+            && settings.specularMaxAccumulatedFrameNum > 1) {
+        settings.specularMaxFastAccumulatedFrameNum = settings.specularMaxAccumulatedFrameNum / 2;
+    }
+
+    nrd::Result result = g_integration->SetDenoiserSettings(DENOISER_ID, &settings);
+    g_lastResult = (int) result;
+    if (result != nrd::Result::SUCCESS) {
+        nrdShimLog("SetDenoiserSettings failed: %d", (int) result);
+        return (int) result;
+    }
+    NRD_SHIM_TRACE("relax settings applied: diffAccum=%u specAccum=%u diffFast=%u specFast=%u historyFix=%u atrous=%u hitDistRecon=%d",
+            settings.diffuseMaxAccumulatedFrameNum, settings.specularMaxAccumulatedFrameNum,
+            settings.diffuseMaxFastAccumulatedFrameNum, settings.specularMaxFastAccumulatedFrameNum,
+            settings.historyFixFrameNum, settings.atrousIterationNum,
+            (int) settings.hitDistanceReconstructionMode);
+    return NRDSHIM_OK;
+}
+
+/** Push whichever tuning the live instance's denoiser uses. No-op before the instance exists. */
+static int applyStoredSettings() {
+    return g_denoiserType == 1 ? applyStoredRelaxSettings() : applyStoredReblurSettings();
+}
+
 /** Tear the integration down. Safe to call when nothing exists. */
 static void destroyIntegration() {
     if (!g_integration) {
@@ -272,22 +398,28 @@ NRD_SHIM_EXPORT int nrdshim_version() {
 }
 
 /**
- * Wrap the renderer's existing Vulkan device into NRI and (re)create the REBLUR instance for the
- * given render resolution. Also the resize path: RecreateVK destroys and rebuilds internally.
- * queueFamilyIndex is the graphics queue family; vkMinorVersion is the Vulkan 1.x minor (NRD needs
- * >= 2). Returns 0 on success, otherwise nrd::Result or a negative NrdShimStatus.
+ * Wrap the renderer's existing Vulkan device into NRI and (re)create the NRD instance for the
+ * given render resolution. Also the resize / denoiser-switch path: RecreateVK destroys and
+ * rebuilds internally. queueFamilyIndex is the graphics queue family; vkMinorVersion is the
+ * Vulkan 1.x minor (NRD needs >= 2); denoiserType selects the denoiser (0 = REBLUR_DIFFUSE_SPECULAR,
+ * 1 = RELAX_DIFFUSE_SPECULAR). Returns 0 on success, otherwise nrd::Result or a negative
+ * NrdShimStatus.
  */
 NRD_SHIM_EXPORT int nrdshim_init(unsigned long long vkInstance, unsigned long long vkPhysicalDevice,
                                  unsigned long long vkDevice, unsigned long long vkGetInstanceProcAddr,
                                  unsigned int queueFamilyIndex, unsigned int vkMinorVersion,
-                                 unsigned int width, unsigned int height) {
+                                 unsigned int width, unsigned int height, int denoiserType) {
     (void) vkGetInstanceProcAddr; // NRI resolves entry points from the wrapped device itself
-    NRD_SHIM_TRACE("init: instance=%p phys=%p device=%p queueFamily=%u vk1.%u size=%ux%u",
+    NRD_SHIM_TRACE("init: instance=%p phys=%p device=%p queueFamily=%u vk1.%u size=%ux%u denoiserType=%d",
             (void*) vkInstance, (void*) vkPhysicalDevice, (void*) vkDevice,
-            queueFamilyIndex, vkMinorVersion, width, height);
+            queueFamilyIndex, vkMinorVersion, width, height, denoiserType);
 
     if (!vkInstance || !vkPhysicalDevice || !vkDevice) {
         nrdShimLog("init: null Vulkan handle");
+        return NRDSHIM_ERR_INVALID_ARGUMENT;
+    }
+    if (denoiserType != 0 && denoiserType != 1) {
+        nrdShimLog("init: invalid denoiserType %d (0 = REBLUR, 1 = RELAX)", denoiserType);
         return NRDSHIM_ERR_INVALID_ARGUMENT;
     }
     // NRD stores resource dimensions as uint16_t, so an out-of-range size would silently truncate
@@ -339,8 +471,11 @@ NRD_SHIM_EXPORT int nrdshim_init(unsigned long long vkInstance, unsigned long lo
     g_deviceDesc.vkBindingOffsets.bRegister = libraryDesc.spirvBindingOffsets.constantBufferOffset;
     g_deviceDesc.vkBindingOffsets.uRegister = libraryDesc.spirvBindingOffsets.storageTextureAndBufferOffset;
 
+    g_denoiserType = denoiserType;
+
     nrd::IntegrationCreationDesc integrationDesc = {};
-    std::snprintf(integrationDesc.name, sizeof(integrationDesc.name), "Caustica REBLUR");
+    std::snprintf(integrationDesc.name, sizeof(integrationDesc.name),
+            denoiserType == 1 ? "Caustica RELAX" : "Caustica REBLUR");
     integrationDesc.resourceWidth = (uint16_t) width;
     integrationDesc.resourceHeight = (uint16_t) height;
     // Caustica records the next frame while previous ones may still execute, so NRD's per-frame
@@ -355,7 +490,9 @@ NRD_SHIM_EXPORT int nrdshim_init(unsigned long long vkInstance, unsigned long lo
     integrationDesc.autoWaitForIdle = false;
 
     nrd::InstanceCreationDesc instanceDesc = {};
-    nrd::DenoiserDesc denoisers[] = {{DENOISER_ID, nrd::Denoiser::REBLUR_DIFFUSE_SPECULAR}};
+    nrd::DenoiserDesc denoisers[] = {{DENOISER_ID, denoiserType == 1
+            ? nrd::Denoiser::RELAX_DIFFUSE_SPECULAR
+            : nrd::Denoiser::REBLUR_DIFFUSE_SPECULAR}};
     instanceDesc.denoisers = denoisers;
     instanceDesc.denoisersNum = 1;
 
@@ -377,16 +514,18 @@ NRD_SHIM_EXPORT int nrdshim_init(unsigned long long vkInstance, unsigned long lo
     g_height = height;
     g_loggedFirstDenoise = false;
     // The rebuilt instance starts from NRD defaults; re-apply whatever tuning Java last sent so a
-    // resize cannot silently change the denoiser's behaviour.
-    if (g_tuning.valid) {
-        int rc = applyStoredReblurSettings();
+    // resize (or a denoiser switch) cannot silently change the denoiser's behaviour.
+    bool tuningValid = denoiserType == 1 ? g_relaxTuning.valid : g_tuning.valid;
+    if (tuningValid) {
+        int rc = applyStoredSettings();
         if (rc != NRDSHIM_OK) {
-            nrdShimLog("init: re-applying stored REBLUR settings failed: %d", rc);
+            nrdShimLog("init: re-applying stored settings failed: %d", rc);
             destroyIntegration();
             return rc;
         }
     }
-    nrdShimLog("initialized %ux%u (NRD v%u.%u.%u, %.1f Mb)", width, height,
+    nrdShimLog("initialized %ux%u (%s, NRD v%u.%u.%u, %.1f Mb)", width, height,
+            denoiserType == 1 ? "RELAX" : "REBLUR",
             libraryDesc.versionMajor, libraryDesc.versionMinor, libraryDesc.versionBuild,
             g_integration->GetTotalMemoryUsageInMb());
     return NRDSHIM_OK;
@@ -453,6 +592,77 @@ NRD_SHIM_EXPORT int nrdshim_set_reblur_settings(int hitDistReconstructionMode,
         return NRDSHIM_OK; // remembered; applied by nrdshim_init
     }
     return applyStoredReblurSettings();
+}
+
+/**
+ * Store and apply RELAX tuning. Safe to call before init: the values are remembered and applied
+ * when the instance is created (and re-applied after every resize / denoiser switch).
+ *
+ * Sentinels: the accumulation counts and atrousIterationNum use -1 for "keep NRD's default"
+ * (0 is meaningful for historyFixFrameNum); the pre-pass radii use -1 for "default" (0 means
+ * "disabled"); the remaining floats use <= 0, and hitDistReconstructionMode maps directly onto
+ * nrd::HitDistanceReconstructionMode (0 OFF, 1 AREA_3X3, 2 AREA_5X5).
+ */
+NRD_SHIM_EXPORT int nrdshim_set_relax_settings(int hitDistReconstructionMode,
+                                               int diffuseMaxAccumulatedFrameNum,
+                                               int specularMaxAccumulatedFrameNum,
+                                               int diffuseMaxFastAccumulatedFrameNum,
+                                               int specularMaxFastAccumulatedFrameNum,
+                                               int historyFixFrameNum,
+                                               int atrousIterationNum,
+                                               float fastHistoryClampingSigmaScale,
+                                               float diffusePrepassBlurRadius,
+                                               float specularPrepassBlurRadius,
+                                               float minHitDistanceWeight,
+                                               float lobeAngleFraction,
+                                               float roughnessFraction,
+                                               float diffusePhiLuminance,
+                                               float specularPhiLuminance,
+                                               float depthThreshold,
+                                               int enableAntiFirefly,
+                                               int enableRoughnessEdgeStopping) {
+    if (hitDistReconstructionMode < 0
+            || hitDistReconstructionMode >= (int) nrd::HitDistanceReconstructionMode::MAX_NUM) {
+        nrdShimLog("set_relax_settings: invalid hitDistReconstructionMode %d", hitDistReconstructionMode);
+        return NRDSHIM_ERR_INVALID_ARGUMENT;
+    }
+    if (diffuseMaxAccumulatedFrameNum > (int) nrd::RELAX_MAX_HISTORY_FRAME_NUM
+            || specularMaxAccumulatedFrameNum > (int) nrd::RELAX_MAX_HISTORY_FRAME_NUM
+            || diffuseMaxFastAccumulatedFrameNum > (int) nrd::RELAX_MAX_HISTORY_FRAME_NUM
+            || specularMaxFastAccumulatedFrameNum > (int) nrd::RELAX_MAX_HISTORY_FRAME_NUM) {
+        nrdShimLog("set_relax_settings: frame counts above RELAX_MAX_HISTORY_FRAME_NUM (%u)",
+                nrd::RELAX_MAX_HISTORY_FRAME_NUM);
+        return NRDSHIM_ERR_INVALID_ARGUMENT;
+    }
+    if (atrousIterationNum >= 0 && (atrousIterationNum < 2 || atrousIterationNum > 8)) {
+        nrdShimLog("set_relax_settings: atrousIterationNum %d outside [2; 8]", atrousIterationNum);
+        return NRDSHIM_ERR_INVALID_ARGUMENT;
+    }
+
+    g_relaxTuning.hitDistanceReconstructionMode = hitDistReconstructionMode;
+    g_relaxTuning.diffuseMaxAccumulatedFrameNum = diffuseMaxAccumulatedFrameNum;
+    g_relaxTuning.specularMaxAccumulatedFrameNum = specularMaxAccumulatedFrameNum;
+    g_relaxTuning.diffuseMaxFastAccumulatedFrameNum = diffuseMaxFastAccumulatedFrameNum;
+    g_relaxTuning.specularMaxFastAccumulatedFrameNum = specularMaxFastAccumulatedFrameNum;
+    g_relaxTuning.historyFixFrameNum = historyFixFrameNum;
+    g_relaxTuning.atrousIterationNum = atrousIterationNum;
+    g_relaxTuning.fastHistoryClampingSigmaScale = fastHistoryClampingSigmaScale;
+    g_relaxTuning.diffusePrepassBlurRadius = diffusePrepassBlurRadius;
+    g_relaxTuning.specularPrepassBlurRadius = specularPrepassBlurRadius;
+    g_relaxTuning.minHitDistanceWeight = minHitDistanceWeight;
+    g_relaxTuning.lobeAngleFraction = lobeAngleFraction;
+    g_relaxTuning.roughnessFraction = roughnessFraction;
+    g_relaxTuning.diffusePhiLuminance = diffusePhiLuminance;
+    g_relaxTuning.specularPhiLuminance = specularPhiLuminance;
+    g_relaxTuning.depthThreshold = depthThreshold;
+    g_relaxTuning.enableAntiFirefly = enableAntiFirefly;
+    g_relaxTuning.enableRoughnessEdgeStopping = enableRoughnessEdgeStopping;
+    g_relaxTuning.valid = true;
+
+    if (!g_integration) {
+        return NRDSHIM_OK; // remembered; applied by nrdshim_init
+    }
+    return applyStoredRelaxSettings();
 }
 
 /** Frame start: advances NRD's internal frame index (its constant-buffer / descriptor ring slot). */
@@ -576,7 +786,8 @@ static nrd::Resource makeResource(unsigned long long image, int vkFormat) {
 }
 
 /**
- * Record the REBLUR_DIFFUSE_SPECULAR denoise into the renderer's currently-recording command
+ * Record the DIFFUSE_SPECULAR denoise (REBLUR or RELAX, whichever the instance was created with)
+ * into the renderer's currently-recording command
  * buffer. All textures are render resolution and the formats are raw VkFormat enums. When
  * validationImage != 0 it is bound as OUT_VALIDATION (which additionally requires enableValidation
  * in the common settings).
@@ -630,7 +841,7 @@ NRD_SHIM_EXPORT int nrdshim_denoise(unsigned long long cmd,
     g_integration->DenoiseVK(denoisers, 1, cmdDesc, snapshot);
     if (!g_loggedFirstDenoise) {
         g_loggedFirstDenoise = true;
-        nrdShimLog("REBLUR denoising %ux%u", g_width, g_height);
+        nrdShimLog("%s denoising %ux%u", g_denoiserType == 1 ? "RELAX" : "REBLUR", g_width, g_height);
     }
     return NRDSHIM_OK;
 }

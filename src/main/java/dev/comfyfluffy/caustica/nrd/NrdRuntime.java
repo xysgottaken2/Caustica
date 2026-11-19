@@ -22,8 +22,8 @@ import java.util.Arrays;
 
 /**
  * Shared NRD lifetime for the mod: locates + loads the NRD shim and runs {@code nrdshim_init}
- * (which wraps the renderer's Vulkan device through NRI and creates the REBLUR instance) exactly
- * once per size, mirroring {@code FsrRuntime}/{@code NgxRuntime}.
+ * (which wraps the renderer's Vulkan device through NRI and creates the NRD instance) exactly
+ * once per size and denoiser type, mirroring {@code FsrRuntime}/{@code NgxRuntime}.
  *
  * <p>Windows-only for now, same reasoning as the FSR runtime: CI builds {@code nrdshim} against
  * the NRD source (statically linked, SPIR-V shaders embedded) and bundles it; other platforms
@@ -40,6 +40,7 @@ public final class NrdRuntime {
     private boolean failed;
     private int initWidth;
     private int initHeight;
+    private int initDenoiserType = -1;
 
     private NrdRuntime() {
     }
@@ -76,31 +77,32 @@ public final class NrdRuntime {
     }
 
     /**
-     * Ensure the shim is loaded and a REBLUR instance exists at {@code width}x{@code height}.
-     * Re-init on size change is cheap enough for the rare resize path (NRD recreates its pools);
-     * returns {@code null} when unavailable, and callers fall back to the undenoised image.
+     * Ensure the shim is loaded and an NRD instance exists at {@code width}x{@code height} running
+     * the requested denoiser (0 = REBLUR, 1 = RELAX). Re-init on size or denoiser change is cheap
+     * enough for the rare resize/switch path (NRD recreates its pools); returns {@code null} when
+     * unavailable, and callers fall back to the undenoised image.
      */
     /** True once init or a denoise has failed and the integration has latched off for the session. */
     public synchronized boolean hasFailed() {
         return failed;
     }
 
-    public synchronized NrdLibrary acquire(VulkanDevice device, int width, int height) {
+    public synchronized NrdLibrary acquire(VulkanDevice device, int width, int height, int denoiserType) {
         if (failed) {
             return null;
         }
         try {
             if (!initialized) {
-                init(device, width, height);
+                init(device, width, height, denoiserType);
                 initialized = true;
                 return lib;
             }
-            if (initWidth != width || initHeight != height) {
+            if (initWidth != width || initHeight != height || initDenoiserType != denoiserType) {
                 // Re-init destroys and rebuilds NRD's internal resources. With
                 // autoWaitForIdle = false NRD does not synchronize that for us, so a frame still
                 // referencing the old pools would read freed memory.
                 waitDeviceIdle();
-                init(device, width, height);
+                init(device, width, height, denoiserType);
             }
             return lib;
         } catch (Throwable t) {
@@ -130,6 +132,7 @@ public final class NrdRuntime {
         lib = null;
         initWidth = 0;
         initHeight = 0;
+        initDenoiserType = -1;
     }
 
     /** Best-effort {@code vkDeviceWaitIdle} on the renderer's device; ignored if it is unavailable. */
@@ -139,7 +142,7 @@ public final class NrdRuntime {
         }
     }
 
-    private void init(VulkanDevice device, int width, int height) {
+    private void init(VulkanDevice device, int width, int height, int denoiserType) {
         if (!platformSupported()) {
             throw new IllegalStateException("NRD natives are not bundled for this platform");
         }
@@ -164,13 +167,15 @@ public final class NrdRuntime {
         int minor = (apiVersion >> 12) & 0x3FF;
         int rc = lib.init(instance.address(), device.vkDevice().getPhysicalDevice().address(),
                 device.vkDevice().address(), gipa,
-                device.graphicsQueue().queueFamilyIndex(), Math.max(2, minor), width, height);
+                device.graphicsQueue().queueFamilyIndex(), Math.max(2, minor), width, height, denoiserType);
         if (rc != 0) {
             throw new IllegalStateException("nrdshim_init failed: " + rc + " last=" + lib.lastResult());
         }
         initWidth = width;
         initHeight = height;
-        CausticaMod.LOGGER.info("NRD {} initialized at {}x{} ({})", lib.versionString(), width, height, shim);
+        initDenoiserType = denoiserType;
+        CausticaMod.LOGGER.info("NRD {} initialized at {}x{} ({}, {})", lib.versionString(), width, height,
+                denoiserType == 1 ? "RELAX" : "REBLUR", shim);
     }
 
     private static Path extractBundledNative() {

@@ -232,6 +232,7 @@ public static const uint FEATURE_CLOUDS = 8u;            // cloud deck in the sk
 public static const uint FEATURE_CLOUDS_VOLUMETRIC = 16u; // clouds are ray-marched, not a flat deck
 public static const uint FEATURE_RESTIR = 32u;            // temporal + spatial emitter-reservoir reuse
 public static const uint FEATURE_NRD = 64u;              // NRD denoiser signal capture (per-lobe radiance + hit distance)
+public static const uint FEATURE_NRD_RELAX = 512u;       // the active NRD denoiser is RELAX: pack linear radiance + raw hit distance instead of REBLUR's YCoCg + normalized hit distance
 public static const uint FEATURE_VIEWZ = 128u;           // a renderer-side denoiser needs gViewZ (reprojection validation + sky cutoff)
 public static const uint FEATURE_SHARC = 256u;           // experimental spatial-hash radiance cache
 

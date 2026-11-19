@@ -270,6 +270,7 @@ def ngxNativePlatforms = [
 		],
 		vendorRoot: { dlssSdkRoot, vendorConfig -> new File(dlssSdkRoot, "lib/Windows_x86_64/${vendorConfig}") },
 		vendorIncludes: [
+			"nvngx_dlss.dll",
 			"nvngx_dlssd.dll",
 			"nvngx_dlssg.dll"
 		]
@@ -281,6 +282,7 @@ def ngxNativePlatforms = [
 		],
 		vendorRoot: { dlssSdkRoot, vendorConfig -> new File(dlssSdkRoot, "lib/Linux_x86_64/${vendorConfig}") },
 		vendorIncludes: [
+			"libnvidia-ngx-dlss.so*",
 			"libnvidia-ngx-dlssd.so*",
 			"libnvidia-ngx-dlssg.so*"
 		]

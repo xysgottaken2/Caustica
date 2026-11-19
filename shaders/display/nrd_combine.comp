@@ -1,8 +1,9 @@
 #version 460
 
-// NRD/REBLUR back-end: decode the denoised per-lobe outputs, RE-MODULATE the material that was
+// NRD back-end: decode the denoised per-lobe outputs, RE-MODULATE the material that was
 // divided out before denoising, and sum them into the single radiance image the upscale stage
-// consumes.
+// consumes. The decode is per-denoiser (NRD.hlsli): REBLUR's outputs are YCoCg and need the
+// inverse transform, RELAX's are linear and pass through untouched (its unpack is the identity).
 //
 // The demodulation half lives in world.rgen.slang (nrdMaterialFactors in world_core.slang). Both
 // sides derive the factors from the SAME guide textures — gAlbedo.rgb, gSpecAlbedo.rgb and
@@ -16,8 +17,8 @@
 
 layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
 
-layout(binding = 0, set = 0, rgba16f) uniform readonly  image2D nrdDiff;   // OUT_DIFF (denoised, YCoCg, demodulated)
-layout(binding = 1, set = 0, rgba16f) uniform readonly  image2D nrdSpec;   // OUT_SPEC (denoised, YCoCg, demodulated)
+layout(binding = 0, set = 0, rgba16f) uniform readonly  image2D nrdDiff;   // OUT_DIFF (denoised, demodulated; YCoCg for REBLUR, linear for RELAX)
+layout(binding = 1, set = 0, rgba16f) uniform readonly  image2D nrdSpec;   // OUT_SPEC (denoised, demodulated; YCoCg for REBLUR, linear for RELAX)
 layout(binding = 2, set = 0, rgba16f) uniform writeonly image2D combined;  // upscale source
 layout(binding = 3, set = 0, rgba16f) uniform readonly  image2D rawColor;  // the raw trace (sky passthrough / fallback)
 layout(binding = 4, set = 0, rgba16f) uniform readonly  image2D albedo;    // gAlbedo: diffuse albedo guide
@@ -29,6 +30,7 @@ layout(push_constant) uniform Push {
     int width;
     int height;
     float denoisingRange; // pixels beyond this viewZ are sky: passed through raw
+    int relaxMode;        // 1 = RELAX (linear outputs, no YCoCg decode), 0 = REBLUR
 } pc;
 
 // NRD's NRD_MATERIAL_FACTOR_MIN_SCALE / NRD_ROUGHNESS_FACTOR_MIN_SCALE. These MUST match
@@ -66,7 +68,7 @@ void main() {
     if (pix.x >= pc.width || pix.y >= pc.height) {
         return;
     }
-    // Sky: REBLUR treats anything beyond denoisingRange as INF and its temporal machinery returns
+    // Sky: NRD treats anything beyond denoisingRange as INF and its temporal machinery returns
     // black/garbage there, so the raw trace passes through untouched. The raw image is the correct
     // source rather than the per-lobe pair: it carries the sky exactly as the tracer wrote it,
     // including the sun/moon discs and clouds, with no demodulation round trip at all.
@@ -76,8 +78,10 @@ void main() {
         return;
     }
 
-    vec3 diffRadiance = sanitize(yCoCgToLinear(imageLoad(nrdDiff, pix).rgb));
-    vec3 specRadiance = sanitize(yCoCgToLinear(imageLoad(nrdSpec, pix).rgb));
+    vec3 diffRaw = imageLoad(nrdDiff, pix).rgb;
+    vec3 specRaw = imageLoad(nrdSpec, pix).rgb;
+    vec3 diffRadiance = sanitize(pc.relaxMode != 0 ? diffRaw : yCoCgToLinear(diffRaw));
+    vec3 specRadiance = sanitize(pc.relaxMode != 0 ? specRaw : yCoCgToLinear(specRaw));
 
     vec3 diffFactor;
     vec3 specFactor;

@@ -569,4 +569,78 @@ final class RtDenoiserShaderRegressionTest {
         assertTrue(denoiser.contains("private static final float MIN_PREPASS_BLUR_RADIUS"),
                 "the pre-pass must never scale to zero; NRD requires it for probabilistic input");
     }
+
+    /**
+     * NRD requires {@code CommonSettings::frameIndex} to increment by exactly 1 per frame, in
+     * lockstep with {@code Integration::NewFrame()} (which asserts the two agree). Feeding it the
+     * renderer's global frame counter desyncs the two whenever a frame is skipped — debug views,
+     * the toggle off, a skipped frame — and the mismatch silently corrupts NRD's history
+     * bookkeeping in release builds: a boiling/smearing source that survives every other fix
+     * because it only shows up once the matrices are right. The index must be a dedicated counter
+     * incremented exactly when {@code NewFrame()} is called.
+     */
+    @Test
+    void nrdFrameIndexIncrementsInLockstepWithNewFrame() throws Exception {
+        String denoiser = Files.readString(NRD_DENOISER);
+        assertTrue(denoiser.contains("int frameIndex = nrdFrameIndex++;"),
+                "the frame index must come from the dedicated counter, not the renderer frame counter");
+        assertFalse(denoiser.contains("float jitterPixelsX, float jitterPixelsY, int frameIndex,"),
+                "the renderer frame counter must not be passed in as the NRD frame index");
+        assertTrue(denoiser.contains("private int nrdFrameIndex;"),
+                "the dedicated NRD frame counter must exist");
+    }
+
+    /**
+     * REBLUR and RELAX pack different signal encodings (YCoCg + normalized hit distance vs linear
+     * radiance + raw hit distance), so the tracer must write the encoding the active denoiser
+     * expects, and the combine pass must decode it back. A mismatch still compiles and runs — it
+     * just feeds RELAX YCoCg values (or vice versa) and the output is wrong. Both sides are keyed
+     * on the same FEATURE_NRD_RELAX flag, and the combine's push constant carries the same choice.
+     */
+    @Test
+    void nrdRelaxEncodingMatchesBetweenTracerAndCombine() throws Exception {
+        String raygen = Files.readString(WORLD_RGEN);
+        String combine = Files.readString(NRD_COMBINE);
+        String combinePipeline = Files.readString(REPO_ROOT.resolve(
+                "src/main/java/dev/comfyfluffy/caustica/rt/pipeline/RtNrdCombinePipeline.java"));
+
+        assertTrue(raygen.contains("if (nrdRelaxEnabled()) {"),
+                "the tracer must branch on the active NRD denoiser when packing the signals");
+        assertTrue(raygen.contains("gNrdDiff[pix] = float4(diffRad, rawHitDiff);")
+                        && raygen.contains("gNrdSpec[pix] = float4(specRad, rawHitSpec);"),
+                "RELAX must receive linear radiance with the raw hit distance");
+        assertTrue(raygen.contains("gNrdDiff[pix] = float4(nrdLinearToYCoCg(diffRad), normHitDiff);"),
+                "REBLUR must keep receiving YCoCg radiance with the normalized hit distance");
+        assertTrue(combine.contains("pc.relaxMode != 0 ? diffRaw : yCoCgToLinear(diffRaw)"),
+                "the combine pass must skip the YCoCg decode for RELAX outputs");
+        assertTrue(combinePipeline.contains("push.putInt(12, relaxMode ? 1 : 0);"),
+                "the combine pipeline must push the active denoiser to the shader");
+    }
+
+    /**
+     * The ray-reconstruction selector is what keeps the DLSS path from boiling: DLSS-RR's neural
+     * history is unstable at 1 spp on Minecraft's high-frequency content, so the selector lets the
+     * player swap it for SVGF or NRD (denoising at render res) behind a DLSS-SR upscale. The three
+     * backends must be mutually exclusive — two temporal denoisers in series fight over the same
+     * history — and the DLSS-SR backend must be wired into the composite's upscale slot.
+     */
+    @Test
+    void dlssRayReconstructionSelectorIsExclusiveAndWired() throws Exception {
+        String rr = Files.readString(REPO_ROOT.resolve(
+                "src/main/java/dev/comfyfluffy/caustica/rt/pipeline/RtDlssRr.java"));
+        String sr = Files.readString(REPO_ROOT.resolve(
+                "src/main/java/dev/comfyfluffy/caustica/rt/pipeline/RtDlssSr.java"));
+        String composite = Files.readString(REPO_ROOT.resolve(
+                "src/main/java/dev/comfyfluffy/caustica/rt/RtComposite.java"));
+
+        assertTrue(rr.contains("CausticaConfig.Rt.DlssRr.RAY_RECONSTRUCTION_DLSS_RR.equals("),
+                "DLSS-RR must only run when the selector names it");
+        assertTrue(sr.contains("CausticaConfig.Rt.DlssRr.RAY_RECONSTRUCTION_SVGF.equals(rayReconstruction)")
+                        && sr.contains("CausticaConfig.Rt.DlssRr.RAY_RECONSTRUCTION_NRD.equals(rayReconstruction)"),
+                "DLSS-SR must only run when the selector names SVGF or NRD");
+        assertTrue(composite.contains("boolean dlssSrPath = !rrPath && RtDlssSr.enabled()"),
+                "the composite must route the DLSS-SR path through the upscale slot");
+        assertTrue(composite.contains("RtDlssSr.INSTANCE.evaluate("),
+                "the composite must dispatch the DLSS-SR upscale");
+    }
 }

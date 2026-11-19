@@ -277,7 +277,7 @@ public final class NgxRuntime {
             }
             if (os.contains("linux") && x64) {
                 return new PlatformNatives("linux-x64", "libngxshim.so", List.of(),
-                        List.of("libnvidia-ngx-dlssd.so", "libnvidia-ngx-dlssg.so"), true);
+                        List.of("libnvidia-ngx-dlss.so", "libnvidia-ngx-dlssd.so", "libnvidia-ngx-dlssg.so"), true);
             }
             return new PlatformNatives(os + "/" + arch, System.mapLibraryName("ngxshim"), List.of(), List.of(), false);
         }

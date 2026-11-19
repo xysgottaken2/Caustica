@@ -19,16 +19,20 @@ import java.lang.foreign.MemorySegment;
 import java.lang.foreign.ValueLayout;
 
 /**
- * NRD REBLUR_DIFFUSE_SPECULAR denoiser backend — the optional strong denoiser for the non-DLSS
- * paths, selectable from Video Settings. Consumes the tracer's demodulated per-lobe signals
- * ({@code gNrdDiff} / {@code gNrdSpec}, YCoCg radiance + REBLUR-normalized hit distance) plus the
- * shared guides at render resolution, and writes denoised per-lobe outputs that
- * {@link RtNrdCombinePipeline} re-modulates and sums.
+ * NRD denoiser backend (REBLUR_DIFFUSE_SPECULAR or RELAX_DIFFUSE_SPECULAR, chosen by
+ * {@code nrd.denoiser}) — the optional strong denoiser, selectable from Video Settings on the
+ * non-DLSS paths and through the ray-reconstruction selector on the DLSS path. Consumes the
+ * tracer's demodulated per-lobe signals ({@code gNrdDiff} / {@code gNrdSpec}) plus the shared
+ * guides at render resolution, and writes denoised per-lobe outputs that
+ * {@link RtNrdCombinePipeline} re-modulates and sums. The signal encoding follows the active
+ * denoiser: REBLUR wants YCoCg radiance + normalized hit distance, RELAX wants linear radiance +
+ * raw hit distance (the tracer writes the encoding the active denoiser expects, via the
+ * FEATURE_NRD_RELAX flag).
  *
  * <h2>Why this is a full rewrite</h2>
  * The previous integration was disabled because REBLUR "trembled", ghosted and smeared under camera
- * motion. Those were not tuning problems; they were four contract violations, each fixed here and
- * each verified against the NRD v4.17.3 sources:
+ * motion. Those were not tuning problems; they were contract violations, each fixed here and each
+ * verified against the NRD v4.17.3 sources:
  *
  * <ol>
  *   <li><b>Rebased world space.</b> The renderer rebases its terrain origin as the player moves, and
@@ -57,6 +61,13 @@ import java.lang.foreign.ValueLayout;
  *       albedo already baked in. Denoising across a texture edge then blurs albedo, which reads as
  *       exactly the smearing that was blamed on the temporal filter. The tracer now divides by the
  *       material factors and the combine pass multiplies them back afterwards.</li>
+ *   <li><b>Frame-index desync.</b> NRD requires {@code CommonSettings::frameIndex} to increment by
+ *       exactly 1 per frame, in lockstep with {@code Integration::NewFrame()} (which asserts the
+ *       two agree). The old code passed the renderer's global frame counter, which advances on
+ *       frames NRD never sees (debug views, the toggle off, skipped frames), so the two diverged
+ *       and NRD's history bookkeeping ran on the wrong frame — a boiling/smearing source that
+ *       survived every other fix because it only shows up once the matrices are right. The index
+ *       is now a dedicated counter incremented exactly when {@code NewFrame()} is called.</li>
  * </ol>
  *
  * <p>On top of that the per-frame reset logic no longer resets on "the camera moved a lot": the only
@@ -67,18 +78,28 @@ public final class RtNrdDenoiser {
     public static final RtNrdDenoiser INSTANCE = new RtNrdDenoiser();
 
     /**
-     * Whether REBLUR should run. Always false: the integration is retired.
-     *
-     * <p>REBLUR keeps its temporal history inside the library, so the reprojection fixes that made
-     * the built-in SVGF path stable could not reach it, and it stayed blobby and noisy in exactly
-     * the conditions SVGF now handles. The toggle is gone from the options screen and this gate
-     * keeps a hand-edited config from bringing it back.
-     *
-     * <p>The code and the CMake shim stay in the tree because CI builds them, and because the
-     * per-lobe demodulated signals it consumes are still produced for DLSS-RR.
+     * Whether NRD should run this frame. NRD is selected two ways, depending on which path is
+     * actually running: while the DLSS path runs (RR or DLSS-SR), the ray-reconstruction
+     * selector names it ({@code dlss-rr.ray-reconstruction = nrd}); on every other path its own
+     * toggle ({@code nrd.enabled}) selects it. Either way it owns the denoise slot exclusively —
+     * two temporal denoisers in series fight over the same history.
      */
     public static boolean enabled() {
-        return false;
+        if (RtDlssRr.enabled() || RtDlssSr.enabled()) {
+            return CausticaConfig.Rt.DlssRr.RAY_RECONSTRUCTION_NRD.equals(
+                    CausticaConfig.Rt.DlssRr.rayReconstruction());
+        }
+        return CausticaConfig.Rt.Nrd.ENABLED.value();
+    }
+
+    /** Which NRD denoiser the config selects: 0 = REBLUR, 1 = RELAX (see {@link NrdRuntime}). */
+    public static int denoiserType() {
+        return CausticaConfig.Rt.Nrd.isRelax() ? 1 : 0;
+    }
+
+    /** Whether the selected NRD denoiser is RELAX (false = REBLUR). */
+    public static boolean isRelax() {
+        return CausticaConfig.Rt.Nrd.isRelax();
     }
 
     /**
@@ -163,6 +184,17 @@ public final class RtNrdDenoiser {
      */
     private static final float FAST_HISTORY_CLAMPING_SIGMA = 1.5f;
 
+    // ---- RELAX tuning ---------------------------------------------------------------
+    // RELAX is NRD's atrous-wavelet denoiser: like SVGF it drives its spatial kernel from a
+    // measured variance, which is why it holds up better than REBLUR on noisy 1-spp input.
+    // Most fields keep NRD's own defaults (sent as <= 0 / -1); only the accumulation window,
+    // the resolution-scaled pre-pass and the hit-distance reconstruction are overridden, for
+    // the same reasons as REBLUR above.
+    /** RELAX's hard cap ({@code RELAX_MAX_HISTORY_FRAME_NUM}); values above it are rejected. */
+    private static final int RELAX_MAX_HISTORY_FRAMES = 255;
+    /** RELAX's own lobe-angle default (wider than REBLUR's): the atrous kernel needs it. */
+    private static final float RELAX_LOBE_ANGLE_FRACTION = 0.5f;
+
     /**
      * {@code CommonSettings::denoisingRange}. Pixels with a larger viewZ are treated as sky/INF; the
      * tracer writes 1e6 there, so the cutoff sits below that. Mirrors
@@ -198,6 +230,16 @@ public final class RtNrdDenoiser {
     private final java.util.Set<String> warned = java.util.concurrent.ConcurrentHashMap.newKeySet();
     private boolean hasPrev;
     private int appliedAccumulatedFrames = -1;
+    /** Denoiser type the stored tuning was last applied for (0 = REBLUR, 1 = RELAX); -1 = none. */
+    private int appliedDenoiserType = -1;
+    /**
+     * NRD's {@code CommonSettings::frameIndex}: a dedicated counter incremented exactly once per
+     * {@code NewFrame()} call. It must NOT be the renderer's global frame counter, which advances
+     * on frames NRD never sees (debug views, the toggle off, skipped frames) and would desync the
+     * two — NRD asserts they agree, and in release builds the mismatch silently corrupts history
+     * bookkeeping (see the class docs, item 5).
+     */
+    private int nrdFrameIndex;
     private final float[] prevViewToClip = new float[16];
     /**
      * Previous frame's rotation-only view matrix. The full {@code worldToViewPrev} NRD receives is
@@ -225,7 +267,7 @@ public final class RtNrdDenoiser {
     }
 
     /**
-     * Record one REBLUR denoise into {@code cmd}.
+     * Record one NRD denoise (REBLUR or RELAX, per config) into {@code cmd}.
      *
      * @param viewToClip   the frame's projection, exactly as the renderer built it (jitter is applied
      *                     to the ray, not the matrix, so this is already non-jittered)
@@ -246,7 +288,7 @@ public final class RtNrdDenoiser {
                            Matrix4fc viewToClip, Matrix4fc viewRotation,
                            double camWorldX, double camWorldY, double camWorldZ,
                            double anchorX, double anchorY, double anchorZ,
-                           float jitterPixelsX, float jitterPixelsY, int frameIndex,
+                           float jitterPixelsX, float jitterPixelsY,
                            boolean projectionChanged) {
         if (failed || !enabled()) {
             return false;
@@ -255,7 +297,13 @@ public final class RtNrdDenoiser {
         if (!(((GpuDeviceAccessor) RenderSystem.getDevice()).caustica$getBackend() instanceof VulkanDevice device)) {
             return false;
         }
-        NrdLibrary lib = NrdRuntime.INSTANCE.acquire(device, renderWidth, renderHeight);
+        int type = denoiserType();
+        // A denoiser switch (REBLUR <-> RELAX) rebuilds the NRD instance and drops its history,
+        // exactly like a resize: the two denoisers keep incompatible histories and encodings.
+        if (appliedDenoiserType != -1 && appliedDenoiserType != type) {
+            resetHistory();
+        }
+        NrdLibrary lib = NrdRuntime.INSTANCE.acquire(device, renderWidth, renderHeight, type);
         if (lib == null) {
             return false;
         }
@@ -264,36 +312,67 @@ public final class RtNrdDenoiser {
             // One line, once per session. "The NRD toggle does nothing" is indistinguishable from
             // "NRD ran and its output looked the same", and the two need completely different
             // fixes, so record that the integration really is dispatching.
-            CausticaMod.LOGGER.info("NRD/REBLUR active: {}x{}, shim version {}",
-                    renderWidth, renderHeight, lib.version());
+            CausticaMod.LOGGER.info("NRD/{} active: {}x{}, shim version {}",
+                    type == 1 ? "RELAX" : "REBLUR", renderWidth, renderHeight, lib.version());
         }
         try {
             // History length is derived from a target accumulation TIME, so the denoiser converges
             // over the same wall-clock window regardless of frame rate (NRD's own recommendation).
-            // Re-sent only when the derived count actually changes, since it is a full settings push.
+            // Re-sent only when the derived count (or the denoiser) actually changes, since it is
+            // a full settings push.
             int accumulatedFrames = maxAccumulatedFrames();
-            if (accumulatedFrames != appliedAccumulatedFrames) {
-                int rc = lib.setReblurSettings(
-                        HIT_DIST_RECONSTRUCTION_AREA_5X5,
-                        accumulatedFrames,
-                        Math.max(2, accumulatedFrames / FAST_HISTORY_DIVISOR),
-                        MAX_STABILIZED_FRAMES,
-                        HISTORY_FIX_FRAMES,
-                        0.0f, 0.0f, // anti-lag: NRD defaults (2.0 / 3.0) are the best balance here
-                        FIREFLY_SUPPRESSOR_SCALE,
-                        prepassRadius(DIFFUSE_PREPASS_BLUR_RADIUS, renderWidth),
-                        prepassRadius(SPECULAR_PREPASS_BLUR_RADIUS, renderWidth),
-                        MIN_BLUR_RADIUS, MAX_BLUR_RADIUS,
-                        LOBE_ANGLE_FRACTION, ROUGHNESS_FRACTION, PLANE_DISTANCE_SENSITIVITY,
-                        FAST_HISTORY_CLAMPING_SIGMA,
-                        true);
-                if (rc != 0) {
-                    throw new IllegalStateException("nrdshim_set_reblur_settings failed: " + rc
-                            + " last=" + lib.lastResult());
+            if (accumulatedFrames != appliedAccumulatedFrames || appliedDenoiserType != type) {
+                int rc;
+                if (type == 1) {
+                    rc = lib.setRelaxSettings(
+                            HIT_DIST_RECONSTRUCTION_AREA_5X5,
+                            accumulatedFrames, accumulatedFrames,
+                            Math.max(2, accumulatedFrames / FAST_HISTORY_DIVISOR),
+                            Math.max(2, accumulatedFrames / FAST_HISTORY_DIVISOR),
+                            HISTORY_FIX_FRAMES,
+                            -1, // atrous iterations: NRD default (5)
+                            0.0f, // fast-history clamping sigma: NRD default (2.0)
+                            prepassRadius(DIFFUSE_PREPASS_BLUR_RADIUS, renderWidth),
+                            prepassRadius(SPECULAR_PREPASS_BLUR_RADIUS, renderWidth),
+                            0.0f, // min hit-distance weight: NRD default (0.1)
+                            RELAX_LOBE_ANGLE_FRACTION, ROUGHNESS_FRACTION,
+                            0.0f, 0.0f, // phi luminance: NRD defaults (2.0 / 1.0)
+                            0.0f, // depth threshold: NRD default (0.003)
+                            false, // RELAX anti-firefly defaults off; the tracer bounds fireflies upstream
+                            true); // roughness edge stopping: NRD default
+                    if (rc != 0) {
+                        throw new IllegalStateException("nrdshim_set_relax_settings failed: " + rc
+                                + " last=" + lib.lastResult());
+                    }
+                } else {
+                    rc = lib.setReblurSettings(
+                            HIT_DIST_RECONSTRUCTION_AREA_5X5,
+                            accumulatedFrames,
+                            Math.max(2, accumulatedFrames / FAST_HISTORY_DIVISOR),
+                            MAX_STABILIZED_FRAMES,
+                            HISTORY_FIX_FRAMES,
+                            0.0f, 0.0f, // anti-lag: NRD defaults (2.0 / 3.0) are the best balance here
+                            FIREFLY_SUPPRESSOR_SCALE,
+                            prepassRadius(DIFFUSE_PREPASS_BLUR_RADIUS, renderWidth),
+                            prepassRadius(SPECULAR_PREPASS_BLUR_RADIUS, renderWidth),
+                            MIN_BLUR_RADIUS, MAX_BLUR_RADIUS,
+                            LOBE_ANGLE_FRACTION, ROUGHNESS_FRACTION, PLANE_DISTANCE_SENSITIVITY,
+                            FAST_HISTORY_CLAMPING_SIGMA,
+                            true);
+                    if (rc != 0) {
+                        throw new IllegalStateException("nrdshim_set_reblur_settings failed: " + rc
+                                + " last=" + lib.lastResult());
+                    }
                 }
                 appliedAccumulatedFrames = accumulatedFrames;
+                appliedDenoiserType = type;
             }
+            // NewFrame() and the frame index move in lockstep: NRD asserts
+            // CommonSettings::frameIndex == its own counter, which NewFrame() increments.
+            // Capture the index here so frames skipped below (non-finite matrices, shim
+            // rejections) still advance both sides together.
             lib.newFrame();
+            int frameIndex = nrdFrameIndex++;
 
             // ---- Projection. Handed over as built, except for the depth row: NRD derives every
             // world-space scale from it, and Minecraft's float-Z reverse-Z row carries a degenerate
@@ -552,6 +631,9 @@ public final class RtNrdDenoiser {
         // calls this whenever the NRD path is (re)selected or the resolution changes.
         failed = false;
         appliedAccumulatedFrames = -1;
+        appliedDenoiserType = -1;
+        // The shim keeps its own frame counter; a reset restarts the pair from zero together.
+        nrdFrameIndex = 0;
     }
 
     public void destroy() {
@@ -562,5 +644,7 @@ public final class RtNrdDenoiser {
         smoothedFps = 60.0f;
         // The shim's tuning state dies with the unloaded library; resend it on the next session.
         appliedAccumulatedFrames = -1;
+        appliedDenoiserType = -1;
+        nrdFrameIndex = 0;
     }
 }

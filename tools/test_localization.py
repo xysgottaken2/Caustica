@@ -26,6 +26,8 @@ LOCALES = {
 SHARED_KEYS = {
     PREFIX + key for key in (
         "rt.hdrHeader", "rt.dhHeader", "rt.dlssQuality.5", "rt.upscaler.dlss",
+        "rt.rayReconstruction.dlss", "rt.rayReconstruction.svgf", "rt.rayReconstruction.nrd",
+        "rt.nrdDenoiser.reblur", "rt.nrdDenoiser.relax",
         "rt.tonemapOperator.agx", "rt.tonemapOperator.pbr_neutral",
         "rt.tonemapOperator.aces", "rt.tonemapOperator.filmic",
         "rt.tonemapOperator.psychov", "rt.reflex", "rt.reflexHeader",
@@ -66,6 +68,8 @@ SELECTOR_VALUES = {
     "rt.dlssQuality": (3, 0, 1, 2, 5),
     "rt.dlssPreset": (0, 4, 5, 6),
     "rt.upscaler": ("none", "dlss", "fsr3", "xess"),
+    "rt.rayReconstruction": ("dlss", "svgf", "nrd"),
+    "rt.nrdDenoiser": ("reblur", "relax"),
     "rt.debugView": tuple(range(14)),
 }
 
