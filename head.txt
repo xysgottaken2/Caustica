@@ -1,0 +1,39 @@
+Fetching distribution.
+Downloading https://services.gradle.org/distributions/gradle-9.7.0-bin.zip
+..............10%..............20%..............30%...............40%..............50%...............60%..............70%..............80%...............90%..............100%
+
+Welcome to Gradle 9.7.0!
+
+Here are the highlights of this release:
+ - Isolated Projects graduates to incubating
+ - Broader Configuration Cache compatibility
+ - More source locations in problem reports
+
+For more details see https://docs.gradle.org/9.7.0/release-notes.html
+
+To honour the JVM settings for this build a single-use Daemon process will be forked. For more on this, please refer to https://docs.gradle.org/9.7.0/userguide/gradle_daemon.html#sec:disabling_the_daemon in the Gradle documentation.
+Daemon will be stopped at the end of the build 
+> Task :buildSrc:compileJava NO-SOURCE
+> Task :buildSrc:compileGroovy FAILED
+gradle/actions: Writing build results to /home/runner/work/_temp/.gradle-actions/build-results/__run-1795104057739.json
+
+FAILURE: Build failed with an exception.
+
+* What went wrong:
+Execution failed for task ':buildSrc:compileGroovy' (registered by plugin class 'org.gradle.api.plugins.GroovyBasePlugin').
+> Could not resolve all files for configuration ':buildSrc:compileClasspath'.
+   > Could not find org.ow2.asm:asm:9.10.1.
+     Searched in the following locations:
+       - https://repo.maven.apache.org/maven2/org/ow2/asm/asm/9.10.1/asm-9.10.1.pom
+     Required by:
+         project ':buildSrc'
+
+* Try:
+> If the artifact you are trying to retrieve can be found in the repository but without metadata in 'Maven POM' format, you need to adjust the 'metadataSources { ... }' of the repository declaration.
+> Run with --stacktrace option to get the stack trace.
+> Run with --info or --debug option to get more log output.
+> Run with --scan to get full insights from a Build Scan (powered by Develocity).
+> Get more help at https://help.gradle.org.
+
+BUILD FAILED in 23s
+1 actionable task: 1 executed

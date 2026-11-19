@@ -1,0 +1,9 @@
+run=44560250280 job=package ref=32/merge sha=533904440b8202a4fdb647eed7f31e5dff33f7ae
+workflow=CI event=pull_request
+--- errors ---
+17:> Task :buildSrc:compileGroovy FAILED
+20:FAILURE: Build failed with an exception.
+22:* What went wrong:
+23:Execution failed for task ':buildSrc:compileGroovy' (registered by plugin class 'org.gradle.api.plugins.GroovyBasePlugin').
+25:   > Could not find org.ow2.asm:asm:9.10.1.
+38:BUILD FAILED in 23s
