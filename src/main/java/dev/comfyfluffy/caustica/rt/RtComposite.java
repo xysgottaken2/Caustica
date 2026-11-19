@@ -741,6 +741,8 @@ public final class RtComposite {
     private double svgfPrevCamX;
     private double svgfPrevCamY;
     private double svgfPrevCamZ;
+    private float svgfPrevJitterX;
+    private float svgfPrevJitterY;
     private RtSvgfDenoiser svgfDenoiser;
     /** Sky-mask pass over FSR FG's generated frames (see RtFgSkyMaskPipeline); created lazily. */
     private RtFgSkyMaskPipeline fgSkyMaskPipeline;
@@ -2120,7 +2122,8 @@ public final class RtComposite {
                             historyOut.view, momentsOut.view, svgfFilterPing.view,
                             gMotion.view, gViewZ.view, gNormal.view,
                             svgfPrevViewZ.view, svgfPrevNormal.view, gAlbedo.view,
-                            svgfReset, svgfMaxFrames, svgfCamForwardDelta);
+                            svgfReset, svgfMaxFrames, svgfCamForwardDelta,
+                            jitterX - svgfPrevJitterX, jitterY - svgfPrevJitterY);
                     VulkanCommandEncoder.memoryBarrier(cmd, stack); // reprojection visible to the wavelet
 
                     // À-trous cascade with doubling tap spacing. The first iteration's output is
@@ -2171,6 +2174,8 @@ public final class RtComposite {
                 svgfPrevCamX = camX;
                 svgfPrevCamY = camY;
                 svgfPrevCamZ = camZ;
+                svgfPrevJitterX = jitterX;
+                svgfPrevJitterY = jitterY;
             }
             if (!rrDone && fsrPath && RtFsrUpscaler.INSTANCE.ensureFeature(displayW, displayH)) {
                 try (RtDebugLabels.Scope ignored = RtDebugLabels.scope(ctx, cmd, "FSR upscale");

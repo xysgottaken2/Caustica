@@ -51,6 +51,9 @@ layout(push_constant) uniform Push {
     // what a surviving surface's PREVIOUS view depth should have been, so ordinary movement is not
     // mistaken for a disocclusion. Zero when the camera did not move.
     float camForwardDelta;
+    // Current minus previous sub-pixel camera jitter in render pixels. Motion vectors identify
+    // geometric motion, while history lives on the previous frame's jittered pixel grid.
+    vec2 jitterDelta;
 } pc;
 
 // Matches the viewZ the tracer writes for sky/miss pixels (RtComposite.NRD_DENOISING_RANGE):
@@ -193,7 +196,12 @@ void main() {
     if (any(isnan(mv)) || any(isinf(mv))) {
         mv = vec2(0.0);
     }
-    vec2 prevPos = vec2(pix) + 0.5 + mv;
+    // gMotion maps the current jittered ray's hit to its previous-frame projection, while the
+    // history texel that sampled the same point was at projectedPrevious-jitterPrevious. Convert
+    // that destination from the current jittered grid to the previous one; omitting this term makes
+    // static pixels walk through the history by the Halton offset every frame, preventing temporal
+    // convergence and causing blur.
+    vec2 prevPos = vec2(pix) + 0.5 + mv + pc.jitterDelta;
     vec2 base = floor(prevPos - 0.5);
     vec2 frac = prevPos - 0.5 - base;
     float bilinear[4] = float[4](
