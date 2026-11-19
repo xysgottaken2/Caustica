@@ -70,6 +70,7 @@ import dev.comfyfluffy.caustica.rt.pipeline.RtDisplayPipeline;
 import dev.comfyfluffy.caustica.rt.pipeline.RtDofPipeline;
 import dev.comfyfluffy.caustica.rt.pipeline.RtDlssFg;
 import dev.comfyfluffy.caustica.rt.pipeline.RtDlssRr;
+import dev.comfyfluffy.caustica.rt.pipeline.RtDlssSr;
 import dev.comfyfluffy.caustica.rt.pipeline.RtFsrFrameGen;
 import dev.comfyfluffy.caustica.rt.pipeline.RtFsrUpscaler;
 import dev.comfyfluffy.caustica.rt.pipeline.RtXessUpscaler;
@@ -782,6 +783,11 @@ public final class RtComposite {
     // toggled) at a fixed window size is noticed even though displayW/displayH didn't change.
     private boolean renderSizeRrEnabled;
     private int renderSizeRrQuality = Integer.MIN_VALUE;
+    // DLSS Super Resolution drives the reconstruction slot for every non-RR filter, so its state
+    // joins the same key: switching the denoiser mode (RR <-> SVGF/A-SVGF/NRD) or the quality must
+    // rebuild the trace targets even though displayW/displayH did not change.
+    private boolean renderSizeDlssSrEnabled;
+    private int renderSizeDlssSrQuality = Integer.MIN_VALUE;
     // FSR 3 occupies the same upscale slot as RR (never both): its state joins the render-size key
     // so switching upscaler or FSR quality rebuilds the trace targets exactly like RR does.
     private boolean renderSizeFsrEnabled;
@@ -915,6 +921,12 @@ public final class RtComposite {
     private double prevXessCamY;
     private double prevXessCamZ;
     private boolean xessCamValid;
+
+    // And for DLSS Super Resolution, whose NGX history is as jump-fragile as FSR's and XeSS's.
+    private double prevDlssSrCamX;
+    private double prevDlssSrCamY;
+    private double prevDlssSrCamZ;
+    private boolean dlssSrCamValid;
 
     /** Capture the frame's camera for the next composite. Called from GameRendererMixin. */
     public void captureFrame(Matrix4f projection, Matrix4fc viewRotation, double cameraX, double cameraY, double cameraZ) {
@@ -1402,12 +1414,20 @@ public final class RtComposite {
     private void ensureOutput(RtContext ctx, int width, int height) {
         boolean rrEnabled = RtDlssRr.enabled();
         int rrQuality = rrEnabled ? RtDlssRr.quality() : Integer.MIN_VALUE;
-        // FSR 3 only takes the upscale slot when RR is not running (the selector makes them
-        // mutually exclusive, but a hand-edited config could enable both — RR wins).
-        boolean fsrEnabled = !rrEnabled && RtFsrUpscaler.enabled();
+        // DLSS Super Resolution takes the reconstruction slot whenever the DLSS backend is selected
+        // but RR is not the running filter (SVGF / A-SVGF / NRD). Without it those denoisers traced at
+        // 1:1 with the display and the "upscale" was a straight blit, so choosing one of them threw
+        // the whole reconstruction budget away (~2.2x the pixels at DLSS Quality) and read as a hard
+        // FPS collapse rather than a denoiser switch.
+        boolean dlssSrEnabled = !rrEnabled && RtDlssSr.enabled();
+        int dlssSrQuality = dlssSrEnabled ? RtDlssSr.quality() : Integer.MIN_VALUE;
+        // FSR 3 only takes the upscale slot when neither NGX feature is running (the selector makes
+        // them mutually exclusive, but a hand-edited config could enable several — NGX wins, and RR
+        // wins over DLSS-SR because it denoises as well as reconstructs).
+        boolean fsrEnabled = !rrEnabled && !dlssSrEnabled && RtFsrUpscaler.enabled();
         int fsrQuality = fsrEnabled ? RtFsrUpscaler.quality() : Integer.MIN_VALUE;
-        // XeSS shares the slot under the same rules; if a hand-edit stacks them, RR > FSR > XeSS.
-        boolean xessEnabled = !rrEnabled && !fsrEnabled && RtXessUpscaler.enabled();
+        // XeSS shares the slot under the same rules; if a hand-edit stacks them, RR > DLSS-SR > FSR > XeSS.
+        boolean xessEnabled = !rrEnabled && !dlssSrEnabled && !fsrEnabled && RtXessUpscaler.enabled();
         int xessQuality = xessEnabled ? RtXessUpscaler.quality() : Integer.MIN_VALUE;
         // The denoise slot. Exactly one denoiser ever runs on a frame, in this order:
         //   DLSS-RR (denoises internally, so nothing else may touch the image)
@@ -1427,6 +1447,7 @@ public final class RtComposite {
                 && displayImage != null && hdrDisplayImage != null && rrOutput != null && exposure.ready()
                 && displayW == width && displayH == height
                 && renderSizeRrEnabled == rrEnabled && renderSizeRrQuality == rrQuality
+                && renderSizeDlssSrEnabled == dlssSrEnabled && renderSizeDlssSrQuality == dlssSrQuality
                 && renderSizeFsrEnabled == fsrEnabled && renderSizeFsrQuality == fsrQuality
                 && renderSizeXessEnabled == xessEnabled && renderSizeXessQuality == xessQuality
                 && renderSizeSvgfEnabled == svgfEnabled
@@ -1442,6 +1463,8 @@ public final class RtComposite {
         RtDlssRr.INSTANCE.releaseIfDisabled();
         // Same reasoning for the FSR context (its history textures) when the upscaler switches away.
         RtFsrUpscaler.INSTANCE.releaseIfDisabled();
+        // And for DLSS Super Resolution, which holds NGX history buffers like RR does.
+        RtDlssSr.INSTANCE.releaseIfDisabled();
         // And for the XeSS upscaler (pipelines + history) on the same switch-away event.
         RtXessUpscaler.INSTANCE.releaseIfDisabled();
         if (displayImage != null) {
@@ -1472,6 +1495,8 @@ public final class RtComposite {
         int[] optimal;
         if (rrEnabled) {
             optimal = RtDlssRr.INSTANCE.queryOptimalRenderSize(width, height);
+        } else if (dlssSrEnabled) {
+            optimal = RtDlssSr.INSTANCE.queryOptimalRenderSize(width, height);
         } else if (fsrEnabled) {
             optimal = RtFsrUpscaler.INSTANCE.queryRenderSize(width, height);
         } else if (xessEnabled) {
@@ -1483,6 +1508,8 @@ public final class RtComposite {
         renderH = optimal != null ? optimal[1] : height;
         renderSizeRrEnabled = rrEnabled;
         renderSizeRrQuality = rrQuality;
+        renderSizeDlssSrEnabled = dlssSrEnabled;
+        renderSizeDlssSrQuality = dlssSrQuality;
         renderSizeFsrEnabled = fsrEnabled;
         renderSizeFsrQuality = fsrQuality;
         renderSizeXessEnabled = xessEnabled;
@@ -1627,12 +1654,16 @@ public final class RtComposite {
         RtTerrain terrain = RtTerrain.currentOrNull();
         try (MemoryStack stack = MemoryStack.stackPush(); RtDebugLabels.Scope frameLabel = RtDebugLabels.scope(ctx, cmd, "composite frame")) {
             // The active upscaler drives the frame: trace + jitter at render res, then DLSS-RR
-            // (denoise+upscale) or FSR 3 (upscale only) brings it to display res. They occupy one
-            // slot — RR wins if both are somehow on — and jitter is suppressed for the no-upscaler
-            // reference and for the debug guide views (raw inspection).
+            // (denoise+upscale), DLSS-SR (upscale only, behind a non-RR denoiser) or FSR 3 (upscale
+            // only) brings it to display res. They occupy one slot — RR wins over DLSS-SR, and NGX
+            // wins over FSR/XeSS — and jitter is suppressed for the no-upscaler reference and for the
+            // debug guide views (raw inspection).
             boolean rrPath = RtDlssRr.enabled() && debugView == 0;
-            boolean fsrPath = !rrPath && RtFsrUpscaler.enabled() && debugView == 0;
-            boolean xessPath = !rrPath && !fsrPath && RtXessUpscaler.enabled() && debugView == 0;
+            // DLSS Super Resolution: the reconstruction the non-RR denoisers used to lose entirely.
+            // It runs AFTER the denoiser (unlike RR, which replaces it) and reads the denoised image.
+            boolean dlssSrPath = !rrPath && RtDlssSr.enabled() && debugView == 0;
+            boolean fsrPath = !rrPath && !dlssSrPath && RtFsrUpscaler.enabled() && debugView == 0;
+            boolean xessPath = !rrPath && !dlssSrPath && !fsrPath && RtXessUpscaler.enabled() && debugView == 0;
             // The denoise slot, in the same priority order ensureOutput allocated for:
             // RR > NRD > SVGF. Both denoisers want a jittered trace — their temporal stage
             // integrates the sub-pixel sequence, which is what resolves detail below the pixel grid
@@ -1652,6 +1683,12 @@ public final class RtComposite {
             float jitterX = 0f;
             float jitterY = 0f;
             if (rrPath) {
+                CausticaJitter.INSTANCE.prepare(renderW, renderH, displayW);
+                jitterX = CausticaJitter.INSTANCE.jitterPixelsX() * jitterSignX();
+                jitterY = CausticaJitter.INSTANCE.jitterPixelsY() * jitterSignY();
+            } else if (dlssSrPath) {
+                // NGX's own phase-count rule, the same Halton(2,3) sequence RR uses: DLSS-SR is
+                // reconstructing below the pixel grid exactly as RR does.
                 CausticaJitter.INSTANCE.prepare(renderW, renderH, displayW);
                 jitterX = CausticaJitter.INSTANCE.jitterPixelsX() * jitterSignX();
                 jitterY = CausticaJitter.INSTANCE.jitterPixelsY() * jitterSignY();
@@ -2177,6 +2214,39 @@ public final class RtComposite {
                 svgfPrevJitterX = jitterX;
                 svgfPrevJitterY = jitterY;
             }
+            // DLSS Super Resolution: pure upscaling of whatever the denoiser produced (SVGF, A-SVGF or
+            // NRD). This is the slot that used to be empty for every non-RR filter, leaving the frame
+            // at 1:1 instead of DLSS's render size.
+            if (!rrDone && dlssSrPath
+                    && RtDlssSr.INSTANCE.ensureFeature(cmd.address(), renderW, renderH, displayW, displayH)) {
+                try (RtDebugLabels.Scope ignored = RtDebugLabels.scope(ctx, cmd, "DLSS-SR upscale");
+                     RtFrameStats.Scope ignoredStats = RtFrameStats.FRAME.stage("frame.dlssSr")) {
+                    // Camera discontinuity reset, same rule as the FSR/XeSS slots below.
+                    if (dlssSrCamValid) {
+                        double sdx = camX - prevDlssSrCamX;
+                        double sdy = camY - prevDlssSrCamY;
+                        double sdz = camZ - prevDlssSrCamZ;
+                        if (sdx * sdx + sdy * sdy + sdz * sdz > 32.0 * 32.0) {
+                            RtDlssSr.INSTANCE.requestReset();
+                        }
+                    }
+                    prevDlssSrCamX = camX;
+                    prevDlssSrCamY = camY;
+                    prevDlssSrCamZ = camZ;
+                    dlssSrCamValid = true;
+                    // NGX wants the jitter the trace actually applied (negated, like RR), but a
+                    // temporal denoiser has already integrated the whole sequence into the image it
+                    // just wrote — telling DLSS there is a per-frame offset the content no longer
+                    // contains makes its reprojection chase that phantom offset. Converged input ->
+                    // zero jitter (the same rule the XeSS slot applies).
+                    boolean jitterAlreadyIntegrated = svgfRan || nrdDone;
+                    float srJitterX = jitterAlreadyIntegrated ? 0.0f : -jitterX;
+                    float srJitterY = jitterAlreadyIntegrated ? 0.0f : -jitterY;
+                    rrDone = RtDlssSr.INSTANCE.evaluate(cmd.address(), upscaleSource, gDepth, gMotion, rrOutput,
+                            renderW, renderH, displayW, displayH, srJitterX, srJitterY);
+                }
+            }
+
             if (!rrDone && fsrPath && RtFsrUpscaler.INSTANCE.ensureFeature(displayW, displayH)) {
                 try (RtDebugLabels.Scope ignored = RtDebugLabels.scope(ctx, cmd, "FSR upscale");
                      RtFrameStats.Scope ignoredStats = RtFrameStats.FRAME.stage("frame.fsr")) {
@@ -3012,6 +3082,8 @@ public final class RtComposite {
         // have been turned off after a feature was already created. destroy() is a no-op when nothing
         // was ever allocated, so asking it every time is what guarantees the feature is released.
         RtDlssRr.INSTANCE.destroy();
+        // And for DLSS Super Resolution, which is live for every non-RR filter (no-op when unused).
+        RtDlssSr.INSTANCE.destroy();
         // Same contract for the FSR context (no-op when it was never created).
         RtFsrUpscaler.INSTANCE.destroy();
         // And the XeSS upscaler (no-op when it was never initialized).

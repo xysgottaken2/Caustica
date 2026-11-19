@@ -80,7 +80,12 @@ public final class RtVideoOptions {
         String mode = RtUpscalerSupport.currentUpscalerMode();
         if (RtUpscalerSupport.MODE_DLSS.equals(mode)) {
             options.add(dlssQuality());
-            options.add(dlssPreset());
+            // The model-preset slider is Ray Reconstruction's own hint enum (0/D/E/F). With any
+            // other denoiser selected, DLSS Super Resolution takes the reconstruction slot and lets
+            // the DLL pick its per-quality preset, so the row would promise a model nothing runs.
+            if (CausticaConfig.Rt.Composite.isDenoiserMode(CausticaConfig.Rt.Composite.DENOISER_MODE_DLSS_RR)) {
+                options.add(dlssPreset());
+            }
             options.add(dlssDenoiserMode(upscalerChanged));
             if (CausticaConfig.Rt.Composite.isDenoiserMode(CausticaConfig.Rt.Composite.DENOISER_MODE_NRD)) {
                 options.add(nrdAlgorithm());
@@ -114,7 +119,12 @@ public final class RtVideoOptions {
         String mode = RtUpscalerSupport.currentUpscalerMode();
         if (RtUpscalerSupport.MODE_DLSS.equals(mode)) {
             options.add(dlssQuality());
-            options.add(dlssPreset());
+            // The model-preset slider is Ray Reconstruction's own hint enum (0/D/E/F). With any
+            // other denoiser selected, DLSS Super Resolution takes the reconstruction slot and lets
+            // the DLL pick its per-quality preset, so the row would promise a model nothing runs.
+            if (CausticaConfig.Rt.Composite.isDenoiserMode(CausticaConfig.Rt.Composite.DENOISER_MODE_DLSS_RR)) {
+                options.add(dlssPreset());
+            }
             options.add(dlssDenoiserMode(upscalerChanged));
             if (CausticaConfig.Rt.Composite.isDenoiserMode(CausticaConfig.Rt.Composite.DENOISER_MODE_NRD)) {
                 options.add(nrdAlgorithm());
@@ -1350,8 +1360,10 @@ public final class RtVideoOptions {
 
     /**
      * The DLSS-only denoiser selector. RR owns denoise + reconstruction; SVGF, A-SVGF and NRD replace RR
-     * entirely, so the trace returns to display resolution instead of passing one temporal filter
-     * through another. Reopening makes the NRD algorithm row appear only when it is relevant.
+     * entirely, so exactly one temporal filter touches the image. The reconstruction slot does not go
+     * away with RR: DLSS Super Resolution upscales whichever of those filters is selected, which is
+     * what lets this row stay a denoiser choice instead of silently becoming a resolution choice.
+     * Reopening makes the NRD algorithm row (and the RR-only preset row) appear only when relevant.
      */
     private static OptionInstance<String> dlssDenoiserMode(Runnable onChanged) {
         StringSetting setting = CausticaConfig.Rt.Composite.DENOISER_MODE;

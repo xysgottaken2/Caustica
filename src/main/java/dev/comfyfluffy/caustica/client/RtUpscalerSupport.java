@@ -15,9 +15,10 @@ import java.util.List;
  * which one is currently active, and whether DLSS Frame Generation is supported on this machine.
  *
  * <p>The upscaler selector maps onto the existing per-backend enable switches instead of introducing a
- * third source of truth: {@code dlss-rr.enabled} drives the DLSS Ray Reconstruction path exactly as
- * before, and {@code fsr.enabled} is reserved for the upcoming FSR 3 backend. The renderer keeps
- * reading the backend switches it always read ({@code RtDlssRr.enabled()}), so nothing downstream
+ * third source of truth: {@code dlss-rr.enabled} is the DLSS switch (Ray Reconstruction when the
+ * {@code dlss_rr} denoiser is selected, DLSS Super Resolution behind the renderer's own denoisers —
+ * see {@code RtDlssSr.enabled()}), and {@code fsr.enabled} / {@code xess.enabled} select their
+ * backends. The renderer keeps reading the backend switches it always read, so nothing downstream
  * changes when the selector flips a mode.
  */
 public final class RtUpscalerSupport {
