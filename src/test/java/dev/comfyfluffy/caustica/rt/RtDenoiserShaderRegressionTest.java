@@ -31,6 +31,11 @@ final class RtDenoiserShaderRegressionTest {
     private static final Path NRD_COMBINE = REPO_ROOT.resolve("shaders/display/nrd_combine.comp");
     private static final Path SVGF_REPROJECT = REPO_ROOT.resolve("shaders/display/svgf_reproject.comp");
     private static final Path SVGF_ATROUS = REPO_ROOT.resolve("shaders/display/svgf_atrous.comp");
+    private static final Path SHARC = REPO_ROOT.resolve("shaders/world/sharc.slang");
+    private static final Path CONFIG =
+            REPO_ROOT.resolve("src/main/java/dev/comfyfluffy/caustica/CausticaConfig.java");
+    private static final Path SVGFDENOISER =
+            REPO_ROOT.resolve("src/main/java/dev/comfyfluffy/caustica/rt/pipeline/RtSvgfDenoiser.java");
     private static final Path NRD_DENOISER =
             REPO_ROOT.resolve("src/main/java/dev/comfyfluffy/caustica/rt/pipeline/RtNrdDenoiser.java");
 
@@ -70,6 +75,70 @@ final class RtDenoiserShaderRegressionTest {
                 "the combine pass must multiply the material factors back after denoising");
         assertTrue(combine.contains("void nrdMaterialFactors("),
                 "the combine pass must mirror nrdMaterialFactors rather than approximating it");
+    }
+
+    /**
+     * REBLUR and RELAX do not share a radiance/hit-distance packing contract. Treating RELAX as
+     * REBLUR makes it decode linear RGB as YCoCg and normalized distance as raw distance, which
+     * is a direct source of coloured halos and fireflies. Keep the mode bit from the world shader
+     * through the combine pass and expose both supported algorithms in the settings sanitizer.
+     */
+    @Test
+    void nrdReblurAndRelaxKeepTheirDistinctSignalContracts() throws IOException {
+        String raygen = Files.readString(WORLD_RGEN);
+        String combine = Files.readString(NRD_COMBINE);
+        String config = Files.readString(CONFIG);
+
+        assertTrue(raygen.contains("if (nrdRelaxEnabled())"),
+                "RELAX must write its own linear-radiance/raw-distance input layout");
+        assertTrue(raygen.contains("float4(diffRad, frameHitDiff")
+                        && raygen.contains("float4(specRad, frameHitSpec"),
+                "RELAX must retain linear RGB plus raw in-lobe hit distance");
+        assertTrue(combine.contains("pc.relax != 0 ? packedDiff : yCoCgToLinear(packedDiff)")
+                        && combine.contains("pc.relax != 0 ? packedSpec : yCoCgToLinear(packedSpec)"),
+                "the combine pass must decode only REBLUR as YCoCg");
+        assertTrue(config.contains("DENOISER_MODE_NRD") && config.contains("MODE_RELAX"),
+                "the UI configuration must keep NRD mode and algorithm mode distinct");
+    }
+
+    /**
+     * SHaRC updates run from many rays in the same dispatch. A non-atomic struct read/modify/write
+     * loses samples and can overwrite propagated indirect radiance, so an \"active\" cache appears
+     * to do nothing. The lock bit must be acquired atomically and released only after every payload
+     * field is stored.
+     */
+    @Test
+    void sharcPublishesCoherentConcurrentUpdates() throws IOException {
+        String sharc = Files.readString(SHARC);
+        assertTrue(sharc.contains("InterlockedCompareExchange(cache[index].cellFrame.w"),
+                "SHaRC must acquire its per-entry writer lock atomically");
+        assertTrue(sharc.contains("public void sharcUnlock(DevicePtr<SharcEntry> cache"),
+                "SHaRC needs one release helper for every successful update");
+        assertTrue(sharc.contains("cache[index].normal = entry.normal;")
+                        && sharc.contains("cache[index].cellFrame.w = entry.cellFrame.w & SHARC_FRAME_MASK;"),
+                "the stamp lock must be released after the whole payload, never before it");
+        assertTrue(sharc.contains("if (cache[index].cellFrame.w != entryStamp)"),
+                "queries overlapping a writer must reject rather than sample a torn entry");
+    }
+
+    /**
+     * A-SVGF is not a renamed preset: it retains full denoising on fresh samples but continuously
+     * attenuates only far spatial taps after temporal history converges. This avoids both the
+     * blurry default shadow footprint and the old per-pixel integer pass cap that crawled in motion.
+     */
+    @Test
+    void adaptiveSvgfNarrowsOnlyConvergedSpatialTaps() throws IOException {
+        String atrous = Files.readString(SVGF_ATROUS);
+        String pipeline = Files.readString(SVGFDENOISER);
+        String config = Files.readString(CONFIG);
+        assertTrue(config.contains("DENOISER_MODE_ASVGF"),
+                "A-SVGF must be an independently selectable denoiser mode");
+        assertTrue(atrous.contains("float adaptiveConfidence = pc.adaptive != 0 ? smoothstep(4.0, 24.0, historyFrames)"),
+                "A-SVGF must derive confidence continuously from temporal history");
+        assertTrue(atrous.contains("w *= exp(-0.012 * adaptiveConfidence * tapDistance2);"),
+                "A-SVGF must tighten distant spatial taps rather than changing pass count");
+        assertTrue(pipeline.contains("private static final int ATROUS_PUSH_BYTES = 10 * Integer.BYTES;"),
+                "the A-SVGF mode bit must fit in the Vulkan push-constant range");
     }
 
     /**
@@ -178,20 +247,25 @@ final class RtDenoiserShaderRegressionTest {
 
         assertTrue(reproject.contains("imageStore(momentsOut, pix, vec4(moments, frames, 0.0));"),
                 "the reprojection must store the frame count in the moments texture");
-        // The wavelet no longer reads the count at all: its only consumer was the per-pixel reach
-        // cap, which was the mutating-footprint bug (see svgfCascadeReachIsUniform). The count is
-        // still produced here because the reprojection itself needs it to drive alpha.
-        // The wavelet may read the count ONLY to draw the diagnostic overlay, never to shape the
-        // filter: a per-pixel reach driven by the frame count was the mutating-footprint bug (see
-        // svgfCascadeReachIsUniform). Pin that structurally -- every read must sit after the
-        // debug-mode branch, which runs once at the very end and returns immediately.
-        int momentsRead = atrous.indexOf("imageLoad(moments");
-        if (momentsRead >= 0) {
-            int debugBranch = atrous.indexOf("pc.debugMode != 0");
-            assertTrue(debugBranch >= 0 && momentsRead > debugBranch,
-                    "the wavelet may only read the frame count inside the diagnostic overlay");
-            assertTrue(atrous.indexOf("imageLoad(moments", momentsRead + 1) < 0,
-                    "exactly one frame-count read is allowed, the diagnostic one");
+        // Classic SVGF may only read the count in the debug overlay. A-SVGF has one legitimate
+        // extra read before filtering: it converts temporal confidence into a continuous
+        // long-tap attenuation, rather than resurrecting the old per-pixel filter-radius cap.
+        int firstMomentsRead = atrous.indexOf("imageLoad(moments");
+        int debugBranch = atrous.indexOf("pc.debugMode != 0");
+        assertTrue(debugBranch >= 0, "the wavelet must retain its debug branch");
+        if (atrous.contains("pc.adaptive")) {
+            assertTrue(firstMomentsRead >= 0 && firstMomentsRead < debugBranch,
+                    "A-SVGF must obtain history confidence before filtering");
+            int debugMomentsRead = atrous.indexOf("imageLoad(moments", firstMomentsRead + 1);
+            assertTrue(debugMomentsRead > debugBranch,
+                    "the only second frame-count read must be the diagnostic overlay");
+            assertTrue(atrous.indexOf("imageLoad(moments", debugMomentsRead + 1) < 0,
+                    "A-SVGF has exactly one adaptive and one diagnostic frame-count read");
+        } else if (firstMomentsRead >= 0) {
+            assertTrue(firstMomentsRead > debugBranch,
+                    "classic SVGF may only read the frame count inside the diagnostic overlay");
+            assertTrue(atrous.indexOf("imageLoad(moments", firstMomentsRead + 1) < 0,
+                    "classic SVGF allows exactly one diagnostic frame-count read");
         }
         assertFalse(atrous.contains("histLen"),
                 "the frame count no longer travels in the history image's alpha channel");

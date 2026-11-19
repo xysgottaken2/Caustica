@@ -27,13 +27,16 @@ public final class RtDlssRr {
     /**
      * Whether the RR denoise+upscale pass should run this frame. Two switches gate it and both must be
      * on: {@code dlss-rr.enabled} is the backend/capability switch (it is what a machine without RR
-     * support turns off), while {@code composite.denoiser} is the player-facing denoising-filter toggle
+     * support turns off), while {@code composite.denoiser-mode=dlss_rr} is the player-facing selector
      * in Video Settings. Keeping the check here rather than at each call site means every consumer —
      * the render-size query, the per-frame evaluate, the resize path and teardown — sees one consistent
      * answer, so flipping the toggle can never leave the trace sized for RR while RR is not running.
      */
     public static boolean enabled() {
-        return CausticaConfig.Rt.DlssRr.ENABLED.value() && CausticaConfig.Rt.Composite.DENOISER.value();
+        return CausticaConfig.Rt.DlssRr.ENABLED.value()
+                && CausticaConfig.Rt.Composite.DENOISER.value()
+                && CausticaConfig.Rt.Composite.isDenoiserMode(
+                        CausticaConfig.Rt.Composite.DENOISER_MODE_DLSS_RR);
     }
 
     // DLSS feature flags. IsHDR (bit 0): color is linear HDR (rgba16f) — RR requires it ("HDR Color

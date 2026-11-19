@@ -65,8 +65,8 @@ public final class RtSvgfDenoiser {
     private static final String SHADER_DIR = "/caustica/rt/";
     /** Reproject push: int width, height, reset; float maxFrames. */
     private static final int REPROJECT_PUSH_BYTES = 5 * Integer.BYTES;
-    /** À-trous push: int width, height, step; float phiLuminance, phiNormal, phiDepth; int extraSkySmooth. */
-    private static final int ATROUS_PUSH_BYTES = 9 * Integer.BYTES;
+    /** À-trous push: int width, height, step; float phiLuminance, phiNormal, phiDepth; four ints. */
+    private static final int ATROUS_PUSH_BYTES = 10 * Integer.BYTES;
     private static final int REPROJECT_BINDINGS = 12;
     private static final int ATROUS_BINDINGS = 6;
 
@@ -296,7 +296,7 @@ public final class RtSvgfDenoiser {
                        long colorInView, long colorOutView, long viewZView, long normalView,
                        long momentsView, long albedoView,
                        float phiLuminance, float phiNormal, float phiDepth,
-                       int extraSkySmooth, boolean modulate, int debugMode) {
+                       int extraSkySmooth, boolean modulate, int debugMode, boolean adaptive) {
         // Each (iteration, parity) pair owns a descriptor set, so every dispatch reads exactly the
         // images it was recorded with and no set is rewritten under an in-flight frame (see Stage).
         int step = 1 << pass;
@@ -318,6 +318,10 @@ public final class RtSvgfDenoiser {
             push.putInt(28, modulate ? 1 : 0);
             // Diagnostic overlay selector; only the final (modulating) pass acts on it.
             push.putInt(32, debugMode);
+            // A-SVGF uses a confidence-weighted spatial footprint. This is deliberately a uniform
+            // mode bit, not a per-pixel integer pass count, so it cannot reintroduce the old
+            // checkerboard/mutating-footprint artefact.
+            push.putInt(36, adaptive ? 1 : 0);
             VK10.vkCmdPushConstants(cmd, atrous.pipelineLayout, VK10.VK_SHADER_STAGE_COMPUTE_BIT, 0, push);
             VK10.vkCmdDispatch(cmd, (width + 15) / 16, (height + 15) / 16, 1);
         }

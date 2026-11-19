@@ -66,19 +66,12 @@ import java.lang.foreign.ValueLayout;
 public final class RtNrdDenoiser {
     public static final RtNrdDenoiser INSTANCE = new RtNrdDenoiser();
 
-    /**
-     * Whether REBLUR should run. Always false: the integration is retired.
-     *
-     * <p>REBLUR keeps its temporal history inside the library, so the reprojection fixes that made
-     * the built-in SVGF path stable could not reach it, and it stayed blobby and noisy in exactly
-     * the conditions SVGF now handles. The toggle is gone from the options screen and this gate
-     * keeps a hand-edited config from bringing it back.
-     *
-     * <p>The code and the CMake shim stay in the tree because CI builds them, and because the
-     * per-lobe demodulated signals it consumes are still produced for DLSS-RR.
-     */
+    /** Whether the DLSS-page selector requested NRD and the player has enabled its backend. */
     public static boolean enabled() {
-        return false;
+        return CausticaConfig.Rt.Nrd.ENABLED.value()
+                && CausticaConfig.Rt.Composite.DENOISER.value()
+                && CausticaConfig.Rt.Composite.isDenoiserMode(
+                        CausticaConfig.Rt.Composite.DENOISER_MODE_NRD);
     }
 
     /**
@@ -198,6 +191,8 @@ public final class RtNrdDenoiser {
     private final java.util.Set<String> warned = java.util.concurrent.ConcurrentHashMap.newKeySet();
     private boolean hasPrev;
     private int appliedAccumulatedFrames = -1;
+    private boolean appliedRelaxMode;
+    private boolean hasAppliedMode;
     private final float[] prevViewToClip = new float[16];
     /**
      * Previous frame's rotation-only view matrix. The full {@code worldToViewPrev} NRD receives is
@@ -264,31 +259,61 @@ public final class RtNrdDenoiser {
             // One line, once per session. "The NRD toggle does nothing" is indistinguishable from
             // "NRD ran and its output looked the same", and the two need completely different
             // fixes, so record that the integration really is dispatching.
-            CausticaMod.LOGGER.info("NRD/REBLUR active: {}x{}, shim version {}",
+            CausticaMod.LOGGER.info("NRD/{} active: {}x{}, shim version {}",
+                    CausticaConfig.Rt.Nrd.relax() ? "RELAX" : "REBLUR",
                     renderWidth, renderHeight, lib.version());
         }
         try {
+            boolean relax = CausticaConfig.Rt.Nrd.relax();
+            if (!hasAppliedMode || relax != appliedRelaxMode) {
+                int rc = lib.setMode(relax);
+                if (rc != 0) {
+                    throw new IllegalStateException("nrdshim_set_mode failed: " + rc
+                            + " last=" + lib.lastResult());
+                }
+                // Matrix/jitter history belongs to the previous algorithm too. The native shim
+                // performs CLEAR_AND_RESTART for its private resources on the next settings call.
+                hasPrev = false;
+                appliedAccumulatedFrames = -1;
+                appliedRelaxMode = relax;
+                hasAppliedMode = true;
+            }
             // History length is derived from a target accumulation TIME, so the denoiser converges
             // over the same wall-clock window regardless of frame rate (NRD's own recommendation).
             // Re-sent only when the derived count actually changes, since it is a full settings push.
             int accumulatedFrames = maxAccumulatedFrames();
             if (accumulatedFrames != appliedAccumulatedFrames) {
-                int rc = lib.setReblurSettings(
-                        HIT_DIST_RECONSTRUCTION_AREA_5X5,
-                        accumulatedFrames,
-                        Math.max(2, accumulatedFrames / FAST_HISTORY_DIVISOR),
-                        MAX_STABILIZED_FRAMES,
-                        HISTORY_FIX_FRAMES,
-                        0.0f, 0.0f, // anti-lag: NRD defaults (2.0 / 3.0) are the best balance here
-                        FIREFLY_SUPPRESSOR_SCALE,
-                        prepassRadius(DIFFUSE_PREPASS_BLUR_RADIUS, renderWidth),
-                        prepassRadius(SPECULAR_PREPASS_BLUR_RADIUS, renderWidth),
-                        MIN_BLUR_RADIUS, MAX_BLUR_RADIUS,
-                        LOBE_ANGLE_FRACTION, ROUGHNESS_FRACTION, PLANE_DISTANCE_SENSITIVITY,
-                        FAST_HISTORY_CLAMPING_SIGMA,
-                        true);
+                int rc;
+                if (relax) {
+                    // RELAX is designed for very clean/RIS-like signals. It consumes the same
+                    // demodulated lobe images as REBLUR, but their RGB remains linear and .w is
+                    // raw in-lobe hit distance (selected by FEATURE_NRD_RELAX in the tracer).
+                    rc = lib.setRelaxSettings(
+                            HIT_DIST_RECONSTRUCTION_AREA_5X5,
+                            accumulatedFrames, Math.max(2, accumulatedFrames / FAST_HISTORY_DIVISOR),
+                            HISTORY_FIX_FRAMES,
+                            prepassRadius(DIFFUSE_PREPASS_BLUR_RADIUS, renderWidth),
+                            prepassRadius(SPECULAR_PREPASS_BLUR_RADIUS, renderWidth),
+                            0.5f, ROUGHNESS_FRACTION, FAST_HISTORY_CLAMPING_SIGMA, true);
+                } else {
+                    rc = lib.setReblurSettings(
+                            HIT_DIST_RECONSTRUCTION_AREA_5X5,
+                            accumulatedFrames,
+                            Math.max(2, accumulatedFrames / FAST_HISTORY_DIVISOR),
+                            MAX_STABILIZED_FRAMES,
+                            HISTORY_FIX_FRAMES,
+                            0.0f, 0.0f, // anti-lag: NRD defaults (2.0 / 3.0) are the best balance here
+                            FIREFLY_SUPPRESSOR_SCALE,
+                            prepassRadius(DIFFUSE_PREPASS_BLUR_RADIUS, renderWidth),
+                            prepassRadius(SPECULAR_PREPASS_BLUR_RADIUS, renderWidth),
+                            MIN_BLUR_RADIUS, MAX_BLUR_RADIUS,
+                            LOBE_ANGLE_FRACTION, ROUGHNESS_FRACTION, PLANE_DISTANCE_SENSITIVITY,
+                            FAST_HISTORY_CLAMPING_SIGMA,
+                            true);
+                }
                 if (rc != 0) {
-                    throw new IllegalStateException("nrdshim_set_reblur_settings failed: " + rc
+                    throw new IllegalStateException("nrdshim_set_" + (relax ? "relax" : "reblur")
+                            + "_settings failed: " + rc
                             + " last=" + lib.lastResult());
                 }
                 appliedAccumulatedFrames = accumulatedFrames;
@@ -552,6 +577,7 @@ public final class RtNrdDenoiser {
         // calls this whenever the NRD path is (re)selected or the resolution changes.
         failed = false;
         appliedAccumulatedFrames = -1;
+        hasAppliedMode = false;
     }
 
     public void destroy() {
@@ -562,5 +588,6 @@ public final class RtNrdDenoiser {
         smoothedFps = 60.0f;
         // The shim's tuning state dies with the unloaded library; resend it on the next session.
         appliedAccumulatedFrames = -1;
+        hasAppliedMode = false;
     }
 }

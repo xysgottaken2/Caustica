@@ -1,6 +1,6 @@
 #version 460
 
-// NRD/REBLUR back-end: decode the denoised per-lobe outputs, RE-MODULATE the material that was
+// NRD back-end: decode REBLUR's YCoCg or RELAX's linear per-lobe output, RE-MODULATE the material that was
 // divided out before denoising, and sum them into the single radiance image the upscale stage
 // consumes.
 //
@@ -29,6 +29,7 @@ layout(push_constant) uniform Push {
     int width;
     int height;
     float denoisingRange; // pixels beyond this viewZ are sky: passed through raw
+    int relax;            // 0 = REBLUR/YCoCg, 1 = RELAX/linear RGB
 } pc;
 
 // NRD's NRD_MATERIAL_FACTOR_MIN_SCALE / NRD_ROUGHNESS_FACTOR_MIN_SCALE. These MUST match
@@ -76,8 +77,10 @@ void main() {
         return;
     }
 
-    vec3 diffRadiance = sanitize(yCoCgToLinear(imageLoad(nrdDiff, pix).rgb));
-    vec3 specRadiance = sanitize(yCoCgToLinear(imageLoad(nrdSpec, pix).rgb));
+    vec3 packedDiff = imageLoad(nrdDiff, pix).rgb;
+    vec3 packedSpec = imageLoad(nrdSpec, pix).rgb;
+    vec3 diffRadiance = sanitize(pc.relax != 0 ? packedDiff : yCoCgToLinear(packedDiff));
+    vec3 specRadiance = sanitize(pc.relax != 0 ? packedSpec : yCoCgToLinear(packedSpec));
 
     vec3 diffFactor;
     vec3 specFactor;
