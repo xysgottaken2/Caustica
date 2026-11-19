@@ -721,6 +721,76 @@ final class RtDenoiserShaderRegressionTest {
     }
 
     /**
+     * The gradient's noise figure must be measured in the SAME units as the change it gates.
+     *
+     * <p>This is the bug that made A-SVGF a no-op. {@code x} is a TILE MEAN, whose noise falls as
+     * 1/sqrt(tile pixels); {@code z} was the per-PIXEL difference spread, which does not. The
+     * consumer compares them directly, so the mismatch scaled the threshold by sqrt(n) — about 4x at
+     * a 4x4 tile — and at 1 spp, where the per-pixel noise is the signal level, the adaptive term
+     * demanded a >200% lighting change before it fired. Nothing realistic did, so alpha stayed at
+     * plain 1/n and the output was indistinguishable from ordinary SVGF: exactly "SVGF continues
+     * being the same SVGF".
+     *
+     * <p>A units bug is invisible to a compiler and to any test that only pins text, so this test
+     * pins the ARITHMETIC: recompute what the threshold amounts to as a fraction of the signal and
+     * require that a realistic shadow-edge change can clear it.
+     */
+    @Test
+    void asvgfNoiseFloorIsMeasuredInTheUnitsOfTheStatistic() throws Exception {
+        String gradient = Files.readString(SVGF_GRADIENT);
+        // z must be the standard deviation of the tile MEAN difference, i.e. divided by the sample
+        // count rather than by 2 with a sqrt at the end.
+        assertTrue(gradient.contains("float meanDiffSigma = sqrt(max(diffSq / max(count, 1.0), 0.0));"),
+                "z must be the sd of the tile-mean difference");
+        assertFalse(gradient.contains("noiseSigma"),
+                "the per-pixel spread must not be what the consumer thresholds against");
+
+        String reproject = Files.readString(SVGF_REPROJECT);
+        String noiseMultiple = firstConstant(reproject, "GRADIENT_NOISE_MULTIPLE");
+        String relativeScale = firstConstant(reproject, "GRADIENT_RELATIVE_SCALE");
+
+        // Arithmetic sanity: with z on the mean's scale, the real tile size and 1 spp, a genuine
+        // shadow edge has to reach adapt > 0.3 while a still tile must not reach it. The tile size is
+        // read from the denoiser so this cannot silently drift back to a tile too small to resolve a
+        // change.
+        double tilePixels = Math.pow(
+                Integer.parseInt(firstConstant(
+                        Files.readString(REPO_ROOT.resolve(
+                                "src/main/java/dev/comfyfluffy/caustica/rt/pipeline/RtSvgfDenoiser.java")),
+                        "GRADIENT_TILE", "int")), 2);
+        double perPixelNoise = 1.0; // 1 spp: noise is of the order of the signal
+        double z = perPixelNoise * Math.sqrt(2.0 / tilePixels);
+        double threshold = Double.parseDouble(noiseMultiple) * z;
+        double edgeChange = 0.40; // a shadow boundary moving through a tile, relative to its level
+        double adapt = Math.min(Math.max(edgeChange - threshold, 0.0) / Double.parseDouble(relativeScale), 1.0);
+        assertTrue(adapt > 0.3,
+                "a 40% lighting change must release a meaningful fraction of history, got adapt=" + adapt);
+
+        // A still tile's |x| stays inside ~1 sigma of the mean most of the time, so it must not fire.
+        double typStill = 1.0 * z;
+        double stillAdapt = Math.min(Math.max(typStill - threshold, 0.0) / Double.parseDouble(relativeScale), 1.0);
+        assertEquals(0.0, stillAdapt, 1.0e-9,
+                "a still, converged tile must not release history");
+
+        // And the release must saturate at a change a shadow edge can actually produce, not at a
+        // value only a light being switched on reaches.
+        assertTrue(Double.parseDouble(relativeScale) <= 0.35,
+                "the release must saturate within the range a real shadow boundary produces");
+    }
+
+    /** Reads the literal of a shader {@code const <type> NAME = <literal>;} declaration. */
+    private static String firstConstant(String source, String name) {
+        return firstConstant(source, name, "float");
+    }
+
+    /** Reads the literal of a Java/shader {@code ... <type> NAME = <literal>;} declaration. */
+    private static String firstConstant(String source, String name, String type) {
+        Matcher m = Pattern.compile("\\b" + type + "\\s+" + name + "\\s*=\\s*([\\d.]+)").matcher(source);
+        assertTrue(m.find(), "missing constant " + type + " " + name);
+        return m.group(1);
+    }
+
+    /**
      * The adaptive alpha must only ever INCREASE the blend rate, never lower it. A gradient that
      * could shrink alpha would let the filter lock down harder than 1/n, which is the path back to
      * the lag A-SVGF exists to remove.

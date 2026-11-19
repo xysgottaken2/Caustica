@@ -129,14 +129,25 @@ public final class RtSvgfDenoiser {
 
     /**
      * Edge of the A-SVGF temporal-gradient tile, in pixels. The statistic is a MEAN luminance
-     * difference, so a tile of N pixels averages N samples of noise down by sqrt(N): at 4x4 that is a
-     * 4x reduction, which is what lets a real lighting change be told apart from 1-spp noise. Larger
-     * tiles measure change over a bigger neighbourhood (less noise, but a shadow edge is located only
-     * to within a tile) and the pass cost falls quadratically; 4 keeps the statistic precise enough
-     * that a moving shadow releases its history where it actually moved while costing a 16th of a
-     * full-resolution pass.
+     * difference, so a tile of N pixels averages N samples of noise down by sqrt(N), and that
+     * averaging is the whole reason the statistic can tell a lighting change from 1-spp noise.
+     *
+     * <p>16, not the 4 this started at, and the difference is not cosmetic. The release threshold is
+     * a multiple of the tile mean's own noise floor, which scales as 1/sqrt(N): at 4x4 the floor is
+     * high enough that, with the per-pixel noise of a 1-spp path trace, a genuine shadow edge moving
+     * through the tile does not clear it at all (verified arithmetically in
+     * {@code RtDenoiserShaderRegressionTest.asvgfNoiseFloorIsMeasuredInTheUnitsOfTheStatistic}). 16x16
+     * resolves a 40%-of-level change comfortably. The cost is not a concern because the pass runs once
+     * per TILE rather than per pixel, so a 16x16 tile is 256x cheaper than the full-resolution
+     * dispatch this replaced — the reason a bigger tile is affordable exactly where a smaller one was
+     * not.
+     *
+     * <p>The trade-off is localisation: a shadow edge is placed to within one tile, so a release can
+     * briefly affect a 16-pixel neighbourhood of the boundary. That is the same scale as the a-trous
+     * cascade's own spatial reach, and it only ever costs a few frames of extra noise near a moving
+     * edge rather than blur anywhere.
      */
-    public static final int GRADIENT_TILE = 4;
+    public static final int GRADIENT_TILE = 16;
     private final RtContext ctx;
     private final Stage reproject;
     private final Stage atrous;
@@ -327,7 +338,14 @@ public final class RtSvgfDenoiser {
             push.putInt(8, GRADIENT_TILE);
             push.putInt(12, reset ? 1 : 0);
             VK10.vkCmdPushConstants(cmd, gradient.pipelineLayout, VK10.VK_SHADER_STAGE_COMPUTE_BIT, 0, push);
-            VK10.vkCmdDispatch(cmd, (width + 15) / 16, (height + 15) / 16, 1);
+            // One invocation per TILE (svgf_gradient.comp's local size is 8x8, so a group covers
+            // 8*GRADIENT_TILE pixels per axis). The math rounds UP, so a frame whose size is not a
+            // multiple of the tile still gets its last partial tile; the shader clamps every store
+            // to the image bounds.
+            int groupPixels = 8 * GRADIENT_TILE;
+            VK10.vkCmdDispatch(cmd,
+                    (width + groupPixels - 1) / groupPixels,
+                    (height + groupPixels - 1) / groupPixels, 1);
         }
     }
 

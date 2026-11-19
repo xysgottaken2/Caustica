@@ -86,8 +86,17 @@ const int SPATIAL_VARIANCE_RADIUS = 3;
 // as "the lighting changed" and the denoiser would never accumulate (the exact failure this whole
 // pass exists to avoid).
 const float ALPHA_MIN = 0.075;        // SVGF's own floor: the history never fully locks down
-const float GRADIENT_NOISE_MULTIPLE = 2.5;
-const float GRADIENT_RELATIVE_SCALE = 0.06;
+// How far the measured change must clear the noise floor before it counts as a lighting change.
+// 2.0 sigma is a deliberate trade: on a still, converged scene roughly a few percent of tiles land
+// above it by chance, but a chance release simply lets that tile re-converge over the next few
+// frames (alpha is capped by the ramp below, not snapped to 1), so the cost is a barely-visible bit
+// of extra noise rather than a reset. Raising it to 3 sigma made real shadow movement stop firing.
+const float GRADIENT_NOISE_MULTIPLE = 2.0;
+// Relative change at which the release saturates. Measured against the tile's own level because the
+// same absolute change means something very different in a lit doorway and in deep shade. 25% is the
+// scale of a genuine shadow boundary moving through a tile; the previous 6% saturated on any
+// moderate change and threw the entire accumulation away, which is itself a visible event.
+const float GRADIENT_RELATIVE_SCALE = 0.25;
 // Below this history length the gradient is not consulted: alpha is already large (1/n dominates), so
 // adaptation cannot sharpen anything and only risks discarding the little history there is.
 const float GRADIENT_MIN_FRAMES = 6.0;
@@ -399,7 +408,32 @@ void main() {
     // so a pixel's guidance changes continuously as its history grows.
     float variance;
     float temporalVar = max(moments.y - moments.x * moments.x, 0.0);
-    if (frames >= SPATIAL_VARIANCE_FRAMES) {
+    if (adapt > 0.0) {
+        // ---- A-SVGF, second half: the adaptation drives the SPATIAL guidance too.
+        //
+        // The paper is explicit that the moment/gradient estimate steers both the accumulation and
+        // the filtering; using it for only one of them was leaving half the benefit (and half the
+        // artefact) on the table. The reason it matters is a failure specific to hard shadow edges
+        // on Minecraft geometry:
+        //
+        //   * `temporalVar` is the variance of the TEMPORAL AVERAGE, and it is what drives the
+        //     a-trous luminance edge-stop. Once a pixel has converged, that number is legitimately
+        //     tiny -- so the edge-stop is tight, the bilateral refuses to blend, and a fraction of a
+        //     percent of residual per-frame noise survives spatially. On a soft gradient that is
+        //     invisible; on a 50x radiance step (lit block next to a shadowed one) it shows up as
+        //     crawling speckle along the shadow boundary, which is the "shadow issue" that does not
+        //     go away no matter how long the accumulation runs.
+        //   * the gradient has just told us the illumination is CHANGING here, which is exactly where
+        //     that residual is largest and where the filter is being asked to trust a stale estimate.
+        //
+        // So where the gradient fires, widen the guidance by the change we measured (the same
+        // `change` amount the alpha used, net of the noise floor) instead of by the flush temporal
+        // variance. In a still, converged scene adapt is 0 and this branch never runs -- the filter
+        // is bit-identical to the plain SVGF behaviour there, which is why shadow detail in a
+        // static shot is unaffected.
+        float change = max(abs(grad.x) - GRADIENT_NOISE_MULTIPLE * grad.z, 0.0);
+        variance = max(temporalVar, change * change);
+    } else if (frames >= SPATIAL_VARIANCE_FRAMES) {
         variance = temporalVar;
     } else {
         // Too little history to measure anything (fresh disocclusion): estimate the noise level

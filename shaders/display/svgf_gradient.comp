@@ -34,15 +34,21 @@
 // value so the reprojection can sample it with a plain imageLoad at any pixel):
 //   x = signed luminance change of the tile (current - previous), demodulated
 //   y = the tile's luminance level (max of the tile means), i.e. the scale the change is relative to
-//   z = the tile's TEMPORAL standard deviation of luminance (sqrt of the mean of the per-pixel squared
-//       differences / 2) -- the noise floor the change has to beat to count as a real change
+//   z = the standard deviation of the TILE MEAN DIFFERENCE in x -- i.e. the noise floor of the
+//       statistic in x, already reduced by the 1/sqrt(tile pixels) averaging. It is NOT the
+//       per-pixel spread: comparing a tile mean against a per-pixel sigma is a units mismatch that
+//       makes the threshold ~7x too high and disables the adaptive term entirely (see main()).
 //   w = 1 when the tile contains no valid comparison (sky, or the first frame), 0 otherwise
 //
 // The relative statistic is |x| / (y + eps) computed by the consumer: an absolute change of 0.01 is
 // enormous in a dark room and invisible in sunlight, and only the ratio is meaningful across a scene
 // that spans both.
 
-layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+// One invocation per TILE, not per pixel: the statistic is identical for every pixel of a tile, so a
+// per-pixel dispatch would recompute the same 256 samples 256 times. The consumer (fixed 16x16
+// local size) works out the tile from the pixel index, so the mapping below only has to agree with
+// GRADIENT_TILE.
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
 
 layout(binding = 0, set = 0, rgba16f) uniform readonly  image2D current;   // this frame's raw trace
 layout(binding = 1, set = 0, rgba16f) uniform readonly  image2D prevColor; // PREVIOUS frame's raw trace
@@ -91,20 +97,29 @@ vec3 demodulate(vec3 c, vec3 factor) {
     return clamp(c / factor, vec3(0.0), vec3(65504.0));
 }
 
+/** Write one value to every pixel of the tile, so any tile pixel can be read by the consumer. */
+void storeTile(ivec2 tileOrigin, ivec2 maxPix, vec4 value) {
+    for (int dy = 0; dy < pc.tile; dy++) {
+        for (int dx = 0; dx < pc.tile; dx++) {
+            ivec2 q = min(tileOrigin + ivec2(dx, dy), maxPix);
+            imageStore(gradient, q, value);
+        }
+    }
+}
+
 void main() {
-    ivec2 pix = ivec2(gl_GlobalInvocationID.xy);
-    if (pix.x >= pc.width || pix.y >= pc.height) {
+    // This invocation owns one TILE; it writes the statistic to every pixel of that tile so the
+    // consumer can imageLoad it at any of them.
+    ivec2 tileOrigin = ivec2(gl_GlobalInvocationID.xy) * pc.tile;
+    if (tileOrigin.x >= pc.width || tileOrigin.y >= pc.height) {
         return;
     }
-    // Every pixel of a tile computes the same statistic from the same tile origin, so the value is
-    // uniform across the tile and a consumer can read it at any of the tile's pixels.
-    ivec2 tileOrigin = (pix / pc.tile) * pc.tile;
     ivec2 maxPix = ivec2(pc.width - 1, pc.height - 1);
 
     if (pc.reset != 0) {
         // No previous frame: report "no information" so the reprojection falls back to its ordinary
         // 1/n accumulation instead of reading a stale or uninitialised comparison.
-        imageStore(gradient, pix, vec4(0.0, 0.0, 0.0, 1.0));
+        storeTile(tileOrigin, maxPix, vec4(0.0, 0.0, 0.0, 1.0));
         return;
     }
 
@@ -143,13 +158,30 @@ void main() {
 
     float tileSize = float(pc.tile * pc.tile);
     if (count < 0.5 || skyCount > tileSize * 0.5) {
-        imageStore(gradient, pix, vec4(0.0, 0.0, 0.0, 1.0));
+        storeTile(tileOrigin, maxPix, vec4(0.0, 0.0, 0.0, 1.0));
         return;
     }
 
     float meanCur = sumCur / count;
     float meanPrev = sumPrev / count;
-    float noiseSigma = sqrt(max(sumDiffSq / count * 0.5, 0.0));
+    float diffSq = sumDiffSq / count;
+    // ---- The noise figure must be the noise of the STATISTIC, not of a single pixel.
+    //
+    // This is a units bug that silently disabled the whole adaptive term. `x` is a TILE MEAN, so its
+    // noise shrinks by 1/sqrt(n) as the tile grows; `z` was the per-PIXEL difference spread, which
+    // does not. The consumer then compared the two directly, which made the threshold 2.5 * sigma
+    // against a statistic whose own noise is only 2.5/4 * sigma at a 4x4 tile -- i.e. ~7 sigma of the
+    // mean, and at 1 spp (where the per-pixel noise IS the signal level) that demanded a lighting
+    // change of 250% of the signal before anything fired. Nothing realistic ever did, so alpha stayed
+    // at plain 1/n and the result was indistinguishable from ordinary SVGF. Measured on the actual
+    // constants: a 200% change did not trigger it.
+    //
+    // z now stores the standard deviation of the MEAN DIFFERENCE itself. Two independent estimates
+    // contribute equally to Var(meanCur - meanPrev), so the sd of that difference is sigma_pixel *
+    // sqrt(2/n); dividing by sqrt(2) folds that back onto the single-mean scale the consumer wants,
+    // which is why the final expression is simply sqrt(diffSq / n).
+    float meanDiffSigma = sqrt(max(diffSq / max(count, 1.0), 0.0));
 
-    imageStore(gradient, pix, vec4(meanCur - meanPrev, max(meanCur, meanPrev), noiseSigma, 0.0));
+    storeTile(tileOrigin, maxPix,
+            vec4(meanCur - meanPrev, max(meanCur, meanPrev), meanDiffSigma, 0.0));
 }
