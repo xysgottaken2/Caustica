@@ -77,6 +77,7 @@ public float payloadTransmission() { return unpackHalf2(payload.iorTransmission)
 public bool sssEnabled() { return worldFeature(worldPush, FEATURE_SSS); }
 public bool denoiserEnabled() { return worldFeature(worldPush, FEATURE_DENOISER); }
 public bool nrdEnabled() { return worldFeature(worldPush, FEATURE_NRD); }
+public bool nrdRelaxEnabled() { return worldFeature(worldPush, FEATURE_NRD_RELAX); }
 public bool viewZEnabled() { return worldFeature(worldPush, FEATURE_VIEWZ); }
 public bool restirEnabled() {
     // Use the explicit hot push uniform as the authoritative live toggle. The featureFlags copy remains

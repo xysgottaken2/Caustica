@@ -270,6 +270,7 @@ def ngxNativePlatforms = [
 		],
 		vendorRoot: { dlssSdkRoot, vendorConfig -> new File(dlssSdkRoot, "lib/Windows_x86_64/${vendorConfig}") },
 		vendorIncludes: [
+			"nvngx_dlss.dll",
 			"nvngx_dlssd.dll",
 			"nvngx_dlssg.dll"
 		]
@@ -281,6 +282,7 @@ def ngxNativePlatforms = [
 		],
 		vendorRoot: { dlssSdkRoot, vendorConfig -> new File(dlssSdkRoot, "lib/Linux_x86_64/${vendorConfig}") },
 		vendorIncludes: [
+			"libnvidia-ngx-dlss.so*",
 			"libnvidia-ngx-dlssd.so*",
 			"libnvidia-ngx-dlssg.so*"
 		]
@@ -598,6 +600,7 @@ tasks.register("verifyModJar") {
 			}
 			["world.rgen.spv", "world.rchit.spv", "world.rahit.spv", "world.rmiss.spv",
 			 "world_primary.rgen.spv", "shadow.rmiss.spv", "display.comp.spv", "svgf_reproject.comp.spv",
+			 "svgf_atrous.comp.spv", "svgf_gradient.comp.spv",
 			 "exposure_hist.comp.spv", "sdr_present.comp.spv", "hdr_ui_composite.comp.spv",
 			 "overlay_fullscreen_triangle.vert.spv", "block_outline.vert.spv"].each { shader ->
 				if (zip.getEntry("caustica/rt/${shader}") == null) {

@@ -73,9 +73,9 @@ public final class CausticaConfig {
             Rt.Composite.PARALLAX_QUALITY,
             Rt.Terrain.ASYNC_DISPATCH_PER_PASS, Rt.Omm.ENABLED,
             Rt.Entities.ENABLED, Rt.Entities.GLOW_ENABLED, Rt.EntityTextures.MAX_TEXTURES,
-            Rt.DlssRr.ENABLED, Rt.DlssRr.PRESET, Rt.DlssRr.QUALITY, Rt.Fg.ENABLED,
+            Rt.DlssRr.ENABLED, Rt.DlssRr.PRESET, Rt.DlssRr.QUALITY, Rt.DlssRr.RAY_RECONSTRUCTION, Rt.Fg.ENABLED,
             Rt.Fsr.ENABLED, Rt.Fsr.QUALITY, Rt.Xess.ENABLED, Rt.Xess.QUALITY,
-            Rt.Denoise.ENABLED, Rt.Nrd.ENABLED, Rt.Nrd.VALIDATION,
+            Rt.Denoise.ENABLED, Rt.Nrd.ENABLED, Rt.Nrd.DENOISER, Rt.Nrd.VALIDATION,
             Rt.Sharc.ENABLED, Rt.Sharc.CELL_SIZE, Rt.Sharc.CACHE_ENTRIES, Rt.Sharc.UPDATE_COVERAGE,
             Rt.Sharc.TEMPORAL_BLEND, Rt.Sharc.START_BOUNCE, Rt.Sharc.STRENGTH, Rt.Sharc.MAX_DISTANCE,
             Rt.Sharc.FRAME_LIFETIME, Rt.Sharc.NORMAL_THRESHOLD, Rt.Sharc.STABLE_FRAMES, Rt.Sharc.DEBUG,
@@ -144,14 +144,15 @@ public final class CausticaConfig {
                 " The renderer's own denoiser (SVGF): geometry-validated temporal reprojection with\n"
                         + " luminance moments, then a variance-guided a-trous wavelet cascade. Default on and\n"
                         + " used by every non-DLSS path; DLSS Ray Reconstruction denoises internally instead,\n"
-                        + " and switching NRD on hands the slot to REBLUR.");
+                        + " and switching NRD on hands the slot to NRD.");
         FILE.setComment("nrd",
-                " NRD (NVIDIA Real-time Denoisers) REBLUR denoising: the optional alternative to the\n"
+                " NRD (NVIDIA Real-time Denoisers) denoising: the optional alternative to the\n"
                         + " built-in denoiser, running on demodulated per-lobe radiance so diffuse and specular\n"
                         + " are filtered separately. Denoises at render resolution; combine with FSR 3 / XeSS\n"
                         + " (or no upscaler) for the display. Requires the bundled NRD natives (Windows) and is\n"
-                        + " mutually exclusive with both DLSS and the built-in denoiser.\n"
-                        + " validation: REBLUR's diagnostic overlay; replaces the image with NRD's debug grid.");
+                        + " mutually exclusive with the built-in denoiser.\n"
+                        + " denoiser: reblur (REBLUR_DIFFUSE_SPECULAR) or relax (RELAX_DIFFUSE_SPECULAR).\n"
+                        + " validation: NRD's diagnostic overlay; replaces the image with NRD's debug grid.");
         FILE.setComment("sharc",
                 " Experimental SHaRC (NVIDIA Spatial Hash Radiance Cache). A shader-only world-space\n"
                         + " radiance cache: early bounces warm a voxel hash with the local light they see,\n"
@@ -1376,6 +1377,40 @@ public final class CausticaConfig {
                     v -> PRESET_VALUES.contains(v) ? v : 0);
             public static final IntSetting QUALITY = intValue("caustica.rt.dlssRr.quality", "dlss-rr.quality", 0);
 
+            /**
+             * Which denoiser the DLSS path runs. DLSS Ray Reconstruction fuses denoising and
+             * upscaling in one neural pass, but at 1 spp its temporal history boils on Minecraft's
+             * high-frequency content. The other two choices denoise at render resolution with a
+             * classical temporal filter and upscale with DLSS Super Resolution instead:
+             * {@code svgf} is the renderer's own variance-guided filter (the one FSR 3 / XeSS
+             * already use), {@code nrd} is NVIDIA's NRD (see {@link Nrd#DENOISER} for its
+             * REBLUR / RELAX choice). Only meaningful while {@link #ENABLED} and the
+             * {@code composite.denoiser} filter toggle are both on; anything else snaps to
+             * {@code dlss-rr}.
+             */
+            public static final String RAY_RECONSTRUCTION_DLSS_RR = "dlss-rr";
+            public static final String RAY_RECONSTRUCTION_SVGF = "svgf";
+            public static final String RAY_RECONSTRUCTION_NRD = "nrd";
+            public static final StringSetting RAY_RECONSTRUCTION =
+                    string("caustica.rt.dlssRr.rayReconstruction", "dlss-rr.ray-reconstruction",
+                            RAY_RECONSTRUCTION_DLSS_RR, DlssRr::sanitizeRayReconstruction);
+
+            /** The selected DLSS-path denoiser, one of the {@code RAY_RECONSTRUCTION_*} values. */
+            public static String rayReconstruction() {
+                return RAY_RECONSTRUCTION.get();
+            }
+
+            private static String sanitizeRayReconstruction(String value) {
+                if (value == null) {
+                    return RAY_RECONSTRUCTION_DLSS_RR;
+                }
+                return switch (value.toLowerCase(java.util.Locale.ROOT).replace('_', '-')) {
+                    case "svgf" -> RAY_RECONSTRUCTION_SVGF;
+                    case "nrd" -> RAY_RECONSTRUCTION_NRD;
+                    default -> RAY_RECONSTRUCTION_DLSS_RR;
+                };
+            }
+
             private DlssRr() {
             }
         }
@@ -1454,11 +1489,11 @@ public final class CausticaConfig {
         }
 
         /**
-         * NRD (NVIDIA Real-time Denoisers) REBLUR_DIFFUSE_SPECULAR — the optional alternative
-         * denoiser, NVIDIA's production spatio-temporal filter running on the tracer's demodulated
-         * per-lobe signals. It denoises diffuse and specular separately with hit-distance-driven
-         * kernels, which resolves reflections far better than a single-signal filter can, and adds
-         * its own anti-lag, anti-firefly and temporal stabilization stages.
+         * NRD (NVIDIA Real-time Denoisers) — the optional alternative denoiser, NVIDIA's
+         * production spatio-temporal filters running on the tracer's demodulated per-lobe
+         * signals. It denoises diffuse and specular separately with hit-distance-driven
+         * kernels, which resolves reflections far better than a single-signal filter can, and
+         * adds its own anti-lag, anti-firefly and temporal stabilization stages.
          *
          * <p>Mutually exclusive with the built-in denoiser: whichever runs owns the slot, because
          * two temporal filters in series fight over the same history. Requires the bundled NRD
@@ -1468,7 +1503,36 @@ public final class CausticaConfig {
         public static final class Nrd {
             public static final BooleanSetting ENABLED = bool("caustica.rt.nrd", "nrd.enabled", false);
             /**
-             * REBLUR's 16-viewport validation overlay (OUT_VALIDATION): diagnostics for inputs,
+             * Which NRD denoiser to run. {@code reblur} is REBLUR_DIFFUSE_SPECULAR (YCoCg
+             * radiance + normalized hit distance); {@code relax} is RELAX_DIFFUSE_SPECULAR
+             * (linear radiance + raw hit distance), NVIDIA's newer atrous-wavelet denoiser,
+             * which is steadier on noisy 1-spp input at the cost of a little more blur.
+             * Switching recreates the NRD instance and drops its history. Anything else snaps
+             * to {@code reblur}.
+             */
+            public static final String DENOISER_REBLUR = "reblur";
+            public static final String DENOISER_RELAX = "relax";
+            public static final StringSetting DENOISER =
+                    string("caustica.rt.nrd.denoiser", "nrd.denoiser",
+                            DENOISER_REBLUR, Nrd::sanitizeDenoiser);
+
+            /** Whether the selected NRD denoiser is RELAX (false = REBLUR). */
+            public static boolean isRelax() {
+                return DENOISER_RELAX.equals(DENOISER.get());
+            }
+
+            private static String sanitizeDenoiser(String value) {
+                if (value == null) {
+                    return DENOISER_REBLUR;
+                }
+                return switch (value.toLowerCase(java.util.Locale.ROOT)) {
+                    case "relax" -> DENOISER_RELAX;
+                    default -> DENOISER_REBLUR;
+                };
+            }
+
+            /**
+             * NRD's 16-viewport validation overlay (OUT_VALIDATION): diagnostics for inputs,
              * accumulation frame counts, disocclusion/occlusion state — the tool for debugging
              * temporal artifacts in-game. When on, the overlay replaces the normal image.
              */

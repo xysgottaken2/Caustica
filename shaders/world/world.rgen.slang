@@ -1128,11 +1128,13 @@ void main() {
     outImage[pix] = float4(radiance, 1.0);
 
     if (nrdEnabled()) {
-        // ---- REBLUR front-end pack. Mirrors REBLUR_FrontEnd_PackRadianceAndNormHitDist: DEMODULATED
-        // YCoCg radiance clamped to the FP16 range, plus the normalized hit distance. Invalid
-        // (NaN/Inf) samples become black with "no data" rather than poisoning the denoiser's history.
-        // The undenoised firefly clamp above deliberately does NOT apply here — REBLUR's own
-        // anti-firefly pass owns that job on the denoised path, and clamping twice would darken it.
+        // ---- NRD front-end pack. The encoding is per-denoiser (NRD.hlsli): REBLUR wants
+        // REBLUR_FrontEnd_PackRadianceAndNormHitDist (demodulated YCoCg radiance + normalized hit
+        // distance), RELAX wants RELAX_FrontEnd_PackRadianceAndHitDist (linear radiance + RAW hit
+        // distance). Both clamp to the FP16 range; invalid (NaN/Inf) samples become black with
+        // "no data" rather than poisoning the denoiser's history. The undenoised firefly clamp
+        // above deliberately does NOT apply here — the denoiser's own anti-firefly stage owns that
+        // job on the denoised path, and clamping twice would darken it.
         float3 diffRad = frameDiff / float(spp);
         float3 specRad = frameSpec / float(spp);
         if (any(isnan(diffRad)) || any(isinf(diffRad))) {
@@ -1188,9 +1190,18 @@ void main() {
 
         // viewZ was written at the primary hit by Pass A (sky = 1e6 = INF for NRD).
         float viewZ = gViewZ[pix];
-        float normHitDiff = frameHitDiff > 0.0 ? nrdNormHitDist(frameHitDiff, viewZ, rough) : 0.0;
-        float normHitSpec = frameHitSpec > 0.0 ? nrdNormHitDist(frameHitSpec, viewZ, rough) : 0.0;
-        gNrdDiff[pix] = float4(nrdLinearToYCoCg(diffRad), normHitDiff);
-        gNrdSpec[pix] = float4(nrdLinearToYCoCg(specRad), normHitSpec);
+        if (nrdRelaxEnabled()) {
+            // RELAX packs the LINEAR radiance with the RAW hit distance (clamped to the FP16
+            // range); its back-end unpack is the identity, so no color conversion either way.
+            float rawHitDiff = frameHitDiff > 0.0 ? min(frameHitDiff, 65504.0) : 0.0;
+            float rawHitSpec = frameHitSpec > 0.0 ? min(frameHitSpec, 65504.0) : 0.0;
+            gNrdDiff[pix] = float4(diffRad, rawHitDiff);
+            gNrdSpec[pix] = float4(specRad, rawHitSpec);
+        } else {
+            float normHitDiff = frameHitDiff > 0.0 ? nrdNormHitDist(frameHitDiff, viewZ, rough) : 0.0;
+            float normHitSpec = frameHitSpec > 0.0 ? nrdNormHitDist(frameHitSpec, viewZ, rough) : 0.0;
+            gNrdDiff[pix] = float4(nrdLinearToYCoCg(diffRad), normHitDiff);
+            gNrdSpec[pix] = float4(nrdLinearToYCoCg(specRad), normHitSpec);
+        }
     }
 }

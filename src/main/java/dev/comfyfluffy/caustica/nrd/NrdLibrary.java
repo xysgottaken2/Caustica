@@ -12,11 +12,13 @@ import java.nio.file.Path;
 /**
  * FFM bindings for the NRD shim ({@code nrdshim.dll}).
  *
- * <p>The shim wraps NVIDIA NRD's REBLUR_DIFFUSE_SPECULAR denoiser (through NRD's own NRI Integration
- * layer) behind a flat C ABI — see {@code native/nrd_shim/nrd_shim.cpp}, which also documents the
- * resource and matrix contract in full. Every NRD/NRI struct lives inside the shim, so Java only
- * ever passes primitives and raw Vulkan handles as {@code long} addresses, the same trade-off as
- * {@code NgxLibrary} and {@code FsrLibrary}.
+ * <p>The shim wraps NVIDIA NRD's REBLUR_DIFFUSE_SPECULAR and RELAX_DIFFUSE_SPECULAR denoisers
+ * (through NRD's own NRI Integration layer) behind a flat C ABI — see
+ * {@code native/nrd_shim/nrd_shim.cpp}, which also documents the resource and matrix contract in
+ * full. Every NRD/NRI struct lives inside the shim, so Java only ever passes primitives and raw
+ * Vulkan handles as {@code long} addresses, the same trade-off as {@code NgxLibrary} and
+ * {@code FsrLibrary}. The denoiser is chosen at {@link #init} time; switching it rebuilds the
+ * instance, exactly like a resize.
  *
  * <p>Return codes: {@code 0} is success, positive values are {@code nrd::Result}, and negative
  * values are the shim's own validation failures (null handle, out-of-range jitter, bad resolution).
@@ -28,6 +30,7 @@ public final class NrdLibrary {
     private final MethodHandle newFrame;
     private final MethodHandle setSettings;
     private final MethodHandle setReblurSettings;
+    private final MethodHandle setRelaxSettings;
     private final MethodHandle denoise;
     private final MethodHandle destroy;
     private final MethodHandle lastResult;
@@ -35,12 +38,12 @@ public final class NrdLibrary {
 
     private NrdLibrary(SymbolLookup lookup) {
         // int nrdshim_init(u64 instance, u64 phys, u64 device, u64 gipa, u32 queueFamily,
-        //                  u32 vkMinor, u32 w, u32 h)
+        //                  u32 vkMinor, u32 w, u32 h, i32 denoiserType)
         this.init = handle(lookup, "nrdshim_init",
                 FunctionDescriptor.of(ValueLayout.JAVA_INT,
                         ValueLayout.JAVA_LONG, ValueLayout.JAVA_LONG, ValueLayout.JAVA_LONG,
                         ValueLayout.JAVA_LONG, ValueLayout.JAVA_INT, ValueLayout.JAVA_INT,
-                        ValueLayout.JAVA_INT, ValueLayout.JAVA_INT));
+                        ValueLayout.JAVA_INT, ValueLayout.JAVA_INT, ValueLayout.JAVA_INT));
         this.newFrame = handle(lookup, "nrdshim_new_frame", FunctionDescriptor.ofVoid());
         // int nrdshim_set_settings(f32[16] v2c, f32[16] v2cPrev, f32[16] w2v, f32[16] w2vPrev,
         //                          jx, jy, jpx, jpy, mvScaleX, mvScaleY, denoisingRange,
@@ -63,6 +66,16 @@ public final class NrdLibrary {
                         ValueLayout.JAVA_FLOAT, ValueLayout.JAVA_FLOAT, ValueLayout.JAVA_FLOAT,
                         ValueLayout.JAVA_FLOAT, ValueLayout.JAVA_FLOAT,
                         ValueLayout.JAVA_INT));
+        // int nrdshim_set_relax_settings(7 ints, 9 floats, 2 ints) — see setRelaxSettings below.
+        this.setRelaxSettings = handle(lookup, "nrdshim_set_relax_settings",
+                FunctionDescriptor.of(ValueLayout.JAVA_INT,
+                        ValueLayout.JAVA_INT, ValueLayout.JAVA_INT, ValueLayout.JAVA_INT,
+                        ValueLayout.JAVA_INT, ValueLayout.JAVA_INT, ValueLayout.JAVA_INT,
+                        ValueLayout.JAVA_INT,
+                        ValueLayout.JAVA_FLOAT, ValueLayout.JAVA_FLOAT, ValueLayout.JAVA_FLOAT,
+                        ValueLayout.JAVA_FLOAT, ValueLayout.JAVA_FLOAT, ValueLayout.JAVA_FLOAT,
+                        ValueLayout.JAVA_FLOAT, ValueLayout.JAVA_FLOAT, ValueLayout.JAVA_FLOAT,
+                        ValueLayout.JAVA_INT, ValueLayout.JAVA_INT));
         // int nrdshim_denoise(u64 cmd, [image, fmt] x 8: mv, normalRough, viewZ, diffIn, specIn,
         //                     diffOut, specOut, validation)
         this.denoise = handle(lookup, "nrdshim_denoise",
@@ -93,11 +106,14 @@ public final class NrdLibrary {
                 desc);
     }
 
+    /**
+     * @param denoiserType 0 = REBLUR_DIFFUSE_SPECULAR, 1 = RELAX_DIFFUSE_SPECULAR.
+     */
     public int init(long vkInstance, long vkPhysicalDevice, long vkDevice, long vkGetInstanceProcAddr,
-                    int queueFamilyIndex, int vkMinorVersion, int width, int height) {
+                    int queueFamilyIndex, int vkMinorVersion, int width, int height, int denoiserType) {
         try {
             return (int) this.init.invokeExact(vkInstance, vkPhysicalDevice, vkDevice, vkGetInstanceProcAddr,
-                    queueFamilyIndex, vkMinorVersion, width, height);
+                    queueFamilyIndex, vkMinorVersion, width, height, denoiserType);
         } catch (Throwable t) {
             throw new RuntimeException("nrdshim_init failed", t);
         }
@@ -163,6 +179,42 @@ public final class NrdLibrary {
                     enableAntiFirefly ? 1 : 0);
         } catch (Throwable t) {
             throw new RuntimeException("nrdshim_set_reblur_settings failed", t);
+        }
+    }
+
+    /**
+     * RELAX tuning; the shim remembers it across resize re-inits.
+     *
+     * <p>{@code hitDistReconstructionMode}: 0 OFF, 1 AREA_3X3, 2 AREA_5X5. The accumulation counts
+     * and {@code atrousIterationNum} use a negative value for "keep NRD's default" (0 is
+     * meaningful for {@code historyFixFrameNum}); the pre-pass radii use a negative value for
+     * "default" (0 means "disabled"); the remaining floats treat any value &lt;= 0 as "default".
+     */
+    public int setRelaxSettings(int hitDistReconstructionMode, int diffuseMaxAccumulatedFrameNum,
+                                int specularMaxAccumulatedFrameNum, int diffuseMaxFastAccumulatedFrameNum,
+                                int specularMaxFastAccumulatedFrameNum, int historyFixFrameNum,
+                                int atrousIterationNum,
+                                float fastHistoryClampingSigmaScale,
+                                float diffusePrepassBlurRadius, float specularPrepassBlurRadius,
+                                float minHitDistanceWeight,
+                                float lobeAngleFraction, float roughnessFraction,
+                                float diffusePhiLuminance, float specularPhiLuminance,
+                                float depthThreshold,
+                                boolean enableAntiFirefly, boolean enableRoughnessEdgeStopping) {
+        try {
+            return (int) this.setRelaxSettings.invokeExact(
+                    hitDistReconstructionMode, diffuseMaxAccumulatedFrameNum, specularMaxAccumulatedFrameNum,
+                    diffuseMaxFastAccumulatedFrameNum, specularMaxFastAccumulatedFrameNum,
+                    historyFixFrameNum, atrousIterationNum,
+                    fastHistoryClampingSigmaScale,
+                    diffusePrepassBlurRadius, specularPrepassBlurRadius,
+                    minHitDistanceWeight,
+                    lobeAngleFraction, roughnessFraction,
+                    diffusePhiLuminance, specularPhiLuminance,
+                    depthThreshold,
+                    enableAntiFirefly ? 1 : 0, enableRoughnessEdgeStopping ? 1 : 0);
+        } catch (Throwable t) {
+            throw new RuntimeException("nrdshim_set_relax_settings failed", t);
         }
     }
 

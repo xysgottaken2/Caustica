@@ -31,7 +31,7 @@ import static dev.comfyfluffy.caustica.rt.RtContext.check;
 
 /**
  * SVGF (Spatiotemporal Variance-Guided Filtering) — the renderer's own denoiser for every non-DLSS
- * path (upscaler Off / FSR 3 / XeSS). Two compute stages, both at render resolution:
+ * path (upscaler Off / FSR 3 / XeSS). Three compute stages, all at render resolution:
  *
  * <ol>
  *   <li>{@code svgf_reproject.comp}: geometry-validated bilinear temporal reprojection of the
@@ -60,6 +60,33 @@ import static dev.comfyfluffy.caustica.rt.RtContext.check;
  * driven per pixel by the measured variance, so it blurs where the estimate is uncertain and leaves
  * converged regions crisp. That variance coupling is what gives the DLSS-like "settles and stays
  * settled" behaviour the fixed-sigma filter could not reach.
+ *
+ * <h2>A-SVGF: the adaptive temporal term</h2>
+ *
+ * <p>The stack is A-SVGF (Schied et al. 2018), which adds a THIRD stage ahead of the two above:
+ *
+ * <ol start="0">
+ *   <li>{@code svgf_gradient.comp}: a downsampled, demodulated temporal-gradient statistic — how
+ *       much each tile's ILLUMINATION changed since the previous frame, measured net of that tile's
+ *       own noise floor.</li>
+ * </ol>
+ *
+ * <p>Plain SVGF's blend rate is 1/history-length, so it knows how much history a pixel HAS but never
+ * whether that history still describes the current lighting. A converged pixel therefore drags a
+ * shadow that moved, or a highlight that turned away, behind the geometry for as long as its history
+ * lasts — the temporal lag SVGF is criticised for, and the reason its output can look worse than a
+ * neural denoiser that was trained on exactly this failure. The gradient supplies the missing
+ * staleness term: where the lighting genuinely changed, the blend opens up and the pixel re-converges
+ * immediately; where it did not, accumulation continues untouched and the pixel keeps its 48-frame
+ * noise reduction. The same statistic also widens the firefly clamp, because a clamp whose bound
+ * comes from a stale history would otherwise undo the release it was granted.
+ *
+ * <p>Implemented from the published algorithm rather than ported from Quake II RTX's
+ * {@code asvgf_*.comp} shaders: those are GPL-2.0, which cannot be combined with this project's
+ * LGPL-3.0-or-later. The structure deliberately differs too — q2vkpt measures the gradient from a
+ * single carried-over sample location per stratum and filters it with its own à-trous chain, while
+ * this implementation measures a tile MEAN of the raw difference, which is self-contained (no
+ * extra sample-position buffer, no second filter chain) and cheaper.
  */
 public final class RtSvgfDenoiser {
     private static final String SHADER_DIR = "/caustica/rt/";
@@ -67,8 +94,11 @@ public final class RtSvgfDenoiser {
     private static final int REPROJECT_PUSH_BYTES = 5 * Integer.BYTES;
     /** À-trous push: int width, height, step; float phiLuminance, phiNormal, phiDepth; int extraSkySmooth. */
     private static final int ATROUS_PUSH_BYTES = 9 * Integer.BYTES;
-    private static final int REPROJECT_BINDINGS = 12;
+    private static final int REPROJECT_BINDINGS = 13;
     private static final int ATROUS_BINDINGS = 6;
+    /** A-SVGF temporal-gradient push: int width, height, tile, reset. */
+    private static final int GRADIENT_PUSH_BYTES = 4 * Integer.BYTES;
+    private static final int GRADIENT_BINDINGS = 5;
 
     /**
      * Number of à-trous iterations. Each doubles the tap spacing, so the reach is
@@ -97,9 +127,31 @@ public final class RtSvgfDenoiser {
     /** Ping-pong parities; see {@link Stage} for why the descriptor sets are keyed on them. */
     private static final int PARITIES = 2;
 
+    /**
+     * Edge of the A-SVGF temporal-gradient tile, in pixels. The statistic is a MEAN luminance
+     * difference, so a tile of N pixels averages N samples of noise down by sqrt(N), and that
+     * averaging is the whole reason the statistic can tell a lighting change from 1-spp noise.
+     *
+     * <p>16, not the 4 this started at, and the difference is not cosmetic. The release threshold is
+     * a multiple of the tile mean's own noise floor, which scales as 1/sqrt(N): at 4x4 the floor is
+     * high enough that, with the per-pixel noise of a 1-spp path trace, a genuine shadow edge moving
+     * through the tile does not clear it at all (verified arithmetically in
+     * {@code RtDenoiserShaderRegressionTest.asvgfNoiseFloorIsMeasuredInTheUnitsOfTheStatistic}). 16x16
+     * resolves a 40%-of-level change comfortably. The cost is not a concern because the pass runs once
+     * per TILE rather than per pixel, so a 16x16 tile is 256x cheaper than the full-resolution
+     * dispatch this replaced — the reason a bigger tile is affordable exactly where a smaller one was
+     * not.
+     *
+     * <p>The trade-off is localisation: a shadow edge is placed to within one tile, so a release can
+     * briefly affect a 16-pixel neighbourhood of the boundary. That is the same scale as the a-trous
+     * cascade's own spatial reach, and it only ever costs a few frames of extra noise near a moving
+     * edge rather than blur anywhere.
+     */
+    public static final int GRADIENT_TILE = 16;
     private final RtContext ctx;
     private final Stage reproject;
     private final Stage atrous;
+    private final Stage gradient;
     private boolean destroyed;
 
     /**
@@ -173,10 +225,11 @@ public final class RtSvgfDenoiser {
         }
     }
 
-    private RtSvgfDenoiser(RtContext ctx, Stage reproject, Stage atrous) {
+    private RtSvgfDenoiser(RtContext ctx, Stage reproject, Stage atrous, Stage gradient) {
         this.ctx = ctx;
         this.reproject = reproject;
         this.atrous = atrous;
+        this.gradient = gradient;
     }
 
     public static RtSvgfDenoiser create(RtContext ctx) {
@@ -186,7 +239,11 @@ public final class RtSvgfDenoiser {
                 REPROJECT_PUSH_BYTES, PARITIES, "svgf reproject");
         Stage atrous = createStage(ctx, "svgf_atrous.comp.spv", ATROUS_BINDINGS,
                 ATROUS_PUSH_BYTES, ATROUS_PASSES * PARITIES, "svgf a-trous");
-        return new RtSvgfDenoiser(ctx, reproject, atrous);
+        // The gradient runs once per frame, before the reprojection that consumes it. One set per
+        // parity, like the reprojection: the raw trace it compares against alternates parity too.
+        Stage gradient = createStage(ctx, "svgf_gradient.comp.spv", GRADIENT_BINDINGS,
+                GRADIENT_PUSH_BYTES, PARITIES, "svgf gradient");
+        return new RtSvgfDenoiser(ctx, reproject, atrous, gradient);
     }
 
     private static Stage createStage(RtContext ctx, String shader, int bindings, int pushBytes,
@@ -256,6 +313,43 @@ public final class RtSvgfDenoiser {
     }
 
     /**
+     * A-SVGF stage 0: the tile temporal-gradient statistic that {@link #reproject} consumes.
+     *
+     * <p>Must be recorded BEFORE the reprojection for this frame and AFTER the raw trace exists, and
+     * {@code prevColorView} must be the PREVIOUS frame's raw trace (never the accumulated history —
+     * comparing against the filter's own output feeds its error back into its guidance). {@code reset}
+     * makes the pass report "no information", which leaves the reprojection on its ordinary 1/n
+     * accumulation for this frame.
+     */
+    public void gradient(VkCommandBuffer cmd, int width, int height, int parity,
+                         long currentView, long prevColorView, long gradientOutView,
+                         long albedoView, long viewZView, boolean reset) {
+        long set = gradient.setImages(ctx, parity, new long[] {
+                currentView, prevColorView, gradientOutView, albedoView, viewZView,
+        });
+        try (MemoryStack stack = MemoryStack.stackPush();
+             RtDebugLabels.Scope ignored = RtDebugLabels.scope(ctx, cmd, "svgf gradient")) {
+            VK10.vkCmdBindPipeline(cmd, VK10.VK_PIPELINE_BIND_POINT_COMPUTE, gradient.pipeline);
+            VK10.vkCmdBindDescriptorSets(cmd, VK10.VK_PIPELINE_BIND_POINT_COMPUTE, gradient.pipelineLayout,
+                    0, stack.longs(set), null);
+            ByteBuffer push = stack.malloc(GRADIENT_PUSH_BYTES);
+            push.putInt(0, width);
+            push.putInt(4, height);
+            push.putInt(8, GRADIENT_TILE);
+            push.putInt(12, reset ? 1 : 0);
+            VK10.vkCmdPushConstants(cmd, gradient.pipelineLayout, VK10.VK_SHADER_STAGE_COMPUTE_BIT, 0, push);
+            // One invocation per TILE (svgf_gradient.comp's local size is 8x8, so a group covers
+            // 8*GRADIENT_TILE pixels per axis). The math rounds UP, so a frame whose size is not a
+            // multiple of the tile still gets its last partial tile; the shader clamps every store
+            // to the image bounds.
+            int groupPixels = 8 * GRADIENT_TILE;
+            VK10.vkCmdDispatch(cmd,
+                    (width + groupPixels - 1) / groupPixels,
+                    (height + groupPixels - 1) / groupPixels, 1);
+        }
+    }
+
+    /**
      * Temporal stage. {@code parity} is the caller's ping-pong parity (0 or 1), which selects the
      * descriptor set matching this frame's history/moment images. {@code reset} discards all
      * history for this frame (first frame after a (re)allocation or an FOV/projection change); the
@@ -266,10 +360,12 @@ public final class RtSvgfDenoiser {
                           long histOutView, long momentsOutView, long filterOutView,
                           long motionView, long viewZView, long normalView,
                           long prevViewZView, long prevNormalView, long albedoView,
+                          long gradientView,
                           boolean reset, float maxFrames, float camForwardDelta) {
         long set = reproject.setImages(ctx, parity, new long[] {
                 currentView, historyView, momentsInView, histOutView, momentsOutView, filterOutView,
                 motionView, viewZView, normalView, prevViewZView, prevNormalView, albedoView,
+                gradientView,
         });
         try (MemoryStack stack = MemoryStack.stackPush();
              RtDebugLabels.Scope ignored = RtDebugLabels.scope(ctx, cmd, "svgf reproject")) {
@@ -332,6 +428,7 @@ public final class RtSvgfDenoiser {
     public void invalidateBindings() {
         reproject.invalidate();
         atrous.invalidate();
+        gradient.invalidate();
     }
 
     public void destroy() {
@@ -342,6 +439,7 @@ public final class RtSvgfDenoiser {
         VkDevice vk = ctx.vk();
         reproject.destroy(vk);
         atrous.destroy(vk);
+        gradient.destroy(vk);
     }
 
     private static long loadModule(VkDevice vk, MemoryStack stack, String name) {

@@ -70,6 +70,7 @@ import dev.comfyfluffy.caustica.rt.pipeline.RtDisplayPipeline;
 import dev.comfyfluffy.caustica.rt.pipeline.RtDofPipeline;
 import dev.comfyfluffy.caustica.rt.pipeline.RtDlssFg;
 import dev.comfyfluffy.caustica.rt.pipeline.RtDlssRr;
+import dev.comfyfluffy.caustica.rt.pipeline.RtDlssSr;
 import dev.comfyfluffy.caustica.rt.pipeline.RtFsrFrameGen;
 import dev.comfyfluffy.caustica.rt.pipeline.RtFsrUpscaler;
 import dev.comfyfluffy.caustica.rt.pipeline.RtXessUpscaler;
@@ -284,6 +285,9 @@ public final class RtComposite {
     // sky cutoff, NRD's IN_VIEWZ), so it is set for both denoisers.
     private static final int FEATURE_VIEWZ = 128;
     private static final int FEATURE_SHARC = 256;
+    // The active NRD denoiser is RELAX: the tracer packs linear radiance + raw hit distance
+    // instead of REBLUR's YCoCg + normalized hit distance. Only ever set together with FEATURE_NRD.
+    private static final int FEATURE_NRD_RELAX = 512;
 
     // ---- Dimension ids (WorldPush.dimension). Mirrors world_common.slang's DIMENSION_* constants.
     // The Overworld runs the atmosphere march and the sun/moon cycle; the Nether and the End have no
@@ -332,6 +336,12 @@ public final class RtComposite {
                 // burn an extra shadow ray plus bandwidth for buffers nothing reads.
                 flags |= FEATURE_NRD;
                 flags |= FEATURE_VIEWZ;
+                if (RtNrdDenoiser.isRelax()) {
+                    // RELAX packs linear radiance + raw hit distance where REBLUR packs YCoCg +
+                    // normalized hit distance; the tracer must write the encoding the active
+                    // denoiser expects (see world.rgen.slang).
+                    flags |= FEATURE_NRD_RELAX;
+                }
             } else if (CausticaConfig.Rt.Denoise.ENABLED.value() && debugView() == 0) {
                 // SVGF needs gViewZ for its geometry-validated reprojection and its sky cutoff.
                 flags |= FEATURE_VIEWZ;
@@ -462,10 +472,16 @@ public final class RtComposite {
      * Debug-view ids that inspect SVGF's internal state instead of the tracer's guides. Unlike the
      * guide views these leave the denoiser enabled, because the point is to see what it is doing.
      * 10 = history length (black means the reprojection threw the history away), 11 = variance,
-     * 12 = luminance sigma (bright means the bilateral has degenerated into a box blur).
+     * 12 = luminance sigma (bright means the bilateral has degenerated into a box blur),
+     * 14 = A-SVGF adaptation (bright means the temporal gradient released history there, i.e. the
+     * lighting genuinely changed; a uniform bright frame means it is reading noise as change).
+     * The range is kept CONTIGUOUS on purpose: it also gates whether the tracer's own guide debug
+     * views are suppressed, so a hole in the middle would let id 13 (the SHaRC overlay, see
+     * sharc.slang) disable the denoiser and lose the overlay it was asking for. Only the à-trous
+     * shader acts on 14, so 13 passing through the range is harmless.
      */
     private static final int SVGF_DEBUG_FIRST = 10;
-    private static final int SVGF_DEBUG_LAST = 12;
+    private static final int SVGF_DEBUG_LAST = 14;
     // Luminance edge-stop, in estimated standard deviations. This is the knob that decides how much
     // the wavelet trusts its own variance estimate: 4 sigma filters the 1-spp signal hard while
     // still stopping at genuine luminance edges (SVGF's paper uses 4 as well).
@@ -725,6 +741,13 @@ public final class RtComposite {
     private RtImage svgfFilterPong;
     private RtImage svgfPrevViewZ;
     private RtImage svgfPrevNormal;
+    // A-SVGF gradient state: the tile statistic the reprojection consumes, and the PREVIOUS frame's
+    // raw (undenoised) trace it is measured against. The raw ping-pong is required rather than
+    // optional — comparing against the accumulated history would fold the filter's own output back
+    // into its guidance (see svgf_gradient.comp).
+    private RtImage svgfGradient;
+    private RtImage svgfRawTracePing;
+    private RtImage svgfRawTracePong;
     private boolean svgfWriteToPing;
     private boolean svgfHasHistory;
     private double svgfPrevCamX;
@@ -775,6 +798,10 @@ public final class RtComposite {
     // XeSS shares that same slot (never with RR nor FSR): same keying contract.
     private boolean renderSizeXessEnabled;
     private int renderSizeXessQuality = Integer.MIN_VALUE;
+    // DLSS-SR occupies the upscale slot when the ray-reconstruction selector names SVGF or NRD:
+    // same keying contract, and its quality mode sizes the trace exactly like RR's does.
+    private boolean renderSizeDlssSrEnabled;
+    private int renderSizeDlssSrQuality = Integer.MIN_VALUE;
 
     // Motion-vector reprojection state: the previous frame's camera-relative view-projection and
     // camera position, read into the push constant each frame then advanced at frame end.
@@ -1295,6 +1322,18 @@ public final class RtComposite {
             svgfPrevNormal.destroy();
             svgfPrevNormal = null;
         }
+        if (svgfGradient != null) {
+            svgfGradient.destroy();
+            svgfGradient = null;
+        }
+        if (svgfRawTracePing != null) {
+            svgfRawTracePing.destroy();
+            svgfRawTracePing = null;
+        }
+        if (svgfRawTracePong != null) {
+            svgfRawTracePong.destroy();
+            svgfRawTracePong = null;
+        }
         if (nrdDiffOut != null) {
             nrdDiffOut.destroy();
             nrdDiffOut = null;
@@ -1388,16 +1427,21 @@ public final class RtComposite {
     private void ensureOutput(RtContext ctx, int width, int height) {
         boolean rrEnabled = RtDlssRr.enabled();
         int rrQuality = rrEnabled ? RtDlssRr.quality() : Integer.MIN_VALUE;
-        // FSR 3 only takes the upscale slot when RR is not running (the selector makes them
-        // mutually exclusive, but a hand-edited config could enable both — RR wins).
-        boolean fsrEnabled = !rrEnabled && RtFsrUpscaler.enabled();
+        // DLSS-SR takes the upscale slot when the DLSS path runs but ray reconstruction is NOT
+        // DLSS-RR (the selector names SVGF or NRD, which denoise at render res first). It is
+        // mutually exclusive with RR by construction, and wins over FSR/XeSS the same way RR does.
+        boolean dlssSrEnabled = RtDlssSr.enabled();
+        int dlssSrQuality = dlssSrEnabled ? RtDlssSr.quality() : Integer.MIN_VALUE;
+        // FSR 3 only takes the upscale slot when neither DLSS backend is running (the selector
+        // makes them mutually exclusive, but a hand-edited config could enable both — DLSS wins).
+        boolean fsrEnabled = !rrEnabled && !dlssSrEnabled && RtFsrUpscaler.enabled();
         int fsrQuality = fsrEnabled ? RtFsrUpscaler.quality() : Integer.MIN_VALUE;
-        // XeSS shares the slot under the same rules; if a hand-edit stacks them, RR > FSR > XeSS.
-        boolean xessEnabled = !rrEnabled && !fsrEnabled && RtXessUpscaler.enabled();
+        // XeSS shares the slot under the same rules; if a hand-edit stacks them, DLSS > FSR > XeSS.
+        boolean xessEnabled = !rrEnabled && !dlssSrEnabled && !fsrEnabled && RtXessUpscaler.enabled();
         int xessQuality = xessEnabled ? RtXessUpscaler.quality() : Integer.MIN_VALUE;
         // The denoise slot. Exactly one denoiser ever runs on a frame, in this order:
         //   DLSS-RR (denoises internally, so nothing else may touch the image)
-        //   > NRD/REBLUR (opt-in, needs bundled natives)
+        //   > NRD (REBLUR or RELAX; opt-in, needs bundled natives)
         //   > SVGF (the renderer's own; the default for every non-DLSS path).
         // Two temporal denoisers in series would fight over the same history and reintroduce exactly
         // the ghosting this rework removes, so they are strictly exclusive.
@@ -1411,6 +1455,7 @@ public final class RtComposite {
                 && displayImage != null && hdrDisplayImage != null && rrOutput != null && exposure.ready()
                 && displayW == width && displayH == height
                 && renderSizeRrEnabled == rrEnabled && renderSizeRrQuality == rrQuality
+                && renderSizeDlssSrEnabled == dlssSrEnabled && renderSizeDlssSrQuality == dlssSrQuality
                 && renderSizeFsrEnabled == fsrEnabled && renderSizeFsrQuality == fsrQuality
                 && renderSizeXessEnabled == xessEnabled && renderSizeXessQuality == xessQuality
                 && renderSizeSvgfEnabled == svgfEnabled
@@ -1423,6 +1468,8 @@ public final class RtComposite {
         // ensureFeature again in that state, so the RR feature (and its history buffers) would stay
         // allocated for the rest of the session; the device is idle right now, so release it here.
         RtDlssRr.INSTANCE.releaseIfDisabled();
+        // Same reasoning for the DLSS-SR feature when the selector switches back to DLSS-RR.
+        RtDlssSr.INSTANCE.releaseIfDisabled();
         // Same reasoning for the FSR context (its history textures) when the upscaler switches away.
         RtFsrUpscaler.INSTANCE.releaseIfDisabled();
         // And for the XeSS upscaler (pipelines + history) on the same switch-away event.
@@ -1455,6 +1502,8 @@ public final class RtComposite {
         int[] optimal;
         if (rrEnabled) {
             optimal = RtDlssRr.INSTANCE.queryOptimalRenderSize(width, height);
+        } else if (dlssSrEnabled) {
+            optimal = RtDlssSr.INSTANCE.queryOptimalRenderSize(width, height);
         } else if (fsrEnabled) {
             optimal = RtFsrUpscaler.INSTANCE.queryRenderSize(width, height);
         } else if (xessEnabled) {
@@ -1466,6 +1515,8 @@ public final class RtComposite {
         renderH = optimal != null ? optimal[1] : height;
         renderSizeRrEnabled = rrEnabled;
         renderSizeRrQuality = rrQuality;
+        renderSizeDlssSrEnabled = dlssSrEnabled;
+        renderSizeDlssSrQuality = dlssSrQuality;
         renderSizeFsrEnabled = fsrEnabled;
         renderSizeFsrQuality = fsrQuality;
         renderSizeXessEnabled = xessEnabled;
@@ -1515,6 +1566,11 @@ public final class RtComposite {
             svgfFilterPong = ctx.createStorageImage(renderW, renderH, VK10.VK_FORMAT_R16G16B16A16_SFLOAT, "svgf filter pong " + renderW + "x" + renderH);
             svgfPrevViewZ = ctx.createStorageImage(renderW, renderH, VK10.VK_FORMAT_R32_SFLOAT, "svgf prev viewZ " + renderW + "x" + renderH);
             svgfPrevNormal = ctx.createStorageImage(renderW, renderH, VK10.VK_FORMAT_R16G16B16A16_SFLOAT, "svgf prev normal " + renderW + "x" + renderH);
+            // A-SVGF temporal gradient: one entry per GRADIENT_TILE x GRADIENT_TILE tile, stored at
+            // render resolution so the reprojection can read it at any pixel of the tile.
+            svgfGradient = ctx.createStorageImage(renderW, renderH, VK10.VK_FORMAT_R16G16B16A16_SFLOAT, "svgf gradient " + renderW + "x" + renderH);
+            svgfRawTracePing = ctx.createStorageImage(renderW, renderH, VK10.VK_FORMAT_R16G16B16A16_SFLOAT, "svgf raw trace ping " + renderW + "x" + renderH);
+            svgfRawTracePong = ctx.createStorageImage(renderW, renderH, VK10.VK_FORMAT_R16G16B16A16_SFLOAT, "svgf raw trace pong " + renderW + "x" + renderH);
             if (svgfDenoiser == null) {
                 svgfDenoiser = RtSvgfDenoiser.create(ctx);
                 CausticaMod.LOGGER.info("SVGF denoiser active ({} a-trous passes, {} frame window)",
@@ -1608,12 +1664,14 @@ public final class RtComposite {
         RtTerrain terrain = RtTerrain.currentOrNull();
         try (MemoryStack stack = MemoryStack.stackPush(); RtDebugLabels.Scope frameLabel = RtDebugLabels.scope(ctx, cmd, "composite frame")) {
             // The active upscaler drives the frame: trace + jitter at render res, then DLSS-RR
-            // (denoise+upscale) or FSR 3 (upscale only) brings it to display res. They occupy one
-            // slot — RR wins if both are somehow on — and jitter is suppressed for the no-upscaler
-            // reference and for the debug guide views (raw inspection).
+            // (denoise+upscale), DLSS-SR (upscale only, behind SVGF/NRD) or FSR 3 (upscale only)
+            // brings it to display res. They occupy one slot — DLSS wins if several are somehow
+            // on — and jitter is suppressed for the no-upscaler reference and for the debug guide
+            // views (raw inspection).
             boolean rrPath = RtDlssRr.enabled() && debugView == 0;
-            boolean fsrPath = !rrPath && RtFsrUpscaler.enabled() && debugView == 0;
-            boolean xessPath = !rrPath && !fsrPath && RtXessUpscaler.enabled() && debugView == 0;
+            boolean dlssSrPath = !rrPath && RtDlssSr.enabled() && debugView == 0;
+            boolean fsrPath = !rrPath && !dlssSrPath && RtFsrUpscaler.enabled() && debugView == 0;
+            boolean xessPath = !rrPath && !dlssSrPath && !fsrPath && RtXessUpscaler.enabled() && debugView == 0;
             // The denoise slot, in the same priority order ensureOutput allocated for:
             // RR > NRD > SVGF. Both denoisers want a jittered trace — their temporal stage
             // integrates the sub-pixel sequence, which is what resolves detail below the pixel grid
@@ -1634,6 +1692,13 @@ public final class RtComposite {
             float jitterY = 0f;
             if (rrPath) {
                 CausticaJitter.INSTANCE.prepare(renderW, renderH, displayW);
+                jitterX = CausticaJitter.INSTANCE.jitterPixelsX() * jitterSignX();
+                jitterY = CausticaJitter.INSTANCE.jitterPixelsY() * jitterSignY();
+            } else if (dlssSrPath) {
+                // DLSS-SR is told the input is converged (zero jitter, like FSR/XeSS below), so the
+                // sequence only feeds the render-res denoiser — which is the FSR phase-count rule,
+                // the same one the no-upscaler denoiser case below uses.
+                CausticaJitter.INSTANCE.prepareFsr(renderW, displayW);
                 jitterX = CausticaJitter.INSTANCE.jitterPixelsX() * jitterSignX();
                 jitterY = CausticaJitter.INSTANCE.jitterPixelsY() * jitterSignY();
             } else if (fsrPath) {
@@ -1980,10 +2045,10 @@ public final class RtComposite {
             // svgfHasHistory below, and a terrain rebase, which RtNrdDenoiser compensates against
             // the anchor. Resolution changes reallocate, which takes the same path.
 
-            // ---- NRD / REBLUR (opt-in). Consumes the tracer's demodulated per-lobe signals plus
-            // the guides at render res; the combine pass re-modulates and sums the denoised pair
-            // into nrdCombined. When it runs it owns the denoise slot: SVGF steps aside below,
-            // because two temporal denoisers in series fight over the same history.
+            // ---- NRD (REBLUR or RELAX; opt-in). Consumes the tracer's demodulated per-lobe
+            // signals plus the guides at render res; the combine pass re-modulates and sums the
+            // denoised pair into nrdCombined. When it runs it owns the denoise slot: SVGF steps
+            // aside below, because two temporal denoisers in series fight over the same history.
             boolean nrdDone = false;
             RtImage denoisedSource = null;
             if (nrdPath && gViewZ != null && nrdDiffOut != null) {
@@ -2001,19 +2066,20 @@ public final class RtComposite {
                             frameProjection, frameViewRotation,
                             camX, camY, camZ,
                             terrain.blockX, terrain.blockY, terrain.blockZ,
-                            jitterX, jitterY, (int) frameCounter, false);
+                            jitterX, jitterY, false);
                 }
                 if (nrdDone) {
                     VulkanCommandEncoder.memoryBarrier(cmd, stack); // NRD outputs visible to the combine
                     try (RtFrameStats.Scope ignoredStats = RtFrameStats.FRAME.stage("frame.nrdCombine")) {
-                        nrdCombinePipeline.dispatch(cmd, renderW, renderH, NRD_DENOISING_RANGE);
+                        nrdCombinePipeline.dispatch(cmd, renderW, renderH, NRD_DENOISING_RANGE,
+                                RtNrdDenoiser.isRelax());
                     }
                     VulkanCommandEncoder.memoryBarrier(cmd, stack); // combine output visible downstream
                     denoisedSource = nrdCombined;
                 }
             }
 
-            // Validation mode: REBLUR's 16-viewport diagnostic overlay replaces the image (set the
+            // Validation mode: NRD's 16-viewport diagnostic overlay replaces the image (set the
             // upscaler to Off for a crisp readout). Nothing downstream may filter the overlay.
             boolean nrdValidationOn = nrdDone && CausticaConfig.Rt.Nrd.VALIDATION.value();
             if (nrdValidationOn) {
@@ -2041,6 +2107,9 @@ public final class RtComposite {
             boolean svgfRan = false;
             if (svgfPath && !nrdDone && !nrdValidationOn
                     && svgfDenoiser != null && svgfHistoryPing != null && gViewZ != null) {
+                // The untouched trace, kept before the cascade reassigns upscaleSource: this frame's
+                // gradient compared against it, and next frame's compares against the copy below.
+                RtImage svgfRawTrace = upscaleSource;
                 int svgfParity = svgfWriteToPing ? 0 : 1;
                 RtImage historyIn = svgfWriteToPing ? svgfHistoryPong : svgfHistoryPing;
                 RtImage historyOut = svgfWriteToPing ? svgfHistoryPing : svgfHistoryPong;
@@ -2088,14 +2157,30 @@ public final class RtComposite {
                 // FG amplifies residual per-frame sky noise into visible flicker (it interpolates
                 // between presented frames), so the sky smooths harder while it is presenting.
                 int extraSkySmooth = RtFramePresenter.INSTANCE.isActive() ? 1 : 0;
+                // Previous frame's RAW trace, for the A-SVGF gradient. While there is no history
+                // (first frame after a realloc, or a toggle) there is nothing to compare against, so
+                // the ping-pong pair is seeded with this frame's trace below and the gradient is told
+                // to report "no information".
+                RtImage rawPrev = svgfWriteToPing ? svgfRawTracePong : svgfRawTracePing;
+                RtImage rawOut = svgfWriteToPing ? svgfRawTracePing : svgfRawTracePong;
                 VulkanCommandEncoder.memoryBarrier(cmd, stack); // trace + guides visible to the denoiser
                 try (RtDebugLabels.Scope ignored = RtDebugLabels.scope(ctx, cmd, "SVGF denoise");
                      RtFrameStats.Scope ignoredStats = RtFrameStats.FRAME.stage("frame.svgf")) {
+                    // A-SVGF stage 0: measure how much this tile's ILLUMINATION changed since last
+                    // frame. This is what the reprojection below turns into an adaptive blend rate —
+                    // plain SVGF has no way to know its history went stale, which is why it drags a
+                    // moved shadow behind the geometry for tens of frames.
+                    svgfDenoiser.gradient(cmd, renderW, renderH, svgfParity,
+                            upscaleSource.view, rawPrev.view, svgfGradient.view,
+                            gAlbedo.view, gViewZ.view, svgfReset);
+                    VulkanCommandEncoder.memoryBarrier(cmd, stack); // gradient visible to the reprojection
+
                     svgfDenoiser.reproject(cmd, renderW, renderH, svgfParity,
                             upscaleSource.view, historyIn.view, momentsIn.view,
                             historyOut.view, momentsOut.view, svgfFilterPing.view,
                             gMotion.view, gViewZ.view, gNormal.view,
                             svgfPrevViewZ.view, svgfPrevNormal.view, gAlbedo.view,
+                            svgfGradient.view,
                             svgfReset, SVGF_MAX_FRAMES, svgfCamForwardDelta);
                     VulkanCommandEncoder.memoryBarrier(cmd, stack); // reprojection visible to the wavelet
 
@@ -2138,6 +2223,10 @@ public final class RtComposite {
                     // accept history under motion instead of clamping colour and smearing.
                     copyImage(cmd, stack, gViewZ, svgfPrevViewZ);
                     copyImage(cmd, stack, gNormal, svgfPrevNormal);
+                    // ...and the raw trace, which next frame's A-SVGF gradient measures this frame's
+                    // lighting against. Deliberately the UNFILTERED trace: feeding the denoised result
+                    // back here would make the gradient measure the filter against itself.
+                    copyImage(cmd, stack, svgfRawTrace, rawOut);
                     VulkanCommandEncoder.memoryBarrier(cmd, stack);
                 }
                 svgfWriteToPing = !svgfWriteToPing;
@@ -2148,6 +2237,18 @@ public final class RtComposite {
                 svgfPrevCamY = camY;
                 svgfPrevCamZ = camZ;
             }
+
+            // DLSS-SR upscale (the ray-reconstruction selector named SVGF or NRD): the denoiser
+            // above already integrated the jitter sequence into upscaleSource, so SR is told the
+            // input is converged — zero jitter, exactly like the FSR/XeSS paths below.
+            if (!rrDone && dlssSrPath && RtDlssSr.INSTANCE.ensureFeature(cmd.address(), renderW, renderH, displayW, displayH)) {
+                try (RtDebugLabels.Scope ignored = RtDebugLabels.scope(ctx, cmd, "DLSS-SR evaluate");
+                     RtFrameStats.Scope ignoredStats = RtFrameStats.FRAME.stage("frame.dlssSr")) {
+                    rrDone = RtDlssSr.INSTANCE.evaluate(cmd.address(), upscaleSource, gDepth, gMotion,
+                            rrOutput, renderW, renderH, displayW, displayH, 0.0f, 0.0f);
+                }
+            }
+
             if (!rrDone && fsrPath && RtFsrUpscaler.INSTANCE.ensureFeature(displayW, displayH)) {
                 try (RtDebugLabels.Scope ignored = RtDebugLabels.scope(ctx, cmd, "FSR upscale");
                      RtFrameStats.Scope ignoredStats = RtFrameStats.FRAME.stage("frame.fsr")) {
@@ -2983,6 +3084,8 @@ public final class RtComposite {
         // have been turned off after a feature was already created. destroy() is a no-op when nothing
         // was ever allocated, so asking it every time is what guarantees the feature is released.
         RtDlssRr.INSTANCE.destroy();
+        // Same contract for the DLSS-SR feature (no-op when it was never created).
+        RtDlssSr.INSTANCE.destroy();
         // Same contract for the FSR context (no-op when it was never created).
         RtFsrUpscaler.INSTANCE.destroy();
         // And the XeSS upscaler (no-op when it was never initialized).

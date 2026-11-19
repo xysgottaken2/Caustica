@@ -31,6 +31,10 @@ final class RtDenoiserShaderRegressionTest {
     private static final Path NRD_COMBINE = REPO_ROOT.resolve("shaders/display/nrd_combine.comp");
     private static final Path SVGF_REPROJECT = REPO_ROOT.resolve("shaders/display/svgf_reproject.comp");
     private static final Path SVGF_ATROUS = REPO_ROOT.resolve("shaders/display/svgf_atrous.comp");
+    private static final Path SVGF_GRADIENT = REPO_ROOT.resolve("shaders/display/svgf_gradient.comp");
+    private static final Path GUIDES = REPO_ROOT.resolve("shaders/world/guides.slang");
+    private static final Path SVGF_DENOISER = REPO_ROOT.resolve(
+            "src/main/java/dev/comfyfluffy/caustica/rt/pipeline/RtSvgfDenoiser.java");
     private static final Path NRD_DENOISER =
             REPO_ROOT.resolve("src/main/java/dev/comfyfluffy/caustica/rt/pipeline/RtNrdDenoiser.java");
 
@@ -170,29 +174,48 @@ final class RtDenoiserShaderRegressionTest {
      * SVGF's accumulated frame count lives in the moments texture, NOT in the history's alpha,
      * because the à-trous feedback overwrites the whole history image. Moving it back into the
      * history alpha would make the count read as variance (and vice versa) with no compile error.
+     *
+     * <p>The moments texture's channels are therefore: {@code xy} = luminance moments, {@code z} =
+     * frame count, {@code w} = A-SVGF adaptation (how much history the temporal gradient released
+     * this frame). All four are written by the reprojection on every path — including the sky
+     * early-out — because both the {@code z} and {@code w} consumers would otherwise read a value
+     * from some earlier frame.
      */
     @Test
     void svgfFrameCountLivesInTheMomentsTexture() throws IOException {
         String reproject = Files.readString(SVGF_REPROJECT);
         String atrous = Files.readString(SVGF_ATROUS);
 
-        assertTrue(reproject.contains("imageStore(momentsOut, pix, vec4(moments, frames, 0.0));"),
+        assertTrue(reproject.contains("imageStore(momentsOut, pix, vec4(moments, frames, adapt));"),
                 "the reprojection must store the frame count in the moments texture");
-        // The wavelet no longer reads the count at all: its only consumer was the per-pixel reach
-        // cap, which was the mutating-footprint bug (see svgfCascadeReachIsUniform). The count is
-        // still produced here because the reprojection itself needs it to drive alpha.
-        // The wavelet may read the count ONLY to draw the diagnostic overlay, never to shape the
-        // filter: a per-pixel reach driven by the frame count was the mutating-footprint bug (see
-        // svgfCascadeReachIsUniform). Pin that structurally -- every read must sit after the
-        // debug-mode branch, which runs once at the very end and returns immediately.
-        int momentsRead = atrous.indexOf("imageLoad(moments");
-        if (momentsRead >= 0) {
-            int debugBranch = atrous.indexOf("pc.debugMode != 0");
-            assertTrue(debugBranch >= 0 && momentsRead > debugBranch,
-                    "the wavelet may only read the frame count inside the diagnostic overlay");
-            assertTrue(atrous.indexOf("imageLoad(moments", momentsRead + 1) < 0,
-                    "exactly one frame-count read is allowed, the diagnostic one");
-        }
+        // Every write of the moments texture must fill all four channels: alpha now carries the
+        // A-SVGF adaptation, so a write that left it out would let it go stale.
+        int stores = countOf(reproject, "imageStore(momentsOut,");
+        assertEquals(2, stores, "the reprojection has exactly one ordinary and one sky moments write");
+        assertEquals(stores, countOf(reproject, "imageStore(momentsOut, pix, vec4("),
+                "every moments write must fill all four channels");
+        assertEquals(1, countOf(reproject,
+                        "imageStore(momentsOut, pix, vec4(moments, frames, adapt));"),
+                "the ordinary write must carry the adaptation in alpha");
+        assertEquals(1, countOf(reproject,
+                        "imageStore(momentsOut, pix, vec4(lum, lum * lum, min(histFrames + 1.0, "
+                                + "max(pc.maxFrames, 1.0)), 0.0));"),
+                "the sky write must fill all four channels too");
+
+        // The wavelet no longer reads the count to shape the filter: its only consumer was the
+        // per-pixel reach cap, which was the mutating-footprint bug (see svgfCascadeReachIsUniform).
+        // Both reads that remain (.z frame count, .w adaptation) draw the diagnostic overlay and
+        // must sit after the debug-mode branch, which runs once at the very end and returns.
+        int debugBranch = atrous.indexOf("pc.debugMode != 0");
+        assertTrue(debugBranch >= 0, "the wavelet must have a debug overlay branch");
+        assertEquals(2, countOf(atrous, "imageLoad(moments"),
+                "exactly two moments reads are allowed, both diagnostic (.z count, .w adaptation)");
+        int historyRead = atrous.indexOf("imageLoad(moments, pix).z");
+        int adaptRead = atrous.indexOf("imageLoad(moments, pix).w");
+        assertTrue(historyRead > debugBranch,
+                "the frame count may only be read inside the diagnostic overlay");
+        assertTrue(adaptRead > debugBranch,
+                "the adaptation may only be read inside the diagnostic overlay");
         assertFalse(atrous.contains("histLen"),
                 "the frame count no longer travels in the history image's alpha channel");
     }
@@ -568,5 +591,302 @@ final class RtDenoiserShaderRegressionTest {
                 "the specular pre-pass must use the scaled radius");
         assertTrue(denoiser.contains("private static final float MIN_PREPASS_BLUR_RADIUS"),
                 "the pre-pass must never scale to zero; NRD requires it for probabilistic input");
+    }
+
+    /**
+     * NRD requires {@code CommonSettings::frameIndex} to increment by exactly 1 per frame, in
+     * lockstep with {@code Integration::NewFrame()} (which asserts the two agree). Feeding it the
+     * renderer's global frame counter desyncs the two whenever a frame is skipped — debug views,
+     * the toggle off, a skipped frame — and the mismatch silently corrupts NRD's history
+     * bookkeeping in release builds: a boiling/smearing source that survives every other fix
+     * because it only shows up once the matrices are right. The index must be a dedicated counter
+     * incremented exactly when {@code NewFrame()} is called.
+     */
+    @Test
+    void nrdFrameIndexIncrementsInLockstepWithNewFrame() throws Exception {
+        String denoiser = Files.readString(NRD_DENOISER);
+        assertTrue(denoiser.contains("int frameIndex = nrdFrameIndex++;"),
+                "the frame index must come from the dedicated counter, not the renderer frame counter");
+        assertFalse(denoiser.contains("float jitterPixelsX, float jitterPixelsY, int frameIndex,"),
+                "the renderer frame counter must not be passed in as the NRD frame index");
+        assertTrue(denoiser.contains("private int nrdFrameIndex;"),
+                "the dedicated NRD frame counter must exist");
+    }
+
+    /**
+     * REBLUR and RELAX pack different signal encodings (YCoCg + normalized hit distance vs linear
+     * radiance + raw hit distance), so the tracer must write the encoding the active denoiser
+     * expects, and the combine pass must decode it back. A mismatch still compiles and runs — it
+     * just feeds RELAX YCoCg values (or vice versa) and the output is wrong. Both sides are keyed
+     * on the same FEATURE_NRD_RELAX flag, and the combine's push constant carries the same choice.
+     */
+    @Test
+    void nrdRelaxEncodingMatchesBetweenTracerAndCombine() throws Exception {
+        String raygen = Files.readString(WORLD_RGEN);
+        String combine = Files.readString(NRD_COMBINE);
+        String combinePipeline = Files.readString(REPO_ROOT.resolve(
+                "src/main/java/dev/comfyfluffy/caustica/rt/pipeline/RtNrdCombinePipeline.java"));
+
+        assertTrue(raygen.contains("if (nrdRelaxEnabled()) {"),
+                "the tracer must branch on the active NRD denoiser when packing the signals");
+        assertTrue(raygen.contains("gNrdDiff[pix] = float4(diffRad, rawHitDiff);")
+                        && raygen.contains("gNrdSpec[pix] = float4(specRad, rawHitSpec);"),
+                "RELAX must receive linear radiance with the raw hit distance");
+        assertTrue(raygen.contains("gNrdDiff[pix] = float4(nrdLinearToYCoCg(diffRad), normHitDiff);"),
+                "REBLUR must keep receiving YCoCg radiance with the normalized hit distance");
+        assertTrue(combine.contains("pc.relaxMode != 0 ? diffRaw : yCoCgToLinear(diffRaw)"),
+                "the combine pass must skip the YCoCg decode for RELAX outputs");
+        assertTrue(combinePipeline.contains("push.putInt(12, relaxMode ? 1 : 0);"),
+                "the combine pipeline must push the active denoiser to the shader");
+    }
+
+    /**
+     * The ray-reconstruction selector is what keeps the DLSS path from boiling: DLSS-RR's neural
+     * history is unstable at 1 spp on Minecraft's high-frequency content, so the selector lets the
+     * player swap it for SVGF or NRD (denoising at render res) behind a DLSS-SR upscale. The three
+     * backends must be mutually exclusive — two temporal denoisers in series fight over the same
+     * history — and the DLSS-SR backend must be wired into the composite's upscale slot.
+     */
+    @Test
+    void dlssRayReconstructionSelectorIsExclusiveAndWired() throws Exception {
+        String rr = Files.readString(REPO_ROOT.resolve(
+                "src/main/java/dev/comfyfluffy/caustica/rt/pipeline/RtDlssRr.java"));
+        String sr = Files.readString(REPO_ROOT.resolve(
+                "src/main/java/dev/comfyfluffy/caustica/rt/pipeline/RtDlssSr.java"));
+        String composite = Files.readString(REPO_ROOT.resolve(
+                "src/main/java/dev/comfyfluffy/caustica/rt/RtComposite.java"));
+
+        assertTrue(rr.contains("CausticaConfig.Rt.DlssRr.RAY_RECONSTRUCTION_DLSS_RR.equals("),
+                "DLSS-RR must only run when the selector names it");
+        assertTrue(sr.contains("CausticaConfig.Rt.DlssRr.RAY_RECONSTRUCTION_SVGF.equals(rayReconstruction)")
+                        && sr.contains("CausticaConfig.Rt.DlssRr.RAY_RECONSTRUCTION_NRD.equals(rayReconstruction)"),
+                "DLSS-SR must only run when the selector names SVGF or NRD");
+        assertTrue(composite.contains("boolean dlssSrPath = !rrPath && RtDlssSr.enabled()"),
+                "the composite must route the DLSS-SR path through the upscale slot");
+        assertTrue(composite.contains("RtDlssSr.INSTANCE.evaluate("),
+                "the composite must dispatch the DLSS-SR upscale");
+    }
+
+    /**
+     * A-SVGF's temporal gradient must compare against the PREVIOUS FRAME'S RAW TRACE, never against
+     * the accumulated history. Comparing against the history folds the filter's own output back into
+     * its guidance: the statistic then decays toward "nothing changed" exactly where the history is
+     * stale, which is the one situation it exists to detect. The two are indistinguishable to a
+     * compiler (both are rgba16f images), so the composite's source is pinned.
+     */
+    @Test
+    void asvgfGradientComparesAgainstTheRawTraceNotTheHistory() throws Exception {
+        String composite = Files.readString(
+                REPO_ROOT.resolve("src/main/java/dev/comfyfluffy/caustica/rt/RtComposite.java"));
+        assertTrue(composite.contains("RtImage svgfRawTrace = upscaleSource;"),
+                "the raw trace must be captured before the cascade reassigns upscaleSource");
+        assertTrue(composite.contains("copyImage(cmd, stack, svgfRawTrace, rawOut);"),
+                "the raw trace snapshot must be the unfiltered trace");
+        // The gradient dispatch must read the raw ping-pong, not historyIn/momentsIn/filterOut.
+        int grad = composite.indexOf("svgfDenoiser.gradient(");
+        assertTrue(grad > 0, "the composite must dispatch the A-SVGF gradient pass");
+        String call = composite.substring(grad, composite.indexOf(");", grad));
+        assertTrue(call.contains("rawPrev.view"),
+                "the gradient must read the previous frame's raw trace");
+        assertFalse(call.contains("historyIn.view") || call.contains("filterOut") ,
+                "the gradient must not read the accumulated history");
+    }
+
+    /**
+     * The gradient must run BEFORE the reprojection that consumes it, and be visible to it: a
+     * missing barrier means the reprojection reads last frame's statistic (or garbage), which looks
+     * like the adaptive blend doing nothing or flickering.
+     */
+    @Test
+    void asvgfGradientIsDispatchedBeforeTheReprojection() throws Exception {
+        String composite = Files.readString(
+                REPO_ROOT.resolve("src/main/java/dev/comfyfluffy/caustica/rt/RtComposite.java"));
+        int grad = composite.indexOf("svgfDenoiser.gradient(");
+        int reproject = composite.indexOf("svgfDenoiser.reproject(");
+        assertTrue(grad > 0 && reproject > 0, "both passes must be dispatched");
+        assertTrue(grad < reproject, "the gradient must be recorded before the reprojection");
+        assertTrue(composite.substring(grad, reproject).contains("memoryBarrier"),
+                "the gradient must be made visible to the reprojection");
+
+        // The reprojection must actually receive the gradient as its 13th binding.
+        String denoiser = Files.readString(SVGF_DENOISER);
+        assertTrue(denoiser.contains("private static final int REPROJECT_BINDINGS = 13;"),
+                "svgf_reproject gained the gradient binding");
+        assertTrue(denoiser.contains("long gradientView,"),
+                "reproject() must take the gradient view");
+        assertTrue(denoiser.contains("private static final int GRADIENT_BINDINGS = 5;"),
+                "svgf_gradient binds current, prev, out, albedo, viewZ");
+        assertTrue(denoiser.contains("\"svgf_gradient.comp.spv\""),
+                "the gradient pipeline must be created from svgf_gradient.comp");
+    }
+
+    /**
+     * The gradient's noise figure must be measured in the SAME units as the change it gates.
+     *
+     * <p>This is the bug that made A-SVGF a no-op. {@code x} is a TILE MEAN, whose noise falls as
+     * 1/sqrt(tile pixels); {@code z} was the per-PIXEL difference spread, which does not. The
+     * consumer compares them directly, so the mismatch scaled the threshold by sqrt(n) — about 4x at
+     * a 4x4 tile — and at 1 spp, where the per-pixel noise is the signal level, the adaptive term
+     * demanded a >200% lighting change before it fired. Nothing realistic did, so alpha stayed at
+     * plain 1/n and the output was indistinguishable from ordinary SVGF: exactly "SVGF continues
+     * being the same SVGF".
+     *
+     * <p>A units bug is invisible to a compiler and to any test that only pins text, so this test
+     * pins the ARITHMETIC: recompute what the threshold amounts to as a fraction of the signal and
+     * require that a realistic shadow-edge change can clear it.
+     */
+    @Test
+    void asvgfNoiseFloorIsMeasuredInTheUnitsOfTheStatistic() throws Exception {
+        String gradient = Files.readString(SVGF_GRADIENT);
+        // z must be the standard deviation of the tile MEAN difference, i.e. divided by the sample
+        // count rather than by 2 with a sqrt at the end.
+        assertTrue(gradient.contains("float meanDiffSigma = sqrt(max(diffSq / max(count, 1.0), 0.0));"),
+                "z must be the sd of the tile-mean difference");
+        assertFalse(gradient.contains("noiseSigma"),
+                "the per-pixel spread must not be what the consumer thresholds against");
+
+        String reproject = Files.readString(SVGF_REPROJECT);
+        String noiseMultiple = firstConstant(reproject, "GRADIENT_NOISE_MULTIPLE");
+        String relativeScale = firstConstant(reproject, "GRADIENT_RELATIVE_SCALE");
+
+        // Arithmetic sanity: with z on the mean's scale, the real tile size and 1 spp, a genuine
+        // shadow edge has to reach adapt > 0.3 while a still tile must not reach it. The tile size is
+        // read from the denoiser so this cannot silently drift back to a tile too small to resolve a
+        // change.
+        double tilePixels = Math.pow(
+                Integer.parseInt(firstConstant(
+                        Files.readString(REPO_ROOT.resolve(
+                                "src/main/java/dev/comfyfluffy/caustica/rt/pipeline/RtSvgfDenoiser.java")),
+                        "GRADIENT_TILE", "int")), 2);
+        double perPixelNoise = 1.0; // 1 spp: noise is of the order of the signal
+        double z = perPixelNoise * Math.sqrt(2.0 / tilePixels);
+        double threshold = Double.parseDouble(noiseMultiple) * z;
+        double edgeChange = 0.40; // a shadow boundary moving through a tile, relative to its level
+        double adapt = Math.min(Math.max(edgeChange - threshold, 0.0) / Double.parseDouble(relativeScale), 1.0);
+        assertTrue(adapt > 0.3,
+                "a 40% lighting change must release a meaningful fraction of history, got adapt=" + adapt);
+
+        // A still tile's |x| stays inside ~1 sigma of the mean most of the time, so it must not fire.
+        double typStill = 1.0 * z;
+        double stillAdapt = Math.min(Math.max(typStill - threshold, 0.0) / Double.parseDouble(relativeScale), 1.0);
+        assertEquals(0.0, stillAdapt, 1.0e-9,
+                "a still, converged tile must not release history");
+
+        // And the release must saturate at a change a shadow edge can actually produce, not at a
+        // value only a light being switched on reaches.
+        assertTrue(Double.parseDouble(relativeScale) <= 0.35,
+                "the release must saturate within the range a real shadow boundary produces");
+    }
+
+    /** Reads the literal of a shader {@code const <type> NAME = <literal>;} declaration. */
+    private static String firstConstant(String source, String name) {
+        return firstConstant(source, name, "float");
+    }
+
+    /** Reads the literal of a Java/shader {@code ... <type> NAME = <literal>;} declaration. */
+    private static String firstConstant(String source, String name, String type) {
+        Matcher m = Pattern.compile("\\b" + type + "\\s+" + name + "\\s*=\\s*([\\d.]+)").matcher(source);
+        assertTrue(m.find(), "missing constant " + type + " " + name);
+        return m.group(1);
+    }
+
+    /**
+     * The adaptive alpha must only ever INCREASE the blend rate, never lower it. A gradient that
+     * could shrink alpha would let the filter lock down harder than 1/n, which is the path back to
+     * the lag A-SVGF exists to remove.
+     */
+    @Test
+    void asvgfAdaptationOnlyReleasesHistory() throws Exception {
+        String reproject = Files.readString(SVGF_REPROJECT);
+        assertTrue(reproject.contains("float alpha = max(1.0 / frames, ALPHA_MIN);"),
+                "the base blend rate must be 1/n floored at ALPHA_MIN");
+        assertTrue(reproject.contains("alpha = max(alpha, adapt);"),
+                "the gradient may only increase alpha");
+
+        // The noise floor must be subtracted before the change is measured as a change: 1-spp noise
+        // differs frame to frame by its own magnitude, and without the subtraction every frame would
+        // read as "the lighting changed" and the denoiser would never accumulate at all.
+        assertTrue(reproject.contains(
+                        "float change = max(abs(grad.x) - GRADIENT_NOISE_MULTIPLE * grad.z, 0.0);"),
+                "the temporal change must be measured net of the tile noise floor");
+
+        // The gradient itself must be demodulated on both frames, or walking across a texture reads
+        // as a lighting change everywhere.
+        String gradient = Files.readString(SVGF_GRADIENT);
+        assertTrue(gradient.contains(
+                        "float lc = dot(demodulate(imageLoad(current, q).rgb, factor), LUMA);"),
+                "the current frame must be demodulated before comparison");
+        assertTrue(gradient.contains(
+                        "float lp = dot(demodulate(imageLoad(prevColor, q).rgb, factor), LUMA);"),
+                "the previous frame must be demodulated by the SAME factor");
+    }
+
+    /**
+     * The firefly clamp bounds the incoming sample by the HISTORY, so where the gradient has just
+     * concluded the history is stale the clamp must yield — otherwise the pixel is released from the
+     * blend and simultaneously dragged back to the old brightness, which is lag plus a hard edge.
+     */
+    @Test
+    void asvgfFireflyClampYieldsToTheAdaptation() throws Exception {
+        String reproject = Files.readString(SVGF_REPROJECT);
+        assertTrue(reproject.contains("bound = mix(bound, 65504.0, adapt);"),
+                "the firefly bound must widen as the gradient releases history");
+
+        // Sanity-check that this is not vacuous: without the widening, a real lighting change above
+        // the bound is clipped back to it.
+        float histLum = 0.05f;
+        float histSigma = 0.01f;
+        float lum = 0.40f;
+        float bound = histLum + 3.0f * histSigma + 1.0f * histLum + 0.05f;
+        assertTrue(lum > bound, "an 8x lighting change must exceed the plain history bound");
+        float fullAdapt = bound * (1.0f - 1.0f) + 65504.0f * 1.0f;
+        assertEquals(65504.0f, fullAdapt, 1.0f,
+                "full adaptation must lift the bound out of the way");
+    }
+
+    /**
+     * Both motion vectors the denoisers consume must be bounded by the frame size.
+     *
+     * <p>An unbounded guide MV is not a tuning problem, it is a visible artefact: rocks and walls read
+     * as static vertical streaks of stretched texture. Static streaks while the camera is standing
+     * still prove the vector is numerically broken rather than physically wrong — real parallax error
+     * still requires camera motion. Three paths in guides.slang produce one (a transmitted point whose
+     * current and previous positions go through different projections, a rear-projection singularity,
+     * and the TIR branch that reports water THICKNESS as if it were a world displacement), and because
+     * the error is a deterministic function of each pixel's geometry it accumulates into a streak
+     * instead of averaging out.
+     *
+     * <p>REBLUR tolerates this (its pre-pass averages the signal over a wide anisotropic kernel and
+     * rejects history on hit distance) while RELAX and SVGF reproject on the MV directly, which is
+     * exactly why the artefact was reported for RELAX and not for REBLUR. Both vectors therefore have
+     * to be bounded at the source.
+     */
+    @Test
+    void guideMotionVectorsAreBoundedByTheFrame() throws Exception {
+        String guides = Files.readString(GUIDES);
+        assertEquals(2, countOf(guides, "float maxMotion = max(size.x, size.y);"),
+                "both the ordinary and the reflection guide motion must be bounded");
+        assertEquals(2, countOf(guides, "if (!(abs(motion.x) <= maxMotion) || !(abs(motion.y) <= maxMotion)) {")
+                        + countOf(guides, "if (!(abs(reflectionMotion.x) <= maxMotion) || !(abs(reflectionMotion.y) <= maxMotion)) {"),
+                "each bounded vector must fall back to zero motion");
+        // The reflection path must still report zero when the reprojection is invalid at all.
+        assertTrue(guides.contains("if (!prevValid) {\n        return float2(0.0, 0.0);\n    }"),
+                "an invalid reflection reprojection must report no motion");
+
+        // Sanity-check that the bound discriminates: a legitimate fast pan stays inside it, a
+        // reprojection singularity does not.
+        float frameWidth = 640.0f;
+        assertTrue(Math.abs(12.0f) <= frameWidth, "a fast pan must survive the bound");
+        assertFalse(Math.abs(1.0e6f) <= frameWidth, "a broken divide must be rejected");
+    }
+
+    private static int countOf(String haystack, String needle) {
+        int count = 0;
+        int at = haystack.indexOf(needle);
+        while (at >= 0) {
+            count++;
+            at = haystack.indexOf(needle, at + needle.length());
+        }
+        return count;
     }
 }

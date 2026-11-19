@@ -30,10 +30,10 @@ import dev.comfyfluffy.caustica.rt.RtDebugLabels;
 import static dev.comfyfluffy.caustica.rt.RtContext.check;
 
 /**
- * NRD/REBLUR back-end pass: decodes the denoised per-lobe outputs (YCoCg, material-demodulated),
- * RE-MODULATES the material factors the tracer divided out before denoising, and sums diffuse +
- * specular into the single radiance image the upscale stage consumes. Sky pixels (beyond NRD's
- * denoising range) pass the raw trace through instead.
+ * NRD back-end pass: decodes the denoised per-lobe outputs (YCoCg for REBLUR, linear for RELAX;
+ * both material-demodulated), RE-MODULATES the material factors the tracer divided out before
+ * denoising, and sums diffuse + specular into the single radiance image the upscale stage
+ * consumes. Sky pixels (beyond NRD's denoising range) pass the raw trace through instead.
  *
  * <p>Bindings, matching {@code shaders/display/nrd_combine.comp}: 0 denoised diffuse, 1 denoised
  * specular, 2 combined output, 3 raw trace colour, 4 diffuse albedo guide, 5 viewZ, 6 specular
@@ -42,8 +42,8 @@ import static dev.comfyfluffy.caustica.rt.RtContext.check;
  */
 public final class RtNrdCombinePipeline {
     private static final String SHADER_DIR = "/caustica/rt/";
-    /** Push constants: int width, int height, float denoisingRange. */
-    private static final int PUSH_BYTES = 3 * Integer.BYTES;
+    /** Push constants: int width, int height, float denoisingRange, int relaxMode. */
+    private static final int PUSH_BYTES = 4 * Integer.BYTES;
     /** Storage images the combine shader binds; see the class docs for the slot order. */
     private static final int BINDINGS = 8;
 
@@ -149,7 +149,7 @@ public final class RtNrdCombinePipeline {
         System.arraycopy(views, 0, boundViews, 0, BINDINGS);
     }
 
-    public void dispatch(VkCommandBuffer cmd, int width, int height, float denoisingRange) {
+    public void dispatch(VkCommandBuffer cmd, int width, int height, float denoisingRange, boolean relaxMode) {
         try (MemoryStack stack = MemoryStack.stackPush();
              RtDebugLabels.Scope ignored = RtDebugLabels.scope(ctx, cmd, "nrd combine")) {
             VK10.vkCmdBindPipeline(cmd, VK10.VK_PIPELINE_BIND_POINT_COMPUTE, pipeline);
@@ -159,6 +159,7 @@ public final class RtNrdCombinePipeline {
             push.putInt(0, width);
             push.putInt(4, height);
             push.putFloat(8, denoisingRange);
+            push.putInt(12, relaxMode ? 1 : 0);
             VK10.vkCmdPushConstants(cmd, pipelineLayout, VK10.VK_SHADER_STAGE_COMPUTE_BIT, 0, push);
             VK10.vkCmdDispatch(cmd, (width + 15) / 16, (height + 15) / 16, 1);
         }

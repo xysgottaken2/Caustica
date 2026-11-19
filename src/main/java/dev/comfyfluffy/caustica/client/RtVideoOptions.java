@@ -86,14 +86,21 @@ public final class RtVideoOptions {
         } else if (RtUpscalerSupport.MODE_XESS.equals(mode)) {
             options.add(xessQuality());
         }
-        // Denoiser rows, for every path except DLSS (Ray Reconstruction denoises internally, so it
-        // owns the slot and neither row would do anything).
-        //
-        // The built-in SVGF is the only denoiser offered. REBLUR is no longer exposed: it kept its
-        // own temporal history inside the library, so the reprojection fixes that cleaned up the
-        // built-in path could not reach it, and it stayed blobby where SVGF is now stable. The
-        // integration is left in the tree (the CI still builds the shim) but nothing turns it on.
-        if (!RtUpscalerSupport.MODE_DLSS.equals(mode)) {
+        // Denoiser rows. On the DLSS path the ray-reconstruction selector picks the denoiser
+        // (DLSS-RR denoises internally, so the SVGF/NRD rows would do nothing there); on every
+        // other path the NRD toggle and the built-in SVGF toggle share the slot, with NRD winning
+        // while it is on.
+        if (RtUpscalerSupport.MODE_DLSS.equals(mode)) {
+            options.add(rayReconstruction(upscalerChanged));
+            if (CausticaConfig.Rt.DlssRr.RAY_RECONSTRUCTION_NRD.equals(
+                    CausticaConfig.Rt.DlssRr.rayReconstruction())) {
+                options.add(nrdDenoiser());
+            }
+        } else {
+            options.add(nrd(upscalerChanged));
+            if (CausticaConfig.Rt.Nrd.ENABLED.value()) {
+                options.add(nrdDenoiser());
+            }
             options.add(svgfDenoiser());
         }
         options.add(omm());
@@ -116,13 +123,30 @@ public final class RtVideoOptions {
             options.add(dlssQuality());
             options.add(dlssPreset());
             options.add(denoiser());
+            options.add(rayReconstruction(upscalerChanged));
+            if (CausticaConfig.Rt.DlssRr.RAY_RECONSTRUCTION_NRD.equals(
+                    CausticaConfig.Rt.DlssRr.rayReconstruction())) {
+                options.add(nrdDenoiser());
+            }
         } else if (RtUpscalerSupport.MODE_FSR3.equals(mode)) {
             options.add(fsrQuality());
+            options.add(nrd(upscalerChanged));
+            if (CausticaConfig.Rt.Nrd.ENABLED.value()) {
+                options.add(nrdDenoiser());
+            }
             options.add(svgfDenoiser());
         } else if (RtUpscalerSupport.MODE_XESS.equals(mode)) {
             options.add(xessQuality());
+            options.add(nrd(upscalerChanged));
+            if (CausticaConfig.Rt.Nrd.ENABLED.value()) {
+                options.add(nrdDenoiser());
+            }
             options.add(svgfDenoiser());
         } else {
+            options.add(nrd(upscalerChanged));
+            if (CausticaConfig.Rt.Nrd.ENABLED.value()) {
+                options.add(nrdDenoiser());
+            }
             options.add(svgfDenoiser());
         }
         return options.toArray(OptionInstance<?>[]::new);
@@ -1486,6 +1510,88 @@ public final class RtVideoOptions {
     }
 
     /**
+     * The NRD denoiser toggle (NVIDIA Real-time Denoisers). Live-safe like the SVGF toggle:
+     * flipping it re-keys {@code RtComposite.ensureOutput}, which allocates or releases the NRD
+     * per-lobe targets and resets the history. NRD owns the denoise slot while it is on — SVGF
+     * steps aside — and needs the bundled NRD natives (Windows); without them the integration
+     * stays inert and SVGF keeps the slot. The screen rebuilds through {@code onChanged} so the
+     * NRD sub-row appears and disappears with the toggle.
+     */
+    private static OptionInstance<Boolean> nrd(Runnable onChanged) {
+        CausticaConfig.BooleanSetting setting = CausticaConfig.Rt.Nrd.ENABLED;
+        return OptionInstance.createBoolean(
+            "caustica.options.rt.nrd",
+            OptionInstance.cachedConstantTooltip(Component.translatable("caustica.options.rt.nrd.tooltip")),
+            setting.value(),
+            value -> {
+                setting.set(value);
+                onChanged.run();
+            });
+    }
+
+    // The ray-reconstruction selector's values, in cycle order. The config values are the
+    // value-key suffixes, so the row reads "Ray Reconstruction: DLSS" etc.
+    private static final List<String> RAY_RECONSTRUCTION_ORDER = List.of(
+            CausticaConfig.Rt.DlssRr.RAY_RECONSTRUCTION_DLSS_RR,
+            CausticaConfig.Rt.DlssRr.RAY_RECONSTRUCTION_SVGF,
+            CausticaConfig.Rt.DlssRr.RAY_RECONSTRUCTION_NRD);
+
+    /**
+     * Which denoiser the DLSS path runs. DLSS Ray Reconstruction fuses denoising and upscaling in
+     * one neural pass; SVGF and NRD denoise at render resolution instead and hand the result to
+     * DLSS Super Resolution for the upscale. Changing it re-keys
+     * {@code RtComposite.ensureOutput} (the upscale backend and denoise slot change), so the
+     * screen rebuilds through {@code onChanged} to show or hide the NRD sub-row — the same
+     * pattern as the upscaler selector.
+     */
+    private static OptionInstance<String> rayReconstruction(Runnable onChanged) {
+        CausticaConfig.StringSetting setting = CausticaConfig.Rt.DlssRr.RAY_RECONSTRUCTION;
+        String initial = setting.get();
+        if (!RAY_RECONSTRUCTION_ORDER.contains(initial)) {
+            initial = CausticaConfig.Rt.DlssRr.RAY_RECONSTRUCTION_DLSS_RR;
+        }
+        return new OptionInstance<>(
+            "caustica.options.rt.rayReconstruction",
+            OptionInstance.cachedConstantTooltip(Component.translatable("caustica.options.rt.rayReconstruction.tooltip")),
+            // The config value "dlss-rr" is the TOML spelling; the value label is keyed "dlss".
+            (caption, value) -> Component.translatable("caustica.options.rt.rayReconstruction."
+                    + (CausticaConfig.Rt.DlssRr.RAY_RECONSTRUCTION_DLSS_RR.equals(value) ? "dlss" : value)),
+            new OptionInstance.Enum<>(RAY_RECONSTRUCTION_ORDER, Codec.STRING),
+            initial,
+            value -> {
+                setting.set(value);
+                onChanged.run();
+            });
+    }
+
+    // The NRD denoiser selector's values, in cycle order. The config values are the
+    // value-key suffixes, so the row reads "NRD Denoiser: ReBlur" etc.
+    private static final List<String> NRD_DENOISER_ORDER = List.of(
+            CausticaConfig.Rt.Nrd.DENOISER_REBLUR,
+            CausticaConfig.Rt.Nrd.DENOISER_RELAX);
+
+    /**
+     * Which NRD denoiser runs (REBLUR or RELAX). Only shown while NRD is the selected denoiser —
+     * either through the ray-reconstruction selector on the DLSS path or through the NRD toggle on
+     * the other paths. Switching recreates the NRD instance and drops its history, so it is a
+     * plain live toggle with no screen rebuild.
+     */
+    private static OptionInstance<String> nrdDenoiser() {
+        CausticaConfig.StringSetting setting = CausticaConfig.Rt.Nrd.DENOISER;
+        String initial = setting.get();
+        if (!NRD_DENOISER_ORDER.contains(initial)) {
+            initial = CausticaConfig.Rt.Nrd.DENOISER_REBLUR;
+        }
+        return new OptionInstance<>(
+            "caustica.options.rt.nrdDenoiser",
+            OptionInstance.cachedConstantTooltip(Component.translatable("caustica.options.rt.nrdDenoiser.tooltip")),
+            (caption, value) -> Component.translatable("caustica.options.rt.nrdDenoiser." + value),
+            new OptionInstance.Enum<>(NRD_DENOISER_ORDER, Codec.STRING),
+            initial,
+            setting::set);
+    }
+
+    /**
      * The Frame Generation toggle (EXPERIMENTAL). Rides on the selected upscaler: DLSS mode toggles
      * DLSS-G (hardware-gated: unsupported GPUs get a greyed-out button that stays visible so its
      * tooltip can explain the requirement), FSR 3 AND XeSS modes toggle FSR 3.1 FG (no hardware
@@ -1707,11 +1813,12 @@ public final class RtVideoOptions {
             // CycleButton (used for Enum values) already prepends "caption: " itself (DisplayState.
             // NAME_AND_VALUE), so this must return only the value's text, not caption + value again.
             (caption, value) -> Component.translatable("caustica.options.rt.debugView." + value),
-            // 10-12 inspect the SVGF denoiser's internal state and, unlike 1-7, leave the denoiser
-            // running (see RtComposite.SVGF_DEBUG_FIRST). 8/9 are not exposed here. 13 is the SHaRC
-            // cache query overlay (see sharc.slang): pass B paints it so it reflects real queries.
-            new OptionInstance.Enum<>(List.of(0, 1, 2, 3, 4, 5, 6, 7, 10, 11, 12, 13), Codec.INT),
-            Math.clamp(setting.value(), 0, 13),
+            // 10-12 and 14 inspect the SVGF denoiser's internal state and, unlike 1-7, leave the
+            // denoiser running (see RtComposite.SVGF_DEBUG_FIRST). 8/9 are not exposed here. 13 is
+            // the SHaRC cache query overlay (see sharc.slang): pass B paints it so it reflects real
+            // queries.
+            new OptionInstance.Enum<>(List.of(0, 1, 2, 3, 4, 5, 6, 7, 10, 11, 12, 13, 14), Codec.INT),
+            Math.clamp(setting.value(), 0, 14),
             setting::set);
     }
 

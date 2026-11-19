@@ -44,7 +44,7 @@ layout(push_constant) uniform Push {
     int extraSkySmooth; // 1 = frame generation is presenting; smooth the sky harder (see below)
     int modulate;       // 1 = final pass: multiply the albedo guide back into the result
     // Diagnostic overlay, applied on the FINAL pass only so the filter itself is untouched:
-    //   0 = off, 10 = history length, 11 = variance, 12 = luminance sigma.
+    //   0 = off, 10 = history length, 11 = variance, 12 = luminance sigma, 14 = A-SVGF adaptation.
     // These exist because every fix so far was reasoned from the source and none of them changed
     // what the user sees; the denoiser's internal state has to be observed directly rather than
     // deduced. Unlike the guide debug views (pc.debugView in the tracer) these run with the
@@ -296,6 +296,16 @@ void main() {
             // The luminance sigma actually used. Bright = the bilateral is accepting everything,
             // i.e. this pixel is being box-blurred.
             dbg = vec3(clamp(sigmaL * 4.0, 0.0, 1.0));
+        } else if (pc.debugMode == 14) {
+            // A-SVGF adaptation: how much of the history the temporal gradient released this frame,
+            // relative to the ordinary 1/history blend. Black = the history was trusted completely
+            // (converged pixel, nothing changed, which is the correct state for a still scene);
+            // bright = the lit signal moved and accumulation was opened up. On a moving object or a
+            // sunlit surface passing into shadow this should light up EXACTLY where the lighting
+            // changed and nowhere else -- if it lights up uniformly, the gradient is reading noise as
+            // change and the noise multiplier needs raising.
+            float adapt = clamp(max(imageLoad(moments, pix).w, 0.0), 0.0, 1.0);
+            dbg = vec3(adapt);
         }
         imageStore(colorOut, pix, vec4(dbg, outVar));
         return;

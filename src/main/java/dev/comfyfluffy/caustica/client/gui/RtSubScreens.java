@@ -250,11 +250,14 @@ public final class RtSubScreens {
                 CausticaConfig.Rt.DlssRr.ENABLED,
                 CausticaConfig.Rt.DlssRr.QUALITY,
                 CausticaConfig.Rt.DlssRr.PRESET,
+                CausticaConfig.Rt.DlssRr.RAY_RECONSTRUCTION,
                 CausticaConfig.Rt.Fsr.ENABLED,
                 CausticaConfig.Rt.Fsr.QUALITY,
                 CausticaConfig.Rt.Xess.ENABLED,
                 CausticaConfig.Rt.Xess.QUALITY,
                 CausticaConfig.Rt.Denoise.ENABLED,
+                CausticaConfig.Rt.Nrd.ENABLED,
+                CausticaConfig.Rt.Nrd.DENOISER,
                 CausticaConfig.Rt.Omm.ENABLED,
                 CausticaConfig.Rt.Omm.SUBDIVISION);
     }
@@ -264,12 +267,15 @@ public final class RtSubScreens {
                 CausticaConfig.Rt.DlssRr.ENABLED,
                 CausticaConfig.Rt.DlssRr.QUALITY,
                 CausticaConfig.Rt.DlssRr.PRESET,
+                CausticaConfig.Rt.DlssRr.RAY_RECONSTRUCTION,
                 CausticaConfig.Rt.Composite.DENOISER,
                 CausticaConfig.Rt.Fsr.ENABLED,
                 CausticaConfig.Rt.Fsr.QUALITY,
                 CausticaConfig.Rt.Xess.ENABLED,
                 CausticaConfig.Rt.Xess.QUALITY,
-                CausticaConfig.Rt.Denoise.ENABLED);
+                CausticaConfig.Rt.Denoise.ENABLED,
+                CausticaConfig.Rt.Nrd.ENABLED,
+                CausticaConfig.Rt.Nrd.DENOISER);
     }
 
     private static List<CausticaConfig.RuntimeSetting<?>> frameGenSettings() {
