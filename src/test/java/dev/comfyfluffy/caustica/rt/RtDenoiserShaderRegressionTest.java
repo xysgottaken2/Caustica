@@ -184,6 +184,23 @@ final class RtDenoiserShaderRegressionTest {
                 "only a real teleport may drop REBLUR's history");
     }
 
+    @Test
+    void svgfReprojectionCompensatesForTheJitterSequence() throws IOException {
+        String composite = Files.readString(
+                REPO_ROOT.resolve("src/main/java/dev/comfyfluffy/caustica/rt/RtComposite.java"));
+        String denoiser = Files.readString(SVGFDENOISER);
+        String reproject = Files.readString(SVGF_REPROJECT);
+
+        assertTrue(composite.contains("jitterX - svgfPrevJitterX, jitterY - svgfPrevJitterY"),
+                "SVGF must provide current-minus-previous jitter to the temporal gather");
+        assertTrue(denoiser.contains("push.putFloat(20, jitterDeltaX);")
+                        && denoiser.contains("push.putFloat(24, jitterDeltaY);"),
+                "the jitter delta must reach the shader push constants");
+        assertTrue(reproject.contains("vec2 jitterDelta;")
+                        && reproject.contains("+ mv + pc.jitterDelta"),
+                "history lookup must account for the previous frame's jittered sample grid");
+    }
+
     /**
      * The SVGF depth gate predicts what a static surface's PREVIOUS view depth should have been by
      * adding the camera's forward travel to the current depth. Row 2 of the rotation-only view

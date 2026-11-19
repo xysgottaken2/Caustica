@@ -63,8 +63,8 @@ import static dev.comfyfluffy.caustica.rt.RtContext.check;
  */
 public final class RtSvgfDenoiser {
     private static final String SHADER_DIR = "/caustica/rt/";
-    /** Reproject push: int width, height, reset; float maxFrames. */
-    private static final int REPROJECT_PUSH_BYTES = 5 * Integer.BYTES;
+    /** Reproject push: int width, height, reset; float maxFrames, camForwardDelta, jitterDeltaX/Y. */
+    private static final int REPROJECT_PUSH_BYTES = 7 * Integer.BYTES;
     /** À-trous push: int width, height, step; float phiLuminance, phiNormal, phiDepth; four ints. */
     private static final int ATROUS_PUSH_BYTES = 10 * Integer.BYTES;
     private static final int REPROJECT_BINDINGS = 12;
@@ -266,7 +266,8 @@ public final class RtSvgfDenoiser {
                           long histOutView, long momentsOutView, long filterOutView,
                           long motionView, long viewZView, long normalView,
                           long prevViewZView, long prevNormalView, long albedoView,
-                          boolean reset, float maxFrames, float camForwardDelta) {
+                          boolean reset, float maxFrames, float camForwardDelta,
+                          float jitterDeltaX, float jitterDeltaY) {
         long set = reproject.setImages(ctx, parity, new long[] {
                 currentView, historyView, momentsInView, histOutView, momentsOutView, filterOutView,
                 motionView, viewZView, normalView, prevViewZView, prevNormalView, albedoView,
@@ -282,6 +283,8 @@ public final class RtSvgfDenoiser {
             push.putInt(8, reset ? 1 : 0);
             push.putFloat(12, maxFrames);
             push.putFloat(16, camForwardDelta);
+            push.putFloat(20, jitterDeltaX);
+            push.putFloat(24, jitterDeltaY);
             VK10.vkCmdPushConstants(cmd, reproject.pipelineLayout, VK10.VK_SHADER_STAGE_COMPUTE_BIT, 0, push);
             VK10.vkCmdDispatch(cmd, (width + 15) / 16, (height + 15) / 16, 1);
         }

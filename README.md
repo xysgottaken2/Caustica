@@ -1,8 +1,9 @@
 # Caustica — Minecraft 26.3
 
 Hardware-ray-traced renderer for Minecraft's Vulkan backend. It replaces the vanilla world view
-with path tracing and the vendor upscaling/denoising stack (DLSS Ray Reconstruction, DLSS Frame
-Generation, FSR 3, XeSS, SVGF) while keeping Minecraft's UI and gameplay intact.
+with path tracing and the vendor upscaling/denoising stack (DLSS Ray Reconstruction, DLSS Super
+Resolution, DLSS Frame Generation, FSR 3, XeSS, SVGF) while keeping Minecraft's UI and gameplay
+intact.
 
 ![Caustica ray-traced Minecraft scene](docs/gallery/banana.png)
 
@@ -11,6 +12,9 @@ Generation, FSR 3, XeSS, SVGF) while keeping Minecraft's UI and gameplay intact.
 - Vulkan hardware path-traced world rendering
 - DLSS Ray Reconstruction, DLSS Frame Generation, FSR 3, XeSS and NRD/SVGF denoising, with a live
   Ray Reconstruction model-preset slider (Default / D / E / F)
+- DLSS Super Resolution behind the renderer's own denoisers: picking SVGF, A-SVGF or NRD keeps the
+  DLSS quality mode's render resolution (and its reconstruction) instead of falling back to a
+  native-resolution trace
 - Blue-noise (void-and-cluster) dithering for the path tracer's per-vertex sampling decisions
 - HDR output, SDR/HDR presentation paths and exposure control
 - Dynamic entity rendering in the ray-traced scene

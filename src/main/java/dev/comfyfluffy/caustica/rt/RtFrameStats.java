@@ -38,6 +38,7 @@ public final class RtFrameStats {
                     "terrain.drainCompletion",
                     "terrain.snapshotDispatch",
                     "terrain.publish",
+                    "terrain.lightGridPublish",
                     "entity.capture",
                     "entity.capture.extract",
                     "entity.capture.submit",
@@ -60,14 +61,30 @@ public final class RtFrameStats {
                     "entity.uploadFlush",
                     "entity.blockEntities",
                     "entity.particles",
+                    "entity.viewmodel",
+                    "viewmodel.capture",
                     "entity.blasRecord",
                     "frame.prepareTlas",
                     "frame.recordTlas",
                     "frame.trace",
+                    "frame.tracePrimary",
+                    "frame.traceIndirect",
+                    // The denoise stages. Every one of them used to be missing from this list, which
+                    // made enabling the frame-stats overlay throw "Unknown RtFrameStats name" on the
+                    // first traced frame instead of timing anything.
+                    "frame.svgf",
+                    "frame.nrd",
+                    "frame.nrdCombine",
+                    // The reconstruction slots: RR, DLSS-SR (behind every non-RR denoiser), FSR, XeSS
+                    // and the linear fallback blit.
+                    "frame.dlssRr",
+                    "frame.dlssSr",
+                    "frame.fsr",
+                    "frame.xess",
+                    "frame.upscale",
+                    "frame.dof",
                     "frame.exposure",
                     "frame.bloom",
-                    "frame.dlssRr",
-                    "frame.upscale",
                     "frame.displayMap",
                     "frame.copyOutput"
             },

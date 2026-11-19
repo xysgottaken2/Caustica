@@ -124,6 +124,25 @@ cmake -S native/ngx_shim -B build/cmake/ngx_shim/release -DCMAKE_BUILD_TYPE=Rele
 cmake --build build/cmake/ngx_shim/release
 ```
 
+## Reconstruction Slots
+
+One reconstruction pass runs per frame, in this priority order:
+
+| Slot | Backend | Runs when |
+| --- | --- | --- |
+| 1 | `RtDlssRr` (denoise + upscale) | `dlss-rr.enabled` and `denoiser-mode=dlss_rr` |
+| 2 | `RtDlssSr` (upscale only) | `dlss-rr.enabled` and any other `denoiser-mode` (SVGF / A-SVGF / NRD) |
+| 3 | `RtFsrUpscaler` (upscale only) | `fsr.enabled` |
+| 4 | `RtXessUpscaler` (upscale only) | `xess.enabled` |
+| — | linear blit | none of the above (trace runs 1:1 with the display) |
+
+The slot decides the render resolution: `RtComposite.ensureOutput` asks the active
+backend for the size its quality mode expects, and the trace plus every guide buffer
+is allocated at that size. `RtDlssSr` exists so that choosing one of the renderer's
+own denoisers does not silently drop the trace back to native resolution — it
+upscales the denoised image, and is fed zero jitter because the denoiser has already
+integrated the jitter sequence.
+
 ## Native Bundling
 
 Gradle bundles NGX natives for the current host platform by default:
