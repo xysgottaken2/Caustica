@@ -1355,7 +1355,7 @@ public final class RtVideoOptions {
      */
     private static OptionInstance<String> dlssDenoiserMode(Runnable onChanged) {
         StringSetting setting = CausticaConfig.Rt.Composite.DENOISER_MODE;
-        String initial = setting.value();
+        String initial = setting.get();
         if (!DLSS_DENOISER_MODES.contains(initial)) {
             initial = CausticaConfig.Rt.Composite.DENOISER_MODE_DLSS_RR;
         }
@@ -1380,7 +1380,7 @@ public final class RtVideoOptions {
     /** Algorithm choice within the NRD item: REBLUR for noisy paths, RELAX for cleaner ReSTIR paths. */
     private static OptionInstance<String> nrdAlgorithm() {
         StringSetting setting = CausticaConfig.Rt.Nrd.MODE;
-        String initial = setting.value();
+        String initial = setting.get();
         if (!NRD_ALGORITHMS.contains(initial)) {
             initial = CausticaConfig.Rt.Nrd.MODE_REBLUR;
         }

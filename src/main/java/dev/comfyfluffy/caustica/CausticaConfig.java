@@ -812,7 +812,7 @@ public final class CausticaConfig {
             public static final String DENOISER_MODE_NRD = "nrd";
 
             public static boolean isDenoiserMode(String mode) {
-                return mode.equals(DENOISER_MODE.value());
+                return mode.equals(DENOISER_MODE.get());
             }
 
             private static String sanitizeDenoiserMode(String value) {
@@ -1510,7 +1510,7 @@ public final class CausticaConfig {
             public static final String MODE_RELAX = "relax";
 
             public static boolean relax() {
-                return MODE_RELAX.equals(MODE.value());
+                return MODE_RELAX.equals(MODE.get());
             }
 
             private static String sanitizeMode(String value) {
