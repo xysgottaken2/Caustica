@@ -145,6 +145,15 @@ public final class RtComposite {
         return CausticaConfig.Rt.Composite.DEBUG_VIEW.value();
     }
 
+    /**
+     * True for the debug views the wavelet itself paints. These keep the denoiser running (the point
+     * is to see its state), so they cannot simply be "any id in the guide-view range": 13 is SHaRC's
+     * cache overlay, which the tracer paints instead and which therefore needs the denoiser off.
+     */
+    private static boolean isSvgfDebugView(int view) {
+        return view >= SVGF_DEBUG_FIRST && view <= SVGF_DEBUG_LAST && view != SHARC_DEBUG_VIEW;
+    }
+
     private static int spp() {
         return CausticaConfig.Rt.Composite.SPP.value();
     }
@@ -470,10 +479,18 @@ public final class RtComposite {
      * Debug-view ids that inspect SVGF's internal state instead of the tracer's guides. Unlike the
      * guide views these leave the denoiser enabled, because the point is to see what it is doing.
      * 10 = history length (black means the reprojection threw the history away), 11 = variance,
-     * 12 = luminance sigma (bright means the bilateral has degenerated into a box blur).
+     * 12 = luminance sigma (bright means the bilateral has degenerated into a box blur),
+     * 14 = normal-stop rejection (white means the normal guide rejects every neighbour, i.e. the
+     * pixel cannot be spatially denoised at all).
+     *
+     * <p>13 is NOT in this range even though it is numerically between them: it is SHaRC's cache
+     * query overlay, which the tracer paints and which therefore has to run with the denoiser off
+     * like the guide views. {@link #isSvgfDebugView(int)} carries that exclusion.
      */
     private static final int SVGF_DEBUG_FIRST = 10;
-    private static final int SVGF_DEBUG_LAST = 12;
+    private static final int SVGF_DEBUG_LAST = 14;
+    /** sharc.slang's SHARC_DEBUG_VIEW_ID; a tracer view that happens to sit inside the SVGF range. */
+    private static final int SHARC_DEBUG_VIEW = 13;
     // Luminance edge-stop, in estimated standard deviations. This is the knob that decides how much
     // the wavelet trusts its own variance estimate: 4 sigma filters the 1-spp signal hard while
     // still stopping at genuine luminance edges (SVGF's paper uses 4 as well).
@@ -1673,11 +1690,12 @@ public final class RtComposite {
             // fails this frame, the gate below (svgfPath && !nrdDone) lets SVGF take the slot
             // instead of presenting the raw trace. Its resources are allocated whenever
             // RtNrdDenoiser.active() is false, which includes the latched-off case.
-            // Debug views 10-12 inspect the SVGF denoiser's own internal state (history length,
-            // variance, luminance sigma), so unlike the guide views they must keep it RUNNING.
-            // They exist because four rounds of fixes reasoned from the source produced no visible
-            // change for the user; the filter's state has to be measured in the actual frame.
-            boolean svgfDebugView = debugView >= SVGF_DEBUG_FIRST && debugView <= SVGF_DEBUG_LAST;
+            // Debug views 10-12 and 14 inspect the SVGF denoiser's own internal state (history
+            // length, variance, luminance sigma, normal-stop rejection), so unlike the guide views
+            // they must keep it RUNNING. They exist because four rounds of fixes reasoned from the
+            // source produced no visible change for the user; the filter's state has to be measured
+            // in the actual frame.
+            boolean svgfDebugView = isSvgfDebugView(debugView);
             boolean svgfPath = !rrPath && CausticaConfig.Rt.Denoise.ENABLED.value()
                     && (debugView == 0 || svgfDebugView);
             float jitterX = 0f;

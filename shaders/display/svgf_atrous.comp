@@ -44,11 +44,19 @@ layout(push_constant) uniform Push {
     int extraSkySmooth; // 1 = frame generation is presenting; smooth the sky harder (see below)
     int modulate;       // 1 = final pass: multiply the albedo guide back into the result
     // Diagnostic overlay, applied on the FINAL pass only so the filter itself is untouched:
-    //   0 = off, 10 = history length, 11 = variance, 12 = luminance sigma.
+    //   0 = off, 10 = history length, 11 = variance, 12 = luminance sigma,
+    //   14 = normal-stop rejection.
     // These exist because every fix so far was reasoned from the source and none of them changed
     // what the user sees; the denoiser's internal state has to be observed directly rather than
     // deduced. Unlike the guide debug views (pc.debugView in the tracer) these run with the
     // denoiser ENABLED, which is the whole point -- the guide views disable it.
+    // 14 exists because the one guide that can silently kill this filter is the NORMAL, and its
+    // rejection is invisible in the final image: `pow(dot(nc, nt), phiNormal)` with phiNormal = 128
+    // is ~0 for any two normals more than a few degrees apart, so a guide carrying per-texel shading
+    // detail (a LabPBR normal map, or a parallax side-wall normal) makes the filter one-dimensional
+    // or inert WITHOUT any visible error of its own. Painting the discarded fraction separates "the
+    // guide is texel-noisy here" from "there is a real geometric edge here" -- two situations that
+    // look identical in the output but need opposite fixes.
     int debugMode;
     // A-SVGF: smoothly reduces long-range spatial taps once temporal history has converged. It
     // preserves contact-shadow and thin-geometry detail without changing the number of passes.
@@ -195,6 +203,10 @@ void main() {
 
     float weightSum = KERNEL[2] * KERNEL[2]; // the centre tap always participates, at full weight
     vec3 colorSum = cc * weightSum;
+    // Diagnostic accumulator for debug view 14 (see pc.debugMode): the mean of (1 - wn) over the
+    // taps of THIS pass, i.e. the share of neighbour weight the normal edge-stop is discarding.
+    float normalRejectSum = 0.0;
+    float normalRejectCount = 0.0;
     // Variance combines through the SQUARE of the weights: filtering is a weighted mean of random
     // variables, and Var(sum w_i x_i) = sum w_i^2 Var(x_i). Getting this right is what lets the next
     // pass widen its kernel by exactly the amount the remaining noise justifies.
@@ -265,6 +277,8 @@ void main() {
                 // Normal: the standard SVGF power-of-cosine stop.
                 vec3 nt = imageLoad(normal, q).xyz;
                 float wn = pow(max(dot(nc, nt), 0.0), pc.phiNormal);
+                normalRejectSum += 1.0 - wn;
+                normalRejectCount += 1.0;
                 w *= wz * wn;
             }
             // Luminance: the variance-guided term.
@@ -278,12 +292,22 @@ void main() {
         }
     }
 
+    // Share of this pass's neighbour weight thrown away by the normal edge-stop (debug view 14).
+    float normalReject = normalRejectCount > 0.0 ? normalRejectSum / normalRejectCount : 0.0;
+
     if (weightSum <= 1.0e-6) {
         // Degenerate: pass the pixel through untouched, but still leave lighting space on the
         // final pass or this pixel would come out unlit against its re-modulated neighbours.
         vec3 passthrough = cc;
         if (pc.modulate != 0) {
             passthrough *= modFactor(pix);
+        }
+        // The degenerate branch is exactly where view 14 matters most -- a normal guide that rejects
+        // every tap lands here, so leaving it unpainted would show BLACK where the stop is at its
+        // most destructive. (Every other diagnostic still needs a filter result, so only this one is
+        // painted here.)
+        if (pc.modulate != 0 && pc.debugMode == 14) {
+            passthrough = vec3(clamp(normalReject, 0.0, 1.0));
         }
         imageStore(colorOut, pix, vec4(passthrough, cv));
         return;
@@ -313,6 +337,18 @@ void main() {
             // The luminance sigma actually used. Bright = the bilateral is accepting everything,
             // i.e. this pixel is being box-blurred.
             dbg = vec3(clamp(sigmaL * 4.0, 0.0, 1.0));
+        } else if (pc.debugMode == 14) {
+            // The share of this pass's neighbour weight the NORMAL edge-stop discards. Read it as:
+            //   black  -> the guide agrees with every tap; the filter is free to work, so the
+            //             artefact cannot be blamed on the normals here;
+            //   grey   -> a normal-mapped surface whose guide bends gradually, so only some taps
+            //             survive (the filter still runs, but along the texture's own grain);
+            //   white  -> every tap rejected: this pixel cannot be denoised at all, and any noise
+            //             visible here in the final image is 1-spp tracer noise that never got
+            //             filtered. Vertical white strips aligned with the block texture mean the
+            //             guide is carrying per-texel detail (normal map or parallax side wall)
+            //             rather than the surface's macro normal.
+            dbg = vec3(clamp(normalReject, 0.0, 1.0));
         }
         imageStore(colorOut, pix, vec4(dbg, outVar));
         return;

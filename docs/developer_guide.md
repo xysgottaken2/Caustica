@@ -143,6 +143,30 @@ own denoisers does not silently drop the trace back to native resolution — it
 upscales the denoised image, and is fed zero jitter because the denoiser has already
 integrated the jitter sequence.
 
+### Inspecting the denoiser
+
+Debug views 1–7 show the tracer's guides and therefore run with the denoiser off — they
+say nothing about what the filter did. Views 10–12 and 14 are painted by the wavelet
+itself and keep the cascade running, because the only reliable way to explain a
+denoiser artefact is to read the state that produced it:
+
+| View | Label | Read it as |
+| --- | --- | --- |
+| 10 | SVGF: History Length | black = the reprojection threw the history away at that pixel |
+| 11 | SVGF: Variance | the variance driving the edge stop, log-scaled |
+| 12 | SVGF: Luminance Sigma | bright = the bilateral is accepting everything (a box blur) |
+| 14 | SVGF: Normal Stop | the share of neighbour weight the **normal** edge-stop discards |
+
+View 14 exists because the normal stop can disable the filter entirely without an error
+of its own: `pow(dot(n_centre, n_tap), phi_normal)` with `phi_normal = 128` collapses to
+~0 for any two normals more than a few degrees apart. A guide carrying per-texel shading
+detail — a LabPBR normal map, or the tangent normal a parallax side-wall hit reports —
+therefore makes the cascade one-dimensional (it filters along the texture's grain only)
+or inert, and the visible result is 1-spp noise standing in texel-aligned strips that
+look exactly like a genuine geometric edge in the output. White in view 14 means every
+tap at that pixel was rejected, so no amount of tuning the luminance stop can help: the
+guide itself is the problem. 13 is SHaRC's cache overlay, not a denoiser view.
+
 ## Native Bundling
 
 Gradle bundles NGX natives for the current host platform by default:

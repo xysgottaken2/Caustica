@@ -660,4 +660,54 @@ final class RtDenoiserShaderRegressionTest {
         assertTrue(denoiser.contains("private static final float MIN_PREPASS_BLUR_RADIUS"),
                 "the pre-pass must never scale to zero; NRD requires it for probabilistic input");
     }
+
+    /**
+     * Debug view 14 reports how much neighbour weight the NORMAL edge-stop discards, because that
+     * stop can disable the filter completely without producing any error of its own: with
+     * phiNormal = 128, {@code pow(dot, 128)} is ~0 for any two normals more than a few degrees
+     * apart, so a guide carrying per-texel shading detail (normal map, parallax side wall) turns the
+     * cascade one-dimensional or inert. That is invisible in the output — it just leaves 1-spp noise
+     * standing in texel-aligned strips — so the only way to tell it apart from a genuine geometric
+     * edge is to paint the rejected fraction.
+     *
+     * <p>Two things about that view are easy to break silently. It must be painted in the DEGENERATE
+     * exit too (the exit a fully rejected pixel takes), or the diagnostic shows black exactly where
+     * the stop is most destructive; and its id must stay outside SHaRC's 13, which is a tracer view
+     * inside the same numeric range and must keep running with the denoiser off.
+     */
+    @Test
+    void svgfNormalStopViewIsPaintedOnBothExitsAndExcludesSharc() throws IOException {
+        String atrous = Files.readString(SVGF_ATROUS);
+        String sharc = Files.readString(SHARC);
+        String composite = Files.readString(
+                REPO_ROOT.resolve("src/main/java/dev/comfyfluffy/caustica/rt/RtComposite.java"));
+
+        assertTrue(atrous.contains("normalRejectSum += 1.0 - wn;"),
+                "the view must measure the normal weight that was actually computed");
+        assertEquals(2, countOccurrences(atrous, "pc.debugMode == 14"),
+                "view 14 must be painted on the filtered exit and the degenerate passthrough exit");
+        assertTrue(atrous.indexOf("pc.debugMode == 14")
+                        < atrous.indexOf("vec3 filtered = colorSum / weightSum;"),
+                "one of the two paintings must sit before the filtered result exists (degenerate exit)");
+
+        // The id must coexist with SHaRC's, which is numerically inside the SVGF range.
+        assertTrue(sharc.contains("SHARC_DEBUG_VIEW_ID = 13u"), "sharc.slang's view id moved");
+        assertTrue(composite.contains("private static final int SHARC_DEBUG_VIEW = 13;"),
+                "RtComposite must know SHaRC's id to keep it out of the SVGF range");
+        assertTrue(composite.contains(
+                        "return view >= SVGF_DEBUG_FIRST && view <= SVGF_DEBUG_LAST && view != SHARC_DEBUG_VIEW;"),
+                "the SVGF range must exclude SHaRC's view, or the denoiser would run under it");
+        assertTrue(composite.contains("private static final int SVGF_DEBUG_LAST = 14;"),
+                "view 14 has to be inside the range the wavelet is allowed to paint");
+    }
+
+    private static int countOccurrences(String haystack, String needle) {
+        int count = 0;
+        int from = haystack.indexOf(needle);
+        while (from >= 0) {
+            count++;
+            from = haystack.indexOf(needle, from + needle.length());
+        }
+        return count;
+    }
 }
