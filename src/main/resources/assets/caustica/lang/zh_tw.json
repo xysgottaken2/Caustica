@@ -169,6 +169,7 @@
 	"caustica.options.rt.debugView.11": "SVGF：變異數",
 	"caustica.options.rt.debugView.12": "SVGF：亮度 Sigma",
 	"caustica.options.rt.debugView.13": "SHaRC 快取",
+	"caustica.options.rt.debugView.14": "SVGF：法線停止",
 	"caustica.options.rt.lightsHeader": "光追照明",
 	"caustica.options.rt.tonemapHeader": "光追色調映射",
 	"caustica.options.rt.blockEmissiveIntensity": "自發光方塊強度",

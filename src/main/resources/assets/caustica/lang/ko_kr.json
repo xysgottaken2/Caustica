@@ -169,6 +169,7 @@
 	"caustica.options.rt.debugView.11": "SVGF: 분산",
 	"caustica.options.rt.debugView.12": "SVGF: 휘도 시그마",
 	"caustica.options.rt.debugView.13": "SHaRC 캐시",
+	"caustica.options.rt.debugView.14": "SVGF: 법선 정지",
 	"caustica.options.rt.lightsHeader": "RT 조명",
 	"caustica.options.rt.tonemapHeader": "RT 톤 매핑",
 	"caustica.options.rt.blockEmissiveIntensity": "발광 블록 강도",

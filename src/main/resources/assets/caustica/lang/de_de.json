@@ -169,6 +169,7 @@
 	"caustica.options.rt.debugView.11": "SVGF: Varianz",
 	"caustica.options.rt.debugView.12": "SVGF: Luminanz-Sigma",
 	"caustica.options.rt.debugView.13": "SHaRC-Cache",
+	"caustica.options.rt.debugView.14": "SVGF: Normalen-Stopp",
 	"caustica.options.rt.lightsHeader": "RT-Beleuchtung",
 	"caustica.options.rt.tonemapHeader": "RT-Tonwertabbildung",
 	"caustica.options.rt.blockEmissiveIntensity": "Leuchtstärke von Blöcken",

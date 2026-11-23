@@ -169,6 +169,7 @@
 	"caustica.options.rt.debugView.11": "SVGF: 分散",
 	"caustica.options.rt.debugView.12": "SVGF: 輝度シグマ",
 	"caustica.options.rt.debugView.13": "SHaRCキャッシュ",
+	"caustica.options.rt.debugView.14": "SVGF: 法線ストップ",
 	"caustica.options.rt.lightsHeader": "RT ライティング",
 	"caustica.options.rt.tonemapHeader": "RT トーンマッピング",
 	"caustica.options.rt.blockEmissiveIntensity": "発光ブロックの強度",
