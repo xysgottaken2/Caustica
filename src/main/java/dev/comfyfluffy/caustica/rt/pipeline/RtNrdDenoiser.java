@@ -142,7 +142,11 @@ public final class RtNrdDenoiser {
     private static final float SPECULAR_PREPASS_BLUR_RADIUS = 50.0f;
     /** Never shrink the pre-pass to nothing: NRD warns it is required for probabilistic input. */
     private static final float MIN_PREPASS_BLUR_RADIUS = 6.0f;
-    /** Spatial filter radii, in pixels: NRD defaults (converged pixels shrink toward the minimum). */
+    /**
+     * Spatial filter radii, in pixels: NRD defaults (converged pixels shrink toward the minimum).
+     * {@code MAX_BLUR_RADIUS} is the unconverged reach and is resolution-scaled where it is used
+     * (see spatialRadius); the minimum is the converged base radius and is not.
+     */
     private static final float MIN_BLUR_RADIUS = 1.0f;
     private static final float MAX_BLUR_RADIUS = 30.0f;
     /** Normal / roughness / plane-distance rejection fractions — NRD defaults. */
@@ -306,7 +310,9 @@ public final class RtNrdDenoiser {
                             FIREFLY_SUPPRESSOR_SCALE,
                             prepassRadius(DIFFUSE_PREPASS_BLUR_RADIUS, renderWidth),
                             prepassRadius(SPECULAR_PREPASS_BLUR_RADIUS, renderWidth),
-                            MIN_BLUR_RADIUS, MAX_BLUR_RADIUS,
+                            // The minimum radius is a converged pixel's base radius and is already
+                            // 1 px: there is nothing to scale down. Only the unconverged reach is.
+                            MIN_BLUR_RADIUS, spatialRadius(MAX_BLUR_RADIUS, renderWidth),
                             LOBE_ANGLE_FRACTION, ROUGHNESS_FRACTION, PLANE_DISTANCE_SENSITIVITY,
                             FAST_HISTORY_CLAMPING_SIGMA,
                             true);
@@ -518,6 +524,30 @@ public final class RtNrdDenoiser {
     private static float prepassRadius(float referenceRadius, int renderWidth) {
         float scaled = referenceRadius * (renderWidth / PREPASS_REFERENCE_WIDTH);
         return Math.max(scaled, MIN_PREPASS_BLUR_RADIUS);
+    }
+
+    /**
+     * The same resolution scaling for REBLUR's <em>spatial</em> radii.
+     *
+     * <p>These are pixel radii quoted for a full-resolution render too, and unlike the pre-pass radii
+     * they were left unscaled when the pre-pass was fixed — the same bug one stage later, where it
+     * does more damage. At the sizes this mod actually traces at (1280x720 behind a quality upscale,
+     * 960x540 or less behind a performance one) a 30-pixel spatial radius is 2.3-3% of the frame
+     * width, so REBLUR's spiral taps reach across whole blocks. On a 1-spp signal that is what turns
+     * block-scale lighting differences into wide colour bands that follow the geometry — the NRD
+     * sibling of the long-tap smearing the SVGF cascade had to be cured of. Scaling keeps NRD's
+     * angular intent (the radius covers the same fraction of the view) without letting a small
+     * render target inflate the reach.
+     *
+     * <p>Only ever scales DOWN: a render wider than the reference keeps NRD's own pixel radii, since
+     * nothing justifies growing the filter there. The floor is the minimum radius, not zero — NRD
+     * needs a non-zero spatial radius for probabilistic input exactly as it needs a non-zero pre-pass.
+     * {@code minBlurRadius} is deliberately NOT scaled: it is the base radius a fully converged pixel
+     * uses, it sits at 1 px already, and shrinking it further would only add noise.
+     */
+    private static float spatialRadius(float referenceRadius, int renderWidth) {
+        float scale = Math.min(1.0f, renderWidth / PREPASS_REFERENCE_WIDTH);
+        return Math.max(referenceRadius * scale, MIN_BLUR_RADIUS);
     }
 
     private static boolean isFinite(Matrix4fc m) {

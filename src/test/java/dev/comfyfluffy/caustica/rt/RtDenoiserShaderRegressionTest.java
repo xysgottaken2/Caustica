@@ -662,6 +662,32 @@ final class RtDenoiserShaderRegressionTest {
     }
 
     /**
+     * NRD's SPATIAL radii are pixel radii quoted for a full-resolution render, exactly like the
+     * pre-pass ones — and they were left unscaled when the pre-pass was fixed. At the render sizes
+     * this mod traces at (1280x720 behind a quality upscale, less behind a performance one) a
+     * 30-pixel max radius is 2.3-3% of the frame width, so REBLUR's spiral taps reach across whole
+     * blocks and turn block-scale lighting differences into wide colour bands that follow the
+     * geometry. The contract is the same as the pre-pass's: scale down, never to zero.
+     */
+    @Test
+    void nrdSpatialRadiusScalesWithRenderResolution() throws Exception {
+        String denoiser = Files.readString(NRD_DENOISER);
+        assertTrue(denoiser.contains("private static float spatialRadius(float referenceRadius, int renderWidth)"),
+                "the spatial radius must be resolution-scaled too, or a small render target inflates "
+                        + "REBLUR's reach");
+        assertTrue(denoiser.contains("MIN_BLUR_RADIUS, spatialRadius(MAX_BLUR_RADIUS, renderWidth)"),
+                "the REBLUR call must pass the scaled maximum radius");
+        assertTrue(denoiser.contains("Math.max(referenceRadius * scale, MIN_BLUR_RADIUS)"),
+                "the scaled radius must keep NRD's non-zero floor");
+        // The minimum radius is a converged pixel's base radius: it stays at its pixel value, since
+        // shrinking a 1 px radius further would only add noise.
+        assertTrue(denoiser.contains("MIN_BLUR_RADIUS = 1.0f"),
+                "the minimum radius must remain the 1 px base radius");
+        assertFalse(denoiser.contains("spatialRadius(MIN_BLUR_RADIUS"),
+                "the minimum radius must not be scaled; it is already the converged base radius");
+    }
+
+    /**
      * Debug view 14 reports how much neighbour weight the NORMAL edge-stop discards, because that
      * stop can disable the filter completely without producing any error of its own: with
      * phiNormal = 128, {@code pow(dot, 128)} is ~0 for any two normals more than a few degrees

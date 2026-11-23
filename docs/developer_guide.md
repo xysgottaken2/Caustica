@@ -167,6 +167,26 @@ look exactly like a genuine geometric edge in the output. White in view 14 means
 tap at that pixel was rejected, so no amount of tuning the luminance stop can help: the
 guide itself is the problem. 13 is SHaRC's cache overlay, not a denoiser view.
 
+### What the NRD path is fed
+
+REBLUR's inputs match NRD v4.17.3's contract: `IN_MV` is non-jittered
+(`previous - current`, in render pixels, scaled by `1/renderWidth`), `IN_VIEWZ` is positive
+linear view-Z with sky above `denoisingRange`, normals are unit `xyz` in an
+`RGBA16_SNORM`-declared binding with linear roughness in `w`, and the radiance pair is the
+demodulated YCoCg + normalized hit distance produced by the front-end mirrors in
+`world_core.slang` (`_NRD_LinearToYCoCg`, `_REBLUR_GetHitDistanceNormalization` with
+A/B/C = 3/0.1/20). Keep those mirrors in lock-step with `NRD.hlsli`.
+
+One field is worth knowing about, because it is the likely source of any *remaining*
+NRD-only striping on block faces: `gNormal.xyz` carries the **shading** normal, not the
+geometric one — `world.rchit.slang` overwrites `payload.normal` with
+`surface.normal` (material normal map) and then, for a parallax side-wall hit, with a
+*tangent* normal. SVGF survives that because its own stops are variance-driven, but REBLUR
+uses the normal for plane-distance and lobe-angle rejection, so texel-frequency guide
+detail turns into texel-aligned rejection: strips that no amount of reach or history
+tuning fixes. If the striping survives reach reduction, the next step is a geometric-normal
+guide image (the `Payload.normal` comment already promises "geometric normal").
+
 ## Native Bundling
 
 Gradle bundles NGX natives for the current host platform by default:
