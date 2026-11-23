@@ -31,6 +31,10 @@ final class RtDenoiserShaderRegressionTest {
     private static final Path NRD_COMBINE = REPO_ROOT.resolve("shaders/display/nrd_combine.comp");
     private static final Path SVGF_REPROJECT = REPO_ROOT.resolve("shaders/display/svgf_reproject.comp");
     private static final Path SVGF_ATROUS = REPO_ROOT.resolve("shaders/display/svgf_atrous.comp");
+    private static final Path WORLD_COMMON = REPO_ROOT.resolve("shaders/world/world_common.slang");
+    private static final Path WORLD_RCHIT = REPO_ROOT.resolve("shaders/world/world.rchit.slang");
+    private static final Path WORLD_PRIMARY = REPO_ROOT.resolve("shaders/world/world_primary.rgen.slang");
+    private static final Path GUIDES = REPO_ROOT.resolve("shaders/world/guides.slang");
     private static final Path SHARC = REPO_ROOT.resolve("shaders/world/sharc.slang");
     private static final Path CONFIG =
             REPO_ROOT.resolve("src/main/java/dev/comfyfluffy/caustica/CausticaConfig.java");
@@ -725,6 +729,61 @@ final class RtDenoiserShaderRegressionTest {
                 "the SVGF range must exclude SHaRC's view, or the denoiser would run under it");
         assertTrue(composite.contains("private static final int SVGF_DEBUG_LAST = 14;"),
                 "view 14 has to be inside the range the wavelet is allowed to paint");
+    }
+
+    /**
+     * The denoiser guide must be the GEOMETRIC normal, not the shading one.
+     *
+     * <p>`world.rchit.slang` overwrites `payload.normal` with `surface.normal` (the material normal
+     * map) and then, for a parallax side-wall hit, with a *tangent* normal. Both are per-texel
+     * detail, and both filters stop working on them at texel frequency: SVGF's
+     * {@code pow(dot(nc, nt), 128)} is ~0 for any two normals a few degrees apart, and REBLUR
+     * rejects neighbours on plane distance and lobe angle. The symptom is strips and speckle the
+     * filter cannot remove — worst in shadows and reflections, where the signal has the least energy
+     * to spare — and it looks exactly like a genuine geometric edge, so it cannot be diagnosed from
+     * the output. Hence a second payload field captured before the perturbation.
+     */
+    @Test
+    void denoiserNormalGuideIsTheGeometricNormal() throws IOException {
+        String common = Files.readString(WORLD_COMMON);
+        String rchit = Files.readString(WORLD_RCHIT);
+        String rgen = Files.readString(WORLD_PRIMARY);
+        String guides = Files.readString(GUIDES);
+
+        assertTrue(common.contains("public half3  geoNormal;"),
+                "the payload must carry the geometric normal alongside the shading one");
+        // The two paths that perturb the normal must publish the CAPTURE, not what `n` became.
+        assertTrue(rchit.contains("float3 terrainGeoN = n;"),
+                "terrain must capture the face normal before the map and the wall override");
+        assertTrue(rchit.contains("payload.geoNormal = half3(terrainGeoN);"),
+                "the terrain path must publish the captured geometric normal");
+        assertTrue(rchit.contains("float3 entityGeoN = n;")
+                        && rchit.contains("payload.geoNormal = half3(entityGeoN);"),
+                "the entity path must do the same; entities carry normal maps too");
+        // Every other branch (water, glass, particles, portals, snow, glint) is unperturbed, so
+        // geo == shading there -- but the field must still be written, or those pixels would hand the
+        // denoiser an uninitialised guide.
+        assertTrue(countOccurrences(rchit, "payload.geoNormal =") >= 10,
+                "every payload.normal assignment needs a geoNormal twin: a missed branch feeds the "
+                        + "denoiser garbage");
+
+        assertTrue(Files.readString(REPO_ROOT.resolve("shaders/world/trace.slang")).contains("p.geoNormal = "),
+                "the payload factory must initialise the new field: a miss writes nothing, but the "
+                        + "struct must never be handed on with uninitialised bytes");
+        assertTrue(rgen.contains("gv_normalGeo = float3(payload.geoNormal);"),
+                "the opaque guide must come from the payload's geometric field");
+        assertTrue(rgen.contains("gv_normalGeo = n;"),
+                "dielectrics keep their analytic wave normal: that IS the surface, not mapped detail");
+        assertTrue(rgen.contains("gv_normalGeo = float3(0.0, 0.0, 0.0);"),
+                "the sky branch must reset it, like gv_normal");
+
+        assertTrue(guides.contains("gNormal[pix] = float4(gv_normalGeo, gv_rough);"),
+                "writeGuides must publish the geometric normal");
+        assertFalse(guides.contains("gNormal[pix] = float4(gv_normal, gv_rough);"),
+                "publishing the shading normal is the bug this pins");
+        // The specular guides keep the mapped detail on purpose.
+        assertTrue(guides.contains("gv_normal = normal;") && guides.contains("gv_normalGeo = normal;"),
+                "the transmission guide must set both");
     }
 
     private static int countOccurrences(String haystack, String needle) {

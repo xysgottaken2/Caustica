@@ -177,15 +177,17 @@ demodulated YCoCg + normalized hit distance produced by the front-end mirrors in
 `world_core.slang` (`_NRD_LinearToYCoCg`, `_REBLUR_GetHitDistanceNormalization` with
 A/B/C = 3/0.1/20). Keep those mirrors in lock-step with `NRD.hlsli`.
 
-One field is worth knowing about, because it is the likely source of any *remaining*
-NRD-only striping on block faces: `gNormal.xyz` carries the **shading** normal, not the
-geometric one — `world.rchit.slang` overwrites `payload.normal` with
+`gNormal.xyz` carries the **geometric** normal, deliberately, and this is load-bearing.
+`payload.normal` is the *shading* normal — `world.rchit.slang` overwrites it with
 `surface.normal` (material normal map) and then, for a parallax side-wall hit, with a
-*tangent* normal. SVGF survives that because its own stops are variance-driven, but REBLUR
-uses the normal for plane-distance and lobe-angle rejection, so texel-frequency guide
-detail turns into texel-aligned rejection: strips that no amount of reach or history
-tuning fixes. If the striping survives reach reduction, the next step is a geometric-normal
-guide image (the `Payload.normal` comment already promises "geometric normal").
+*tangent* normal. Feeding that to a denoiser breaks both filters at texel frequency:
+SVGF's `pow(dot(nc, nt), 128)` is ~0 for any two normals a few degrees apart, and REBLUR
+rejects on plane distance and lobe angle. The visible symptom is strips and speckle the
+filter cannot remove, worst in shadows and reflections where the signal has the least
+energy to spare. So the hit shader keeps a second field (`Payload.geoNormal`, captured
+before the map and the wall override) and `writeGuides` publishes *that*; `gv_normal`
+keeps the shading normal for the specular guides, which do want the detail. Shading
+detail still reaches the eye because it is baked into the radiance the guide accompanies.
 
 ## Native Bundling
 

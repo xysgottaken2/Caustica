@@ -13,6 +13,9 @@ import water;
 import trace;
 
 public static float3 gv_normal = float3(0.0, 0.0, 0.0);
+// The same hit's GEOMETRIC normal, which is what gNormal.xyz carries (see Payload.geoNormal):
+// gv_normal keeps the shading normal for the specular guides, which do want the mapped detail.
+public static float3 gv_normalGeo = float3(0.0, 0.0, 0.0);
 public static float3 gv_albedo = float3(0.0, 0.0, 0.0);
 public static float gv_rough = 0.0;
 public static float3 gv_hitCamRel = float3(0.0, 0.0, 0.0);       // primary-surface hit position relative to the current camera
@@ -145,6 +148,7 @@ public void setTransmissionGuide(float3 hitCamRel, float3 motionPrev, float3 nor
     gv_motionObjDisp = motionPrev;
     gv_motionUseRefracted = true;
     gv_normal = normal;
+    gv_normalGeo = normal;
     gv_rough = roughness;
     gv_albedo = diffuseAlbedo;
 }
@@ -327,7 +331,11 @@ public void writeGuides(int2 pix, float3 primaryDir, float2 jndc, float2 size, f
     }
 
     // Guide buffers: first-hit or coherently replaced attributes consumed by the denoiser/DLSS-RR.
-    gNormal[pix] = float4(gv_normal, gv_rough);
+    // The normal is the GEOMETRIC one: this image is a denoiser guide first of all, and both
+    // SVGF's `pow(dot(nc, nt), 128)` and REBLUR's plane-distance / lobe-angle tests stop working
+    // (or stop being noise-immune) when the guide carries per-texel shading detail. The mapped
+    // normal still drives shading -- it is baked into the radiance this guide accompanies.
+    gNormal[pix] = float4(gv_normalGeo, gv_rough);
     gAlbedo[pix] = float4(gv_albedo, 1.0);
     gDepth[pix] = depth;
     gMotion[pix] = motion;
