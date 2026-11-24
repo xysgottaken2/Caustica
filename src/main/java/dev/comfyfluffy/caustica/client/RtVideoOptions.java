@@ -13,6 +13,7 @@ import dev.comfyfluffy.caustica.client.gui.RtSharcOptionsScreen;
 import dev.comfyfluffy.caustica.compat.DistantHorizonsCompat;
 import dev.comfyfluffy.caustica.compat.VoxyCompat;
 import dev.comfyfluffy.caustica.rt.RtSharc;
+import dev.comfyfluffy.caustica.rt.pipeline.NrdValidationGrid;
 import dev.comfyfluffy.caustica.rt.terrain.RtDistantHorizonsTerrain;
 import dev.comfyfluffy.caustica.rt.terrain.RtTerrain;
 import net.minecraft.client.Minecraft;
@@ -80,7 +81,12 @@ public final class RtVideoOptions {
         String mode = RtUpscalerSupport.currentUpscalerMode();
         if (RtUpscalerSupport.MODE_DLSS.equals(mode)) {
             options.add(dlssQuality());
-            options.add(dlssPreset());
+            // The model-preset slider is Ray Reconstruction's own hint enum (0/D/E/F). With any
+            // other denoiser selected, DLSS Super Resolution takes the reconstruction slot and lets
+            // the DLL pick its per-quality preset, so the row would promise a model nothing runs.
+            if (CausticaConfig.Rt.Composite.isDenoiserMode(CausticaConfig.Rt.Composite.DENOISER_MODE_DLSS_RR)) {
+                options.add(dlssPreset());
+            }
             options.add(dlssDenoiserMode(upscalerChanged));
             if (CausticaConfig.Rt.Composite.isDenoiserMode(CausticaConfig.Rt.Composite.DENOISER_MODE_NRD)) {
                 options.add(nrdAlgorithm());
@@ -114,7 +120,12 @@ public final class RtVideoOptions {
         String mode = RtUpscalerSupport.currentUpscalerMode();
         if (RtUpscalerSupport.MODE_DLSS.equals(mode)) {
             options.add(dlssQuality());
-            options.add(dlssPreset());
+            // The model-preset slider is Ray Reconstruction's own hint enum (0/D/E/F). With any
+            // other denoiser selected, DLSS Super Resolution takes the reconstruction slot and lets
+            // the DLL pick its per-quality preset, so the row would promise a model nothing runs.
+            if (CausticaConfig.Rt.Composite.isDenoiserMode(CausticaConfig.Rt.Composite.DENOISER_MODE_DLSS_RR)) {
+                options.add(dlssPreset());
+            }
             options.add(dlssDenoiserMode(upscalerChanged));
             if (CausticaConfig.Rt.Composite.isDenoiserMode(CausticaConfig.Rt.Composite.DENOISER_MODE_NRD)) {
                 options.add(nrdAlgorithm());
@@ -314,6 +325,8 @@ public final class RtVideoOptions {
     public static OptionInstance<?>[] debugOptions() {
         return new OptionInstance<?>[] {
             debugView(),
+            nrdValidation(),
+            nrdValidationCell(),
             frameStats(),
             ommStats(),
             lightStats(),
@@ -732,6 +745,32 @@ public final class RtVideoOptions {
 
     private static OptionInstance<Boolean> frameStats() {
         return bool("caustica.options.rt.frameStats", CausticaConfig.Rt.FrameStats.ENABLED);
+    }
+
+    /**
+     * NRD's own 16-viewport validation overlay.
+     *
+     * <p>This was wired end to end when the integration landed — config key, language strings, the
+     * validation image, the dispatch flag — but never given a GUI row, so the only way to switch it on
+     * was to edit the config file by hand. That made the one diagnostic that can see INSIDE REBLUR
+     * (per-pixel accumulated frame counts, disocclusion and occlusion state, and every input) unusable
+     * exactly when it was needed. Set the upscaler to Off for a crisp readout: the overlay replaces the
+     * frame, and an upscaler would filter it.
+     */
+    private static OptionInstance<Boolean> nrdValidation() {
+        return bool("caustica.options.rt.nrdValidation", CausticaConfig.Rt.Nrd.VALIDATION);
+    }
+
+    /**
+     * Which cell of the validation grid to magnify to the whole frame (-1 = the whole grid).
+     *
+     * <p>NRD's own labels are a few pixels tall inside a quarter-screen cell, which is why reading
+     * the grid from a screenshot turned into guesswork. Isolating a cell magnifies it 4x.
+     */
+    private static OptionInstance<Integer> nrdValidationCell() {
+        return intSlider("caustica.options.rt.nrdValidationCell",
+                CausticaConfig.Rt.Nrd.VALIDATION_CELL,
+                NrdValidationGrid.WHOLE_GRID, NrdValidationGrid.CELLS - 1);
     }
 
     private static OptionInstance<Boolean> ommStats() {
@@ -1350,8 +1389,10 @@ public final class RtVideoOptions {
 
     /**
      * The DLSS-only denoiser selector. RR owns denoise + reconstruction; SVGF, A-SVGF and NRD replace RR
-     * entirely, so the trace returns to display resolution instead of passing one temporal filter
-     * through another. Reopening makes the NRD algorithm row appear only when it is relevant.
+     * entirely, so exactly one temporal filter touches the image. The reconstruction slot does not go
+     * away with RR: DLSS Super Resolution upscales whichever of those filters is selected, which is
+     * what lets this row stay a denoiser choice instead of silently becoming a resolution choice.
+     * Reopening makes the NRD algorithm row (and the RR-only preset row) appear only when relevant.
      */
     private static OptionInstance<String> dlssDenoiserMode(Runnable onChanged) {
         StringSetting setting = CausticaConfig.Rt.Composite.DENOISER_MODE;
@@ -1751,11 +1792,13 @@ public final class RtVideoOptions {
             // CycleButton (used for Enum values) already prepends "caption: " itself (DisplayState.
             // NAME_AND_VALUE), so this must return only the value's text, not caption + value again.
             (caption, value) -> Component.translatable("caustica.options.rt.debugView." + value),
-            // 10-12 inspect the SVGF denoiser's internal state and, unlike 1-7, leave the denoiser
-            // running (see RtComposite.SVGF_DEBUG_FIRST). 8/9 are not exposed here. 13 is the SHaRC
-            // cache query overlay (see sharc.slang): pass B paints it so it reflects real queries.
-            new OptionInstance.Enum<>(List.of(0, 1, 2, 3, 4, 5, 6, 7, 10, 11, 12, 13), Codec.INT),
-            Math.clamp(setting.value(), 0, 13),
+            // 10-12 and 14 inspect the SVGF denoiser's internal state and, unlike 1-7, leave the
+            // denoiser running (see RtComposite.SVGF_DEBUG_FIRST). 8/9 are not exposed here. 13 is the
+            // SHaRC cache query overlay (see sharc.slang): pass B paints it so it reflects real
+            // queries, and it is deliberately NOT part of the SVGF range even though it sits inside
+            // it numerically.
+            new OptionInstance.Enum<>(List.of(0, 1, 2, 3, 4, 5, 6, 7, 10, 11, 12, 13, 14), Codec.INT),
+            Math.clamp(setting.value(), 0, 14),
             setting::set);
     }
 

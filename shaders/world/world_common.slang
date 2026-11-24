@@ -377,7 +377,14 @@ public static const float HALF_MAX = 65504.0;
 public struct Payload {
     // Sky radiance on a miss, so this carries HDR values well above 1; half tops out at 65504.
     public half3  albedo;      // hit: block albedo. miss: sky radiance.
-    public half3  normal;      // hit: geometric normal, viewer-oriented.
+    public half3  normal;      // hit: SHADING normal, viewer-oriented (material map, then parallax wall).
+    // The same hit's GEOMETRIC normal: the face's own normal, captured before the material normal map
+    // and the parallax side-wall override touch `normal` above. This is what the DENOISERS are given as
+    // their guide (gNormal.xyz), because an edge stop keyed on per-texel shading detail rejects
+    // neighbours at texel frequency: `pow(dot(nc, nt), 128)` and REBLUR's plane-distance / lobe-angle
+    // tests both collapse there, which shows up as strips and speckle the filter cannot remove. Shading
+    // detail still reaches the eye -- it lives in the radiance these guides accompany, not in the guide.
+    public half3  geoNormal;
     public float  hitT;        // >= 0 on hit, < 0 on miss.
     public half3  motionPrev;  // per-vertex world displacement since last frame.
     public half3  f0;          // specular F0.

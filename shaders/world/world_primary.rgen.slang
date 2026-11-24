@@ -52,6 +52,7 @@ public PathSegment tracePrimary(PathSegment seg,
         if (payload.hitT < 0.0) {
             if (bounce == 0) {
                 gv_normal = float3(0.0, 0.0, 0.0);
+                gv_normalGeo = float3(0.0, 0.0, 0.0);
                 gv_albedo = SKY_DIFF_ALBEDO;
                 gv_rough = 1.0;
                 gv_hitCamRel = rd * 1.0e6;
@@ -76,6 +77,11 @@ public PathSegment tracePrimary(PathSegment seg,
                     ? float3(payload.albedo) : float3(payload.albedo) * (1.0 - metal);
             if (bounce == 0) {
                 gv_normal = n;
+                // Denoiser guide: the face's geometric normal (see Payload.geoNormal). `n` here is the
+                // SHADING normal, which carries the material normal map and, after a parallax side-wall
+                // hit, a tangent normal -- texel-frequency detail that an edge stop cannot tell apart
+                // from geometry, so it must not reach the guide.
+                gv_normalGeo = float3(payload.geoNormal);
                 gv_hitCamRel = hitPos - worldPush.camOffset;
                 gv_motionUseRefracted = false;
                 gv_motionObjDisp = payload.motionPrev;
@@ -135,6 +141,10 @@ public PathSegment tracePrimary(PathSegment seg,
 
         if (bounce == 0) {
             gv_normal = n;
+            // Dielectrics are the exception: their `n` is the analytic wave/fresnel surface normal, not
+            // mapped detail, so the shading normal IS the geometric one (a flat block face would throw
+            // the wave shading away).
+            gv_normalGeo = n;
             gv_rough = 0.0;
             gv_albedo = float3(0.0, 0.0, 0.0);
             gv_hitCamRel = hitPos - worldPush.camOffset;

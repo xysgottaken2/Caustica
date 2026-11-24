@@ -63,6 +63,9 @@ public Payload makeRadiancePayload(uint flags, uint rayCone) {
     Payload p;
     p.albedo = half3(0.0h, 0.0h, 0.0h);
     p.normal = half3(0.0h, 0.0h, 0.0h);
+    // Zero, not `normal`: a miss writes nothing, and the guide's sky branch resets both. Every hit
+    // branch in world.rchit sets it alongside `normal`.
+    p.geoNormal = half3(0.0h, 0.0h, 0.0h);
     p.hitT = -1.0; // miss sentinel: world.rmiss writes only albedo, so a miss leaves this negative
     p.motionPrev = half3(0.0h, 0.0h, 0.0h);
     p.f0 = half3(0.0h, 0.0h, 0.0h);

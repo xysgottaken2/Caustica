@@ -76,7 +76,7 @@ public final class CausticaConfig {
             Rt.Entities.ENABLED, Rt.Entities.GLOW_ENABLED, Rt.EntityTextures.MAX_TEXTURES,
             Rt.DlssRr.ENABLED, Rt.DlssRr.PRESET, Rt.DlssRr.QUALITY, Rt.Fg.ENABLED,
             Rt.Fsr.ENABLED, Rt.Fsr.QUALITY, Rt.Xess.ENABLED, Rt.Xess.QUALITY,
-            Rt.Denoise.ENABLED, Rt.Nrd.ENABLED, Rt.Nrd.MODE, Rt.Nrd.VALIDATION,
+            Rt.Denoise.ENABLED, Rt.Nrd.ENABLED, Rt.Nrd.MODE, Rt.Nrd.VALIDATION, Rt.Nrd.VALIDATION_CELL,
             Rt.Sharc.ENABLED, Rt.Sharc.CELL_SIZE, Rt.Sharc.CACHE_ENTRIES, Rt.Sharc.UPDATE_COVERAGE,
             Rt.Sharc.TEMPORAL_BLEND, Rt.Sharc.START_BOUNCE, Rt.Sharc.STRENGTH, Rt.Sharc.MAX_DISTANCE,
             Rt.Sharc.FRAME_LIFETIME, Rt.Sharc.NORMAL_THRESHOLD, Rt.Sharc.STABLE_FRAMES, Rt.Sharc.DEBUG,
@@ -793,6 +793,11 @@ public final class CausticaConfig {
              * both must be on for the filter to run, so a machine without RR support is unaffected by
              * this toggle. Changing it re-sizes the trace targets on the next frame (see
              * {@code RtComposite.ensureOutput}).
+             *
+             * <p>The full-resolution part applies only while {@code denoiser-mode=dlss_rr}. With one
+             * of the renderer's own filters selected the trace already runs at a reduced render size
+             * and DLSS Super Resolution upscales it (see {@code RtDlssSr}), so this toggle is not what
+             * decides the resolution there.
              */
             public static final BooleanSetting DENOISER =
                     bool("caustica.rt.denoiser", "composite.denoiser", true);
@@ -1410,6 +1415,14 @@ public final class CausticaConfig {
             /** One of {@link #PRESET_VALUES}; anything else (stale config, preset A) snaps to default. */
             public static final IntSetting PRESET = new IntSetting("caustica.rt.dlssRr.preset", "dlss-rr.preset", 0,
                     v -> PRESET_VALUES.contains(v) ? v : 0);
+            /**
+             * NVSDK_NGX_PerfQuality_Value used by every NGX reconstruction pass: Ray Reconstruction
+             * while the DLSS-RR denoiser is selected, and DLSS Super Resolution for the renderer's
+             * own denoisers (SVGF / A-SVGF / NRD), which have no reconstruction of their own. One
+             * setting for both keeps the selector to a single quality slider, and NGX numbers both
+             * features with the same enum (0 Performance .. 3 Ultra Performance, 4 Ultra Quality,
+             * 5 DLAA). It also sizes the trace targets, so changing it resizes the render images.
+             */
             public static final IntSetting QUALITY = intValue("caustica.rt.dlssRr.quality", "dlss-rr.quality", 0);
 
             private DlssRr() {
@@ -1522,6 +1535,16 @@ public final class CausticaConfig {
              * temporal artifacts in-game. When on, the overlay replaces the normal image.
              */
             public static final BooleanSetting VALIDATION = bool("caustica.rt.nrdValidation", "nrd.validation", false);
+            /**
+             * Which cell of the validation grid to magnify to the whole frame; -1 keeps the grid.
+             *
+             * <p>At 1080p a cell is 480x270 and NRD's viewport labels are a few pixels tall, so the
+             * grid is close to unreadable at exactly the moment it is needed. Isolated, a cell is
+             * magnified four times and its label can be read; the intended use is "pick the viewport
+             * the bug is about and look at it full-screen".
+             */
+            public static final IntSetting VALIDATION_CELL =
+                    clampedInt("caustica.rt.nrdValidationCell", "nrd.validationCell", -1, -1, 15);
 
             private Nrd() {
             }

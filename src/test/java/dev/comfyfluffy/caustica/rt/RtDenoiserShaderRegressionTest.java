@@ -31,6 +31,10 @@ final class RtDenoiserShaderRegressionTest {
     private static final Path NRD_COMBINE = REPO_ROOT.resolve("shaders/display/nrd_combine.comp");
     private static final Path SVGF_REPROJECT = REPO_ROOT.resolve("shaders/display/svgf_reproject.comp");
     private static final Path SVGF_ATROUS = REPO_ROOT.resolve("shaders/display/svgf_atrous.comp");
+    private static final Path WORLD_COMMON = REPO_ROOT.resolve("shaders/world/world_common.slang");
+    private static final Path WORLD_RCHIT = REPO_ROOT.resolve("shaders/world/world.rchit.slang");
+    private static final Path WORLD_PRIMARY = REPO_ROOT.resolve("shaders/world/world_primary.rgen.slang");
+    private static final Path GUIDES = REPO_ROOT.resolve("shaders/world/guides.slang");
     private static final Path SHARC = REPO_ROOT.resolve("shaders/world/sharc.slang");
     private static final Path CONFIG =
             REPO_ROOT.resolve("src/main/java/dev/comfyfluffy/caustica/CausticaConfig.java");
@@ -182,6 +186,23 @@ final class RtDenoiserShaderRegressionTest {
                 "RtComposite must pass the absolute camera position and the terrain anchor");
         assertTrue(denoiser.contains("TELEPORT_JUMP_BLOCKS"),
                 "only a real teleport may drop REBLUR's history");
+    }
+
+    @Test
+    void svgfReprojectionCompensatesForTheJitterSequence() throws IOException {
+        String composite = Files.readString(
+                REPO_ROOT.resolve("src/main/java/dev/comfyfluffy/caustica/rt/RtComposite.java"));
+        String denoiser = Files.readString(SVGFDENOISER);
+        String reproject = Files.readString(SVGF_REPROJECT);
+
+        assertTrue(composite.contains("jitterX - svgfPrevJitterX, jitterY - svgfPrevJitterY"),
+                "SVGF must provide current-minus-previous jitter to the temporal gather");
+        assertTrue(denoiser.contains("push.putFloat(20, jitterDeltaX);")
+                        && denoiser.contains("push.putFloat(24, jitterDeltaY);"),
+                "the jitter delta must reach the shader push constants");
+        assertTrue(reproject.contains("vec2 jitterDelta;")
+                        && reproject.contains("+ mv + pc.jitterDelta"),
+                "history lookup must account for the previous frame's jittered sample grid");
     }
 
     /**
@@ -642,5 +663,176 @@ final class RtDenoiserShaderRegressionTest {
                 "the specular pre-pass must use the scaled radius");
         assertTrue(denoiser.contains("private static final float MIN_PREPASS_BLUR_RADIUS"),
                 "the pre-pass must never scale to zero; NRD requires it for probabilistic input");
+    }
+
+    /**
+     * NRD's SPATIAL radii are pixel radii quoted for a full-resolution render, exactly like the
+     * pre-pass ones — and they were left unscaled when the pre-pass was fixed. At the render sizes
+     * this mod traces at (1280x720 behind a quality upscale, less behind a performance one) a
+     * 30-pixel max radius is 2.3-3% of the frame width, so REBLUR's spiral taps reach across whole
+     * blocks and turn block-scale lighting differences into wide colour bands that follow the
+     * geometry. The contract is the same as the pre-pass's: scale down, never to zero.
+     */
+    @Test
+    void nrdSpatialRadiusScalesWithRenderResolution() throws Exception {
+        String denoiser = Files.readString(NRD_DENOISER);
+        assertTrue(denoiser.contains("private static float spatialRadius(float referenceRadius, int renderWidth)"),
+                "the spatial radius must be resolution-scaled too, or a small render target inflates "
+                        + "REBLUR's reach");
+        assertTrue(denoiser.contains("MIN_BLUR_RADIUS, spatialRadius(MAX_BLUR_RADIUS, renderWidth)"),
+                "the REBLUR call must pass the scaled maximum radius");
+        assertTrue(denoiser.contains("Math.max(referenceRadius * scale, MIN_BLUR_RADIUS)"),
+                "the scaled radius must keep NRD's non-zero floor");
+        // The minimum radius is a converged pixel's base radius: it stays at its pixel value, since
+        // shrinking a 1 px radius further would only add noise.
+        assertTrue(denoiser.contains("MIN_BLUR_RADIUS = 1.0f"),
+                "the minimum radius must remain the 1 px base radius");
+        assertFalse(denoiser.contains("spatialRadius(MIN_BLUR_RADIUS"),
+                "the minimum radius must not be scaled; it is already the converged base radius");
+    }
+
+    /**
+     * Debug view 14 reports how much neighbour weight the NORMAL edge-stop discards, because that
+     * stop can disable the filter completely without producing any error of its own: with
+     * phiNormal = 128, {@code pow(dot, 128)} is ~0 for any two normals more than a few degrees
+     * apart, so a guide carrying per-texel shading detail (normal map, parallax side wall) turns the
+     * cascade one-dimensional or inert. That is invisible in the output — it just leaves 1-spp noise
+     * standing in texel-aligned strips — so the only way to tell it apart from a genuine geometric
+     * edge is to paint the rejected fraction.
+     *
+     * <p>Two things about that view are easy to break silently. It must be painted in the DEGENERATE
+     * exit too (the exit a fully rejected pixel takes), or the diagnostic shows black exactly where
+     * the stop is most destructive; and its id must stay outside SHaRC's 13, which is a tracer view
+     * inside the same numeric range and must keep running with the denoiser off.
+     */
+    @Test
+    void svgfNormalStopViewIsPaintedOnBothExitsAndExcludesSharc() throws IOException {
+        String atrous = Files.readString(SVGF_ATROUS);
+        String sharc = Files.readString(SHARC);
+        String composite = Files.readString(
+                REPO_ROOT.resolve("src/main/java/dev/comfyfluffy/caustica/rt/RtComposite.java"));
+
+        assertTrue(atrous.contains("normalRejectSum += 1.0 - wn;"),
+                "the view must measure the normal weight that was actually computed");
+        assertEquals(2, countOccurrences(atrous, "pc.debugMode == 14"),
+                "view 14 must be painted on the filtered exit and the degenerate passthrough exit");
+        assertTrue(atrous.indexOf("pc.debugMode == 14")
+                        < atrous.indexOf("vec3 filtered = colorSum / weightSum;"),
+                "one of the two paintings must sit before the filtered result exists (degenerate exit)");
+
+        // The id must coexist with SHaRC's, which is numerically inside the SVGF range.
+        assertTrue(sharc.contains("SHARC_DEBUG_VIEW_ID = 13u"), "sharc.slang's view id moved");
+        assertTrue(composite.contains("private static final int SHARC_DEBUG_VIEW = 13;"),
+                "RtComposite must know SHaRC's id to keep it out of the SVGF range");
+        assertTrue(composite.contains(
+                        "return view >= SVGF_DEBUG_FIRST && view <= SVGF_DEBUG_LAST && view != SHARC_DEBUG_VIEW;"),
+                "the SVGF range must exclude SHaRC's view, or the denoiser would run under it");
+        assertTrue(composite.contains("private static final int SVGF_DEBUG_LAST = 14;"),
+                "view 14 has to be inside the range the wavelet is allowed to paint");
+    }
+
+    /**
+     * The denoiser guide must be the GEOMETRIC normal, not the shading one.
+     *
+     * <p>`world.rchit.slang` overwrites `payload.normal` with `surface.normal` (the material normal
+     * map) and then, for a parallax side-wall hit, with a *tangent* normal. Both are per-texel
+     * detail, and both filters stop working on them at texel frequency: SVGF's
+     * {@code pow(dot(nc, nt), 128)} is ~0 for any two normals a few degrees apart, and REBLUR
+     * rejects neighbours on plane distance and lobe angle. The symptom is strips and speckle the
+     * filter cannot remove — worst in shadows and reflections, where the signal has the least energy
+     * to spare — and it looks exactly like a genuine geometric edge, so it cannot be diagnosed from
+     * the output. Hence a second payload field captured before the perturbation.
+     */
+    @Test
+    void denoiserNormalGuideIsTheGeometricNormal() throws IOException {
+        String common = Files.readString(WORLD_COMMON);
+        String rchit = Files.readString(WORLD_RCHIT);
+        String rgen = Files.readString(WORLD_PRIMARY);
+        String guides = Files.readString(GUIDES);
+
+        assertTrue(common.contains("public half3  geoNormal;"),
+                "the payload must carry the geometric normal alongside the shading one");
+        // The two paths that perturb the normal must publish the CAPTURE, not what `n` became.
+        assertTrue(rchit.contains("float3 terrainGeoN = n;"),
+                "terrain must capture the face normal before the map and the wall override");
+        assertTrue(rchit.contains("payload.geoNormal = half3(terrainGeoN);"),
+                "the terrain path must publish the captured geometric normal");
+        assertTrue(rchit.contains("float3 entityGeoN = n;")
+                        && rchit.contains("payload.geoNormal = half3(entityGeoN);"),
+                "the entity path must do the same; entities carry normal maps too");
+        // Every other branch (water, glass, particles, portals, snow, glint) is unperturbed, so
+        // geo == shading there -- but the field must still be written, or those pixels would hand the
+        // denoiser an uninitialised guide.
+        assertTrue(countOccurrences(rchit, "payload.geoNormal =") >= 10,
+                "every payload.normal assignment needs a geoNormal twin: a missed branch feeds the "
+                        + "denoiser garbage");
+
+        assertTrue(Files.readString(REPO_ROOT.resolve("shaders/world/trace.slang")).contains("p.geoNormal = "),
+                "the payload factory must initialise the new field: a miss writes nothing, but the "
+                        + "struct must never be handed on with uninitialised bytes");
+        assertTrue(rgen.contains("gv_normalGeo = float3(payload.geoNormal);"),
+                "the opaque guide must come from the payload's geometric field");
+        assertTrue(rgen.contains("gv_normalGeo = n;"),
+                "dielectrics keep their analytic wave normal: that IS the surface, not mapped detail");
+        assertTrue(rgen.contains("gv_normalGeo = float3(0.0, 0.0, 0.0);"),
+                "the sky branch must reset it, like gv_normal");
+
+        assertTrue(guides.contains("gNormal[pix] = float4(gv_normalGeo, gv_rough);"),
+                "writeGuides must publish the geometric normal");
+        assertFalse(guides.contains("gNormal[pix] = float4(gv_normal, gv_rough);"),
+                "publishing the shading normal is the bug this pins");
+        // The specular guides keep the mapped detail on purpose.
+        assertTrue(guides.contains("gv_normal = normal;") && guides.contains("gv_normalGeo = normal;"),
+                "the transmission guide must set both");
+    }
+
+    /**
+     * REBLUR's validation overlay is the only instrument that can see inside NRD — accumulated frame
+     * counts per pixel, disocclusion/occlusion state, and every input. It was wired end to end (config
+     * key, language strings, validation image, dispatch flag) but never added to a GUI list, so the
+     * only way to enable it was to edit the config by hand, and it was therefore effectively
+     * unreachable while chasing exactly the temporal artefact it exists to diagnose.
+     */
+    @Test
+    void nrdValidationOverlayIsReachableFromTheDebugPage() throws IOException {
+        String options = Files.readString(
+                REPO_ROOT.resolve("src/main/java/dev/comfyfluffy/caustica/client/RtVideoOptions.java"));
+        String subScreens = Files.readString(
+                REPO_ROOT.resolve("src/main/java/dev/comfyfluffy/caustica/client/gui/RtSubScreens.java"));
+
+        assertTrue(options.contains("CausticaConfig.Rt.Nrd.VALIDATION"),
+                "the debug page must build a row for the NRD validation overlay");
+        assertTrue(options.contains("nrdValidation(),"),
+                "that row must actually be listed in debugOptions()");
+        assertTrue(subScreens.contains("CausticaConfig.Rt.Nrd.VALIDATION"),
+                "the debug sub-screen must offer the same toggle");
+    }
+
+    /**
+     * Debug view 5 must stay readable. The previous encoding, {@code 0.5 + mv * 0.05}, saturated a
+     * channel on a 10-pixel motion and already tinted at 1 pixel, so any camera movement produced "a
+     * bunch of colours" and the view could not answer the question it exists for: is the field
+     * coherent? Magnitude as brightness (black at rest) and direction as hue is what makes an
+     * incoherent field look different from a fast camera.
+     */
+    @Test
+    void motionDebugViewReportsMagnitudeAndDirection() throws IOException {
+        String guides = Files.readString(GUIDES);
+        assertTrue(guides.contains("float magnitude = clamp(length(mv) / 16.0, 0.0, 1.0);"),
+                "the motion view must encode magnitude, not a per-channel offset that saturates");
+        assertTrue(guides.contains("float direction = atan2(mv.y, mv.x);"),
+                "direction must be readable as hue");
+        assertFalse(guides.contains("0.5 + gMotion[pix] * 0.05"),
+                "the saturating encoding is gone");
+    }
+
+    private static int countOccurrences(String haystack, String needle) {
+        int count = 0;
+        int from = haystack.indexOf(needle);
+        while (from >= 0) {
+            count++;
+            from = haystack.indexOf(needle, from + needle.length());
+        }
+        return count;
     }
 }

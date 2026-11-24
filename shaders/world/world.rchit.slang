@@ -579,6 +579,7 @@ void main(inout Payload payload, in BuiltInTriangleIntersectionAttributes attr) 
             float f0Scalar = f0Base * f0Base;
             payload.albedo = half3(glassTint);
             payload.normal = half3(dn);
+            payload.geoNormal = payload.normal;
             payload.hitT = RayTCurrent();
             payload.motionPrev = half3(0.0h, 0.0h, 0.0h);
             payload.f0 = half3(float3(f0Scalar, f0Scalar, f0Scalar));
@@ -600,6 +601,7 @@ void main(inout Payload payload, in BuiltInTriangleIntersectionAttributes attr) 
             // horizon distances, with zero medium-stack interaction.
             payload.albedo = half3(dpr.tint.rgb);
             payload.normal = half3(dn);
+            payload.geoNormal = payload.normal;
             payload.hitT = RayTCurrent();
             payload.motionPrev = half3(0.0h, 0.0h, 0.0h);
             payload.f0 = half3(0.02h, 0.02h, 0.02h);
@@ -610,6 +612,7 @@ void main(inout Payload payload, in BuiltInTriangleIntersectionAttributes attr) 
 
         payload.albedo = half3(dpr.tint.rgb);
         payload.normal = half3(dn);
+        payload.geoNormal = payload.normal;
         payload.hitT = RayTCurrent();
         payload.motionPrev = half3(0.0h, 0.0h, 0.0h);
         float dhRoughness = dhMaterialRoughness(dhMaterial, dhHeader.params.x);
@@ -661,6 +664,7 @@ void main(inout Payload payload, in BuiltInTriangleIntersectionAttributes attr) 
                 : half3(srgbToLinear(particleTexel.rgb) * pr.tint.rgb);
         float weatherCoverage = clamp(asfloat(pr.aux0) * particleTexel.a, 0.0, 1.0);
         payload.normal = half3(pn);
+        payload.geoNormal = payload.normal;
         payload.hitT = RayTCurrent();
         // Per-particle motion vector: interpolate the captured per-vertex displacement (uniform across
         // the billboard's verts) with the same indices/barycentrics as the UV. dispAddr == 0 falls back
@@ -708,6 +712,9 @@ void main(inout Payload payload, in BuiltInTriangleIntersectionAttributes attr) 
         if (dot(n, vdir) < 0.0) {
             n = -n;
         }
+        // Denoiser guide normal: the entity's own face normal, before the map / wall override (see
+        // Payload.geoNormal).
+        float3 entityGeoN = n;
         // Interpolate the captured entity-texture UV (same scheme as terrain) and sample the bindless
         // per-type texture; tint.rgb is the model colour multiplier (white for most, tinted for sheep/…).
         ConstPtr<uint> eidxBuf = ConstPtr<uint>(g.idxAddr);
@@ -762,6 +769,7 @@ void main(inout Payload payload, in BuiltInTriangleIntersectionAttributes attr) 
             }
             payload.albedo = half3(portalColor);
             payload.normal = half3(n);
+            payload.geoNormal = payload.normal;
             payload.hitT = RayTCurrent();
             payload.motionPrev = half3(0.0h, 0.0h, 0.0h);
             payload.f0 = half3(0.04h, 0.04h, 0.04h);
@@ -806,6 +814,7 @@ void main(inout Payload payload, in BuiltInTriangleIntersectionAttributes attr) 
             float3 glintColor = glintRgb * pr.tint.rgb;
             payload.albedo = half3(glintColor);
             payload.normal = half3(n);
+            payload.geoNormal = payload.normal;
             payload.hitT = RayTCurrent();
             payload.motionPrev = half3(0.0h, 0.0h, 0.0h);
             payload.f0 = half3(0.04h, 0.04h, 0.04h);
@@ -844,6 +853,7 @@ void main(inout Payload payload, in BuiltInTriangleIntersectionAttributes attr) 
 
         payload.albedo = half3(albedo * surface.ao);
         payload.normal = half3(n);
+        payload.geoNormal = half3(entityGeoN);
         payload.hitT = RayTCurrent();
         // Per-vertex motion vector: interpolate the captured per-vertex displacement with the same
         // indices/barycentrics used for the UV above. Rotation and skeletal/lid animation use a
@@ -893,6 +903,7 @@ void main(inout Payload payload, in BuiltInTriangleIntersectionAttributes attr) 
         if (dot(n, -WorldRayDirection()) < 0.0) n = -n;
         payload.albedo = half3(tint);
         payload.normal = half3(n);
+        payload.geoNormal = payload.normal;
         payload.hitT = RayTCurrent();
         payload.motionPrev = half3(0.0h, 0.0h, 0.0h);
         payload.f0 = half3(0.02h, 0.02h, 0.02h);
@@ -929,6 +940,10 @@ void main(inout Payload payload, in BuiltInTriangleIntersectionAttributes attr) 
     if (dot(n, vdir) < 0.0) {
         n = -n;
     }
+    // The denoiser's guide normal: the face's own normal, saved here because everything below (the
+    // material normal map, the wetness ripple, the parallax side-wall override) replaces `n` with
+    // shading detail. See Payload.geoNormal.
+    float3 terrainGeoN = n;
 
     // Parallax Occlusion Mapping: restrict relief to the opaque geometry bucket so leaves, plants,
     // grass overlays and translucent blocks cannot shade a different texel than the one that
@@ -956,6 +971,7 @@ void main(inout Payload payload, in BuiltInTriangleIntersectionAttributes attr) 
         payload.albedo = half3(applyBreaking(glassAlbedo * glassSurface.ao,
                 rayCone, WorldRayOrigin(), WorldRayDirection(), RayTCurrent(), n));
         payload.normal = half3(n);
+        payload.geoNormal = payload.normal;
         payload.hitT = RayTCurrent();
         payload.motionPrev = half3(0.0h, 0.0h, 0.0h);
         payload.f0 = half3(glassSurface.f0);
@@ -989,6 +1005,7 @@ void main(inout Payload payload, in BuiltInTriangleIntersectionAttributes attr) 
         float swirlLum = luminance(swirl);
         payload.albedo = half3(swirl);
         payload.normal = half3(n);
+        payload.geoNormal = payload.normal;
         payload.hitT = RayTCurrent();
         payload.motionPrev = half3(0.0h, 0.0h, 0.0h);
         payload.f0 = half3(0.04h, 0.04h, 0.04h);
@@ -1008,6 +1025,7 @@ void main(inout Payload payload, in BuiltInTriangleIntersectionAttributes attr) 
         float3 nightSky = endPortalNightSky(WorldRayDirection(), portalTime, worldPush.celestial);
         payload.albedo = half3(nightSky * END_PORTAL_BRIGHTNESS);
         payload.normal = half3(n);
+        payload.geoNormal = payload.normal;
         payload.hitT = RayTCurrent();
         payload.motionPrev = half3(0.0h, 0.0h, 0.0h);
         // No specular response: the portal is a pure self-lit surface, so it can never reflect a
@@ -1106,6 +1124,7 @@ void main(inout Payload payload, in BuiltInTriangleIntersectionAttributes attr) 
         n = terrainParallax.normal;
     }
     payload.normal = half3(n);
+    payload.geoNormal = half3(terrainGeoN);
     payload.f0 = half3(surface.f0);
     payloadSetPacked(payload, MATERIAL_OPAQUE, surface.roughness, surface.metalness,
             surface.emission, surface.sss, materialHeader.params.z, materialHeader.params.w,

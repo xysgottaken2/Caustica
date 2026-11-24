@@ -11,7 +11,7 @@ import world_common;
 // Guide buffers — first-hit (primary-visibility) attributes consumed by the denoiser/DLSS-RR. Written
 // every frame regardless of accumulation. gNormal.w carries LINEAR roughness (= GGX alpha, which is what
 // DLSS-RR documents for this input); gDepth carries HW reversed-Z depth.
-[[vk::binding(3, 0)]] [format("rgba16f")] public RWTexture2D<float4> gNormal;     // xyz world normal, w linear roughness
+[[vk::binding(3, 0)]] [format("rgba16f")] public RWTexture2D<float4> gNormal;     // xyz GEOMETRIC world normal (denoiser guide), w linear roughness
 [[vk::binding(4, 0)]] [format("rgba16f")] public RWTexture2D<float4> gAlbedo;     // rgb diffuse albedo
 [[vk::binding(5, 0)]] [format("r32f")]    public RWTexture2D<float>  gDepth;      // HW reversed-Z depth
 [[vk::binding(6, 0)]] [format("rg16f")]   public RWTexture2D<float2> gMotion;     // screen-space motion (render px)
