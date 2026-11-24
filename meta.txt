@@ -1,0 +1,6 @@
+run=45470333056 job=package ref=32/merge sha=55f3a42829e6211623ff660ad46bb45d2d552c91
+workflow=CI event=pull_request
+--- errors ---
+4:Attempt 1/1 failed. Reason: Downloading from https://services.gradle.org/distributions/gradle-9.7.0-bin.zip failed: timeout (30000ms)
+5:Exception in thread "main" java.io.IOException: Downloading from https://services.gradle.org/distributions/gradle-9.7.0-bin.zip failed: timeout (30000ms)
+12:Caused by: java.net.SocketTimeoutException: Read timed out
