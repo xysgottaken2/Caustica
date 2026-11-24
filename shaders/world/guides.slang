@@ -371,8 +371,8 @@ public void writeDebugView(int2 pix) {
         // one (wrong per-pixel motion, or a cutout/thin-geometry mismatch) reads as noise.
         float2 mv = gMotion[pix];
         float magnitude = clamp(length(mv) / 16.0, 0.0, 1.0);
-        float direction = atan(mv.y, mv.x); // y runs down here, exactly like the MV itself
-        dbg = (0.5 + 0.5 * cos(direction + vec3(0.0, 2.0944, 4.1888))) * magnitude;
+        float direction = atan2(mv.y, mv.x); // y runs down here, exactly like the MV itself
+        dbg = (0.5 + 0.5 * cos(direction + float3(0.0, 2.0944, 4.1888))) * magnitude;
     }
     outImage[pix] = float4(dbg, 1.0);
 }

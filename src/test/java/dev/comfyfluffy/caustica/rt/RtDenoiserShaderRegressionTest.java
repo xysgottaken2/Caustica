@@ -820,7 +820,7 @@ final class RtDenoiserShaderRegressionTest {
         String guides = Files.readString(GUIDES);
         assertTrue(guides.contains("float magnitude = clamp(length(mv) / 16.0, 0.0, 1.0);"),
                 "the motion view must encode magnitude, not a per-channel offset that saturates");
-        assertTrue(guides.contains("float direction = atan(mv.y, mv.x);"),
+        assertTrue(guides.contains("float direction = atan2(mv.y, mv.x);"),
                 "direction must be readable as hue");
         assertFalse(guides.contains("0.5 + gMotion[pix] * 0.05"),
                 "the saturating encoding is gone");
