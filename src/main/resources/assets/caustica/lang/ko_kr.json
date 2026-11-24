@@ -147,6 +147,8 @@
 	"caustica.options.rt.nrd.tooltip": "NVIDIA Real-time Denoisers(REBLUR): 복조된 로브별 radiance에서 확산과 반사를 따로 처리하며, 히트 거리 기반 커널과 NVIDIA의 안티랙·안티파이어플라이·시간적 안정화를 함께 적용합니다. 반사는 보통 내장 노이즈 제거기보다 깨끗하지만 GPU 부담이 큽니다. 켜져 있는 동안 내장 노이즈 제거기를 대체하며, FSR 3 / XeSS 또는 업스케일러 없음과 함께 사용하세요.",
 	"caustica.options.rt.nrdValidation": "NRD 검증 오버레이",
 	"caustica.options.rt.nrdValidation.tooltip": "REBLUR의 진단 오버레이(디버그): 화면을 NRD의 16분할 격자로 대체합니다 — 입력, 픽셀별 누적 프레임 수, 디오클루전/오클루전 상태. 시간적 아티팩트 디버깅용이며, 업스케일러를 끄면 더 또렷하게 볼 수 있습니다.",
+	"caustica.options.rt.nrdValidationCell": "NRD 검증: 단일 셀",
+	"caustica.options.rt.nrdValidationCell.tooltip": "-1은 4x4 격자 전체, 0-15는 한 셀을 전체 화면으로 확대합니다(니어리스트 필터). 셀은 행 순서입니다: 0 노멀, 1 러프니스, 2 깊이, 3 모션, 4 월드 단위/지터, 7 가상 히스토리, 8 디퓨즈 프레임, 11 스페큘러 프레임, 12 디퓨즈 히트 거리, 15 스페큘러 히트 거리. 업스케일러는 Off여야 합니다.",
 	"caustica.options.rt.frameGeneration": "프레임 생성 (실험적)",
 	"caustica.options.rt.frameGeneration.tooltip": "DLSS Frame Generation이 중간 프레임을 합성하여 체감 프레임률을 높입니다. 실험적 기능으로, 지연이 증가하거나 아티팩트가 생길 수 있습니다. DLSS 업스케일러와 NVIDIA GeForce RTX 40/50 시리즈 GPU가 필요합니다.",
 	"caustica.options.rt.frameGeneration.unsupported.tooltip": "이 GPU에서는 사용할 수 없습니다: DLSS Frame Generation은 NVIDIA GeForce RTX 40/50 시리즈 그래픽 카드가 필요합니다. NGX가 활성화되어 있으면 드라이버의 NGX 기능 쿼리로, 그 외에는 GPU 이름으로 지원 여부를 판단합니다.",

@@ -147,6 +147,8 @@
 	"caustica.options.rt.nrd.tooltip": "NVIDIA Real-time Denoisers（REBLUR）：以解調後的分瓣輻射亮度分別對漫反射與鏡面反射降噪，採用命中距離驅動的卷積核，並包含 NVIDIA 的抗延遲、抗螢火蟲與時間穩定化。反射通常比內建降噪器更乾淨，但更耗 GPU。啟用期間會取代內建降噪器；可搭配 FSR 3 / XeSS 或不使用升頻。",
 	"caustica.options.rt.nrdValidation": "NRD 驗證疊加層",
 	"caustica.options.rt.nrdValidation.tooltip": "REBLUR 的診斷疊加層（除錯）：將畫面換成 NRD 的 16 宮格 — 輸入、每像素累積影格數、去遮蔽/遮蔽狀態。用於除錯時間性瑕疵；把升頻設為關閉可看得更清楚。",
+	"caustica.options.rt.nrdValidationCell": "NRD 驗證：單格",
+	"caustica.options.rt.nrdValidationCell.tooltip": "-1 顯示完整 4x4 網格；0-15 將單一格放大到全螢幕（最近鄰濾波）。格子依列排序：0 法線、1 粗糙度、2 深度、3 運動、4 世界單位/抖動、7 虛擬歷史、8 漫反射影格數、11 高光影格數、12 漫反射命中距離、15 高光命中距離。需要把超解析度關閉。",
 	"caustica.options.rt.frameGeneration": "幀生成（實驗性）",
 	"caustica.options.rt.frameGeneration.tooltip": "DLSS 幀生成會合成中間幀，以倍增感知幀率。實驗性功能：可能增加延遲或產生偽影。需要 DLSS 超解析度以及 NVIDIA GeForce RTX 40 或 50 系列 GPU。",
 	"caustica.options.rt.frameGeneration.unsupported.tooltip": "此 GPU 無法使用：DLSS 幀生成需要 NVIDIA GeForce RTX 40 或 50 系列顯示卡。支援狀態在 NGX 啟用時來自驅動程式的 NGX 能力查詢，否則依 GPU 名稱判斷。",

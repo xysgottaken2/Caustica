@@ -65,6 +65,7 @@ import dev.comfyfluffy.caustica.rt.material.RtBlockMaterials;
 import dev.comfyfluffy.caustica.rt.material.RtEmissionSemantics;
 import dev.comfyfluffy.caustica.rt.material.RtMaterialOverrides;
 import dev.comfyfluffy.caustica.rt.material.RtMaterialRegistry;
+import dev.comfyfluffy.caustica.rt.pipeline.NrdValidationGrid;
 import dev.comfyfluffy.caustica.rt.pipeline.RtBloomPipeline;
 import dev.comfyfluffy.caustica.rt.pipeline.RtDisplayPipeline;
 import dev.comfyfluffy.caustica.rt.pipeline.RtDofPipeline;
@@ -2337,7 +2338,12 @@ public final class RtComposite {
                 VulkanCommandEncoder.memoryBarrier(cmd, stack);
                 try (RtDebugLabels.Scope ignored = RtDebugLabels.scope(ctx, cmd, "fallback upscale");
                      RtFrameStats.Scope ignoredStats = RtFrameStats.FRAME.stage("frame.upscale")) {
-                    blitUpscale(cmd, stack, upscaleSource, rrOutput);
+                    int validationCell = CausticaConfig.Rt.Nrd.VALIDATION_CELL.value();
+                    if (nrdValidationOn && validationCell != NrdValidationGrid.WHOLE_GRID) {
+                        blitValidationCell(cmd, stack, upscaleSource, rrOutput, validationCell);
+                    } else {
+                        blitUpscale(cmd, stack, upscaleSource, rrOutput);
+                    }
                 }
             }
             VulkanCommandEncoder.memoryBarrier(cmd, stack); // rrOutput visible to exposure histogram
@@ -3550,6 +3556,26 @@ public final class RtComposite {
         region.get(0).dstOffsets(1).set(dst.width, dst.height, 1);
         VK10.vkCmdBlitImage(cmd, src.image, VK10.VK_IMAGE_LAYOUT_GENERAL,
                 dst.image, VK10.VK_IMAGE_LAYOUT_GENERAL, region, VK10.VK_FILTER_LINEAR);
+    }
+
+    /**
+     * Blit one cell of NRD's 4x4 validation grid up to the whole frame, nearest-filtered.
+     *
+     * <p>Nearest, not linear: the point of isolating a cell is to read the viewport's label and see
+     * individual pixels, and filtering would smear both. The magnification is exactly the grid's own
+     * 4x, so the label stops being a few pixels tall.
+     */
+    private static void blitValidationCell(VkCommandBuffer cmd, MemoryStack stack, RtImage src, RtImage dst,
+                                           int cell) {
+        int[] rect = NrdValidationGrid.cellRect(cell, src.width, src.height);
+        VkImageBlit.Buffer region = VkImageBlit.calloc(1, stack);
+        region.get(0).srcSubresource().aspectMask(VK10.VK_IMAGE_ASPECT_COLOR_BIT).mipLevel(0).baseArrayLayer(0).layerCount(1);
+        region.get(0).dstSubresource().aspectMask(VK10.VK_IMAGE_ASPECT_COLOR_BIT).mipLevel(0).baseArrayLayer(0).layerCount(1);
+        region.get(0).srcOffsets(0).set(rect[0], rect[1], 0);
+        region.get(0).srcOffsets(1).set(rect[0] + rect[2], rect[1] + rect[3], 1);
+        region.get(0).dstOffsets(1).set(dst.width, dst.height, 1);
+        VK10.vkCmdBlitImage(cmd, src.image, VK10.VK_IMAGE_LAYOUT_GENERAL,
+                dst.image, VK10.VK_IMAGE_LAYOUT_GENERAL, region, VK10.VK_FILTER_NEAREST);
     }
 
     /**

@@ -13,6 +13,7 @@ import dev.comfyfluffy.caustica.client.gui.RtSharcOptionsScreen;
 import dev.comfyfluffy.caustica.compat.DistantHorizonsCompat;
 import dev.comfyfluffy.caustica.compat.VoxyCompat;
 import dev.comfyfluffy.caustica.rt.RtSharc;
+import dev.comfyfluffy.caustica.rt.pipeline.NrdValidationGrid;
 import dev.comfyfluffy.caustica.rt.terrain.RtDistantHorizonsTerrain;
 import dev.comfyfluffy.caustica.rt.terrain.RtTerrain;
 import net.minecraft.client.Minecraft;
@@ -325,6 +326,7 @@ public final class RtVideoOptions {
         return new OptionInstance<?>[] {
             debugView(),
             nrdValidation(),
+            nrdValidationCell(),
             frameStats(),
             ommStats(),
             lightStats(),
@@ -757,6 +759,18 @@ public final class RtVideoOptions {
      */
     private static OptionInstance<Boolean> nrdValidation() {
         return bool("caustica.options.rt.nrdValidation", CausticaConfig.Rt.Nrd.VALIDATION);
+    }
+
+    /**
+     * Which cell of the validation grid to magnify to the whole frame (-1 = the whole grid).
+     *
+     * <p>NRD's own labels are a few pixels tall inside a quarter-screen cell, which is why reading
+     * the grid from a screenshot turned into guesswork. Isolating a cell magnifies it 4x.
+     */
+    private static OptionInstance<Integer> nrdValidationCell() {
+        return intSlider("caustica.options.rt.nrdValidationCell",
+                CausticaConfig.Rt.Nrd.VALIDATION_CELL,
+                NrdValidationGrid.WHOLE_GRID, NrdValidationGrid.CELLS - 1);
     }
 
     private static OptionInstance<Boolean> ommStats() {

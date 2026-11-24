@@ -198,6 +198,18 @@ top-left corner:
 Tiles 5, 6, 9, 10, 13 and 14 are unused and stay black. RELAX ships its own variant with a
 different tile set, so the labels — not a remembered layout — are what to read.
 
+Reading a grid whose labels are a few pixels tall is guesswork, and a guessed viewport sends the
+investigation to the wrong tile. **NRD Validation: Single Cell** (`nrd.validationCell`) therefore
+magnifies one cell to the whole frame — nearest-filtered, so individual pixels and the label stay
+legible at 4x. `-1` keeps the grid; `0`-`15` pick the cell, row-major exactly as NRD indexes them
+(`NrdValidationGrid` holds that mapping and its tests pin it). The usual sequence is: spot something
+suspicious in the grid, isolate that cell, then read it at full size.
+
+One caveat that bites during diagnosis: the history length is derived from a target accumulation
+time, so at 15 fps the denoiser legitimately has fewer frames than at 60, and at 2 fps the frame
+counts in the overlay mean very little. Judge frames-coloured tiles only once the overlay itself
+runs at a playable frame rate.
+
 ### What the NRD path is fed
 
 REBLUR's inputs match NRD v4.17.3's contract: `IN_MV` is non-jittered

@@ -472,6 +472,7 @@ public final class RtSubScreens {
         return List.of(
                 CausticaConfig.Rt.Composite.DEBUG_VIEW,
                 CausticaConfig.Rt.Nrd.VALIDATION,
+                CausticaConfig.Rt.Nrd.VALIDATION_CELL,
                 CausticaConfig.Rt.FrameStats.ENABLED,
                 CausticaConfig.Rt.Omm.STATS,
                 CausticaConfig.Rt.Lights.STATS,
