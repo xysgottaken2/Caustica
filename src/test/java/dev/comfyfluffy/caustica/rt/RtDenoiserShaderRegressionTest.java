@@ -786,6 +786,46 @@ final class RtDenoiserShaderRegressionTest {
                 "the transmission guide must set both");
     }
 
+    /**
+     * REBLUR's validation overlay is the only instrument that can see inside NRD — accumulated frame
+     * counts per pixel, disocclusion/occlusion state, and every input. It was wired end to end (config
+     * key, language strings, validation image, dispatch flag) but never added to a GUI list, so the
+     * only way to enable it was to edit the config by hand, and it was therefore effectively
+     * unreachable while chasing exactly the temporal artefact it exists to diagnose.
+     */
+    @Test
+    void nrdValidationOverlayIsReachableFromTheDebugPage() throws IOException {
+        String options = Files.readString(
+                REPO_ROOT.resolve("src/main/java/dev/comfyfluffy/caustica/client/RtVideoOptions.java"));
+        String subScreens = Files.readString(
+                REPO_ROOT.resolve("src/main/java/dev/comfyfluffy/caustica/client/gui/RtSubScreens.java"));
+
+        assertTrue(options.contains("CausticaConfig.Rt.Nrd.VALIDATION"),
+                "the debug page must build a row for the NRD validation overlay");
+        assertTrue(options.contains("nrdValidation(),"),
+                "that row must actually be listed in debugOptions()");
+        assertTrue(subScreens.contains("CausticaConfig.Rt.Nrd.VALIDATION"),
+                "the debug sub-screen must offer the same toggle");
+    }
+
+    /**
+     * Debug view 5 must stay readable. The previous encoding, {@code 0.5 + mv * 0.05}, saturated a
+     * channel on a 10-pixel motion and already tinted at 1 pixel, so any camera movement produced "a
+     * bunch of colours" and the view could not answer the question it exists for: is the field
+     * coherent? Magnitude as brightness (black at rest) and direction as hue is what makes an
+     * incoherent field look different from a fast camera.
+     */
+    @Test
+    void motionDebugViewReportsMagnitudeAndDirection() throws IOException {
+        String guides = Files.readString(GUIDES);
+        assertTrue(guides.contains("float magnitude = clamp(length(mv) / 16.0, 0.0, 1.0);"),
+                "the motion view must encode magnitude, not a per-channel offset that saturates");
+        assertTrue(guides.contains("float direction = atan(mv.y, mv.x);"),
+                "direction must be readable as hue");
+        assertFalse(guides.contains("0.5 + gMotion[pix] * 0.05"),
+                "the saturating encoding is gone");
+    }
+
     private static int countOccurrences(String haystack, String needle) {
         int count = 0;
         int from = haystack.indexOf(needle);

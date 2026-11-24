@@ -361,7 +361,18 @@ public void writeDebugView(int2 pix) {
     } else if (pc.debugView == 7u) {
         dbg = float3(clamp(0.5 + gSpecMotion[pix] * 0.05, 0.0, 1.0), 0.5);
     } else {
-        dbg = float3(clamp(0.5 + gMotion[pix] * 0.05, 0.0, 1.0), 0.5);
+        // View 5: the motion vectors this frame's history reprojection used.
+        //
+        // The old encoding was `0.5 + mv * 0.05`, i.e. a 1-pixel motion already moved a channel by 0.05
+        // and a 10-pixel motion saturated it -- so any camera movement at all painted "a bunch of
+        // colours" and the view could not answer the only question worth asking: is the field COHERENT?
+        // Now brightness is the magnitude (black at rest, which is unambiguous) and hue is the
+        // direction, so a correct field reads as a smooth gradient across a surface, and an incoherent
+        // one (wrong per-pixel motion, or a cutout/thin-geometry mismatch) reads as noise.
+        float2 mv = gMotion[pix];
+        float magnitude = clamp(length(mv) / 16.0, 0.0, 1.0);
+        float direction = atan(mv.y, mv.x); // y runs down here, exactly like the MV itself
+        dbg = (0.5 + 0.5 * cos(direction + vec3(0.0, 2.0944, 4.1888))) * magnitude;
     }
     outImage[pix] = float4(dbg, 1.0);
 }

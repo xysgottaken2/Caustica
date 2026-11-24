@@ -324,6 +324,7 @@ public final class RtVideoOptions {
     public static OptionInstance<?>[] debugOptions() {
         return new OptionInstance<?>[] {
             debugView(),
+            nrdValidation(),
             frameStats(),
             ommStats(),
             lightStats(),
@@ -742,6 +743,20 @@ public final class RtVideoOptions {
 
     private static OptionInstance<Boolean> frameStats() {
         return bool("caustica.options.rt.frameStats", CausticaConfig.Rt.FrameStats.ENABLED);
+    }
+
+    /**
+     * NRD's own 16-viewport validation overlay.
+     *
+     * <p>This was wired end to end when the integration landed — config key, language strings, the
+     * validation image, the dispatch flag — but never given a GUI row, so the only way to switch it on
+     * was to edit the config file by hand. That made the one diagnostic that can see INSIDE REBLUR
+     * (per-pixel accumulated frame counts, disocclusion and occlusion state, and every input) unusable
+     * exactly when it was needed. Set the upscaler to Off for a crisp readout: the overlay replaces the
+     * frame, and an upscaler would filter it.
+     */
+    private static OptionInstance<Boolean> nrdValidation() {
+        return bool("caustica.options.rt.nrdValidation", CausticaConfig.Rt.Nrd.VALIDATION);
     }
 
     private static OptionInstance<Boolean> ommStats() {

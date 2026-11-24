@@ -167,6 +167,18 @@ look exactly like a genuine geometric edge in the output. White in view 14 means
 tap at that pixel was rejected, so no amount of tuning the luminance stop can help: the
 guide itself is the problem. 13 is SHaRC's cache overlay, not a denoiser view.
 
+Debug view 5 is the motion-vector readout the temporal stages reproject with: brightness is
+the magnitude (black at rest) and hue is the direction, so a correct field is a smooth
+gradient across a surface while an incoherent one is noise. Read it as "does the motion
+agree with the geometry" — a wrong field shows up as speckle at rest or as structure that
+does not follow the surfaces while moving.
+
+For the NRD path the equivalent is **NRD Validation Overlay** in the Debug page, which
+replaces the frame with NRD's own 16-viewport grid: inputs, per-pixel accumulated frame
+counts, disocclusion and occlusion state. It is the only view that can distinguish "history
+is being rejected" from "the signal arriving is wrong", and it needs the upscaler off so
+the grid is not filtered.
+
 ### What the NRD path is fed
 
 REBLUR's inputs match NRD v4.17.3's contract: `IN_MV` is non-jittered

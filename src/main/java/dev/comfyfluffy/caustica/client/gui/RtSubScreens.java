@@ -471,6 +471,7 @@ public final class RtSubScreens {
     private static List<CausticaConfig.RuntimeSetting<?>> debugSettings() {
         return List.of(
                 CausticaConfig.Rt.Composite.DEBUG_VIEW,
+                CausticaConfig.Rt.Nrd.VALIDATION,
                 CausticaConfig.Rt.FrameStats.ENABLED,
                 CausticaConfig.Rt.Omm.STATS,
                 CausticaConfig.Rt.Lights.STATS,
