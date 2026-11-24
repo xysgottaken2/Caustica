@@ -174,10 +174,29 @@ agree with the geometry" — a wrong field shows up as speckle at rest or as str
 does not follow the surfaces while moving.
 
 For the NRD path the equivalent is **NRD Validation Overlay** in the Debug page, which
-replaces the frame with NRD's own 16-viewport grid: inputs, per-pixel accumulated frame
-counts, disocclusion and occlusion state. It is the only view that can distinguish "history
-is being rejected" from "the signal arriving is wrong", and it needs the upscaler off so
-the grid is not filtered.
+replaces the frame with NRD's own 4x4 validation grid (`OUT_VALIDATION`, written by
+`REBLUR_Validation.cs.hlsl`). It is the only view that can distinguish "history is being
+rejected" from "the signal arriving is wrong", and it needs the upscaler off so the grid is
+not filtered. The frame after any history reset is entirely black, which is normal.
+
+Tiles are numbered row-major, top-left to bottom-right, each with its label drawn in the
+top-left corner:
+
+| # | Tile | Reading it |
+|---|------|------------|
+| 0 | NORMALS | World normal as RGB (`n * 0.5 + 0.5`). Should follow the surface, flat across a wall. |
+| 1 | ROUGHNESS | Linear roughness as grey. |
+| 2 | Z | View depth, green (positive) / blue (negative), brightness compresses with distance. Red is *outside* `denoisingRange` — the pixel is not denoised at all. |
+| 3 | MV | The motion-vector validator: red is `\|mv reprojection − geometric reprojection\|` in render pixels, computed by reprojecting the reconstructed world position through `worldToClipPrev`. Blue means the reprojection left the screen. Near-black everywhere is correct (a sub-pixel residue from jitter is expected); structure *outlining the surfaces that misbehave* means the motion field is wrong there. |
+| 4 | UNITS & JITTER | `frac(worldPosition)` as a lattice, top-right the jitter offset, bottom-right the rotator directions. The lattice must stick to the world while the camera moves; if it swims, positions and reprojection disagree. |
+| 7 | VIRTUAL HISTORY | Specular virtual history accumulation, black on the first frames. |
+| 8 | DIFF FRAMES | Colourised accumulated diffuse frame count; red is one frame (fresh), dark is converged. Red or speckled red/yellow over a *static* surface is history being discarded there. |
+| 11 | SPEC FRAMES | The same for specular — the tile to read when reflections are noisy. |
+| 12 | DIFF HITT | Normalised diffuse hit distance. Red is exactly zero, i.e. *no data*; magenta is outside `[0, 1]`, a contract violation. |
+| 15 | SPEC HITT | The same for specular. |
+
+Tiles 5, 6, 9, 10, 13 and 14 are unused and stay black. RELAX ships its own variant with a
+different tile set, so the labels — not a remembered layout — are what to read.
 
 ### What the NRD path is fed
 
